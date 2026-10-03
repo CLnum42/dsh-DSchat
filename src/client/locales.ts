@@ -152,6 +152,8 @@ export interface DSchatDict {
   'toast.thinkingCopied': string
   'toast.codeCopied': string
   'toast.send.failed': string
+  'toast.wake.failed': string
+  'toast.send.needLogin': string
   'toast.attach.failed': string
   'toast.attach.tooBig': string
   'toast.attach.tooMany': string
@@ -329,6 +331,8 @@ export const zh: DSchatDict = {
 
   'toast.copied': '已复制',
   'toast.send.failed': '发送失败：{error}',
+  'toast.wake.failed': '启动网页端失败：{error}',
+  'toast.send.needLogin': '还没有登录 DeepSeek 网页端：在弹出的窗口里完成登录后，消息就能发出去了（内容已保留）。',
   'toast.thinkingCopied': '已复制思考过程',
   'toast.codeCopied': '已复制代码块',
   'toast.attach.failed': '添加文件失败：{error}',
@@ -508,6 +512,8 @@ export const en: DSchatDict = {
 
   'toast.copied': 'Copied',
   'toast.send.failed': 'Could not send: {error}',
+  'toast.wake.failed': 'Could not start the web engine: {error}',
+  'toast.send.needLogin': 'Not signed in to DeepSeek web yet: finish signing in in the window that just opened and the message can go out (your text is kept).',
   'toast.thinkingCopied': 'Thinking process copied',
   'toast.codeCopied': 'Code copied',
   'toast.attach.failed': 'Could not attach the file: {error}',
