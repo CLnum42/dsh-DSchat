@@ -210,7 +210,7 @@ test('switching to a new chat leaves no message node behind (real browser)', asy
             state = { ...state, chats: [fresh, ...state.chats], activeChatId: 'chat-new' }
             return ok({ chatId: 'chat-new' })
           },
-          send: pending, stop: pending, openLogin: pending, closeBrowser: pending,
+          send: pending, stop: pending, wake: pending, openLogin: pending, closeBrowser: pending,
           setDeepThink: pending, setSearch: pending, transfer: pending, exportFile: pending,
           renameChat: pending, deleteChat: pending, clearChats: pending, webChats: pending,
           recover: pending, restore: pending, attach: pending,
