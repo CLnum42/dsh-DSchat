@@ -65,6 +65,7 @@ function stubApi() {
     send: () => never,
     stop: () => never,
     newChat: () => never,
+    wake: () => never,
     openLogin: () => never,
     closeBrowser: () => never,
     setDeepThink: () => never,
@@ -116,18 +117,19 @@ test('DSchatPanel renders its initial screen', async () => {
 /**
  * The composer's tool row, asserted on real markup rather than on the source.
  *
- * Three controls, in the order the reader uses them: 深度思考, 智能搜索, and then
- * 附件 — the two mode pills describe what the message will ask for, and the
- * attach button describes what it will carry, so it trails them instead of
- * leading the row (where it used to sit, ahead of the pills, next to a
- * paperclip that did the same job twice).
+ * Three controls in two groups, in the order the reader uses them: 深度思考 and
+ * 智能搜索 on the left, then the spacer, then 附件 immediately left of the send
+ * circle. The pills describe what the message will ask for; 附件 and 发送 both
+ * act on it now, so they sit together on the right — the grouping
+ * chat.deepseek.com's own composer uses (its paperclip is the send button's
+ * left-hand neighbour).
  *
  * 「上传文件」 is a bare glyph now, matching chat.deepseek.com's own composer, so
  * the words live on the accessible name rather than in the row. The assertion
  * reads them from there: a control whose label only exists in a tooltip is
  * invisible to a screen reader, and that is the failure this guards.
  */
-test('the composer carries 深度思考, 智能搜索 and 附件 in that order', async () => {
+test('the composer groups 深度思考 + 智能搜索 on the left, 附件 + 发送 on the right', async () => {
   const { DSchatPanel, renderToStaticMarkup, createElement, dir } = await loadComponents()
   try {
     const html = renderToStaticMarkup(createElement(DSchatPanel, deps as never))
@@ -139,10 +141,16 @@ test('the composer carries 深度思考, 智能搜索 and 附件 in that order',
 
     const think = composer.indexOf('toggle.deepThink')
     const search = composer.indexOf('toggle.search')
+    const spacer = composer.indexOf('dsh-dschat-spacer')
     const upload = composer.indexOf('composer.upload')
+    const send = composer.indexOf('dsh-dschat-send')
     assert.ok(think > -1 && search > -1 && upload > -1, 'all three controls are in the tool row')
     assert.ok(think < search, '深度思考 comes before 智能搜索')
-    assert.ok(search < upload, '附件 sits to the RIGHT of both pills')
+    assert.ok(spacer > search, 'the spacer separates the two groups')
+    assert.ok(spacer < upload, '附件 is on the RIGHT of the spacer, with the send control')
+    assert.ok(upload < send, 'and immediately LEFT of 发送, where the page puts its paperclip')
+    // The hidden Finder input travels with the button it belongs to.
+    assert.ok(composer.indexOf('dsh-dschat-fileinput') > spacer, 'the file input moved with it')
     assert.match(composer, /dsh-dschat-attach/, 'the attach control is the official glyph button')
     assert.match(composer, /aria-label="composer\.upload"/, 'and it still names itself for assistive tech')
     // The two pills wear the web app's own artwork, not a bolt and a globe.
@@ -156,6 +164,57 @@ test('the composer carries 深度思考, 智能搜索 and 附件 in that order',
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/**
+ * One click, one browser.
+ *
+ * Reported: clicking the offline composer started a browser, and typing then
+ * started a SECOND one before the conversation worked. The click went to
+ * `openLogin` (a headed, always-relaunching window) while the send path went to
+ * `ensureBrowser` — two different browsers for one intention.
+ *
+ * These assertions pin the shape of the fix: focus wakes the engine, and the
+ * visible login window is reached only as the wake's escalation. It is a source
+ * assertion rather than a rendered one because static rendering never runs a
+ * handler; the behaviour behind it is covered against the engine in
+ * host-smoke.test.ts ("the first wake on an empty profile...", "one launch
+ * serves every concurrent caller").
+ */
+test('the composer wakes the engine instead of forcing a login window', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+
+  const input = panel.indexOf("className: 'dsh-dschat-input'")
+  const focus = panel.slice(input, panel.indexOf('onChange:', input))
+  assert.ok(/void ensureReady\(\)/.test(focus), 'focusing the composer wakes the engine')
+  assert.equal(
+    /openLogin\(\)/.test(focus), false,
+    'focus must not go straight to the visible login window — that is the relaunch that made one click cost two browsers',
+  )
+
+  const ready = panel.slice(panel.indexOf('const ensureReady'), panel.indexOf('const retry'))
+  assert.ok(ready.includes('api.wake()'), 'the wake is the first request')
+  assert.ok(
+    ready.indexOf('api.wake()') < ready.indexOf('api.openLogin()'),
+    'and the login window is the escalation, not the opening move',
+  )
+  assert.ok(
+    /woken\.loginWindow !== true/.test(ready),
+    'a wake that already opened the login window must not be asked for a second one',
+  )
+  // The panel must also relay the wake's failure instead of silently doing nothing.
+  assert.ok(ready.includes('toast.wake.failed'), 'a failed wake is reported')
+  // ...and it must survive meeting a host that has no /wake route at all: the
+  // browser half is reloaded on its own (a page refresh) while the host half
+  // waits for a Harness restart, so the 404 pairing is a real state.
+  assert.ok(/HTTP 404/.test(ready), 'a host without /wake falls back instead of breaking the composer')
+
+  // Enter on a composer whose engine is down wakes it rather than dropping the
+  // message: the reader pressed Enter, which is an unambiguous intent.
+  const send = panel.slice(panel.indexOf('const send = useCallback'), panel.indexOf('const stop = useCallback'))
+  assert.ok(/await ensureReady\(\)/.test(send), 'send wakes a down engine first')
+  assert.ok(send.includes('toast.send.needLogin'), 'and says so when nobody is signed in')
 })
 
 /**
