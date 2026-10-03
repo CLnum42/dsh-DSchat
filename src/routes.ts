@@ -443,12 +443,35 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       },
     },
     {
+      /**
+       * "I want to type": bring the page up in the right mode.
+       *
+       * The panel calls this from the composer's focus, from the online/offline
+       * placeholder click and before a send that arrives while the engine is
+       * down. It answers `loginWindow: true` when a visible window is waiting
+       * for the user, which is the panel's cue NOT to ask for one as well.
+       *
+       * Deliberately not the same route as `open-login`: that one is the
+       * explicit 「打开登录窗口」 action and the escalation. Collapsing the two is
+       * what made a click open a login window that was almost never needed (the
+       * profile is usually still authenticated) and then launch a second browser
+       * for the actual chat.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/wake',
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        const result = await engine.wake()
+        writeJson(res, result.ok ? 200 : 500, result)
+      },
+    },
+    {
       kind: 'exact',
       path: '/api/dsh-dschat/open-login',
       handler: async (req, res) => {
         if (!guard(req, res)) return
         const result = await engine.openLoginWindow()
-        writeJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.error })
+        writeJson(res, result.ok ? 200 : 500, result)
       },
     },
     {
