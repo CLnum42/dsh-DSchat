@@ -1,0 +1,1077 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dsh-DSchat · UI 原型</title>
+<!--
+  dsh-DSchat UI prototype.
+
+  Static, dependency-free mock of the panel that will be registered into the DeepSeek
+  Harness desktop shell through the official slots:
+    - sidebar.panellist  (id: dschat, order: 20) -> the sidebar nav row on the left
+    - main                (key: dschat)          -> the whole center panel on the right
+    - settings.section    (id: dschat)           -> not shown here
+
+  The sidebar chrome is rendered with DSH's OWN stylesheet (refs/sidebar.css, class
+  prefix _3WPZCG_) and every colour comes from DSH's OWN token sheet
+  (refs/dsh-tokens.css), so what you see is what the real panel will look like in both
+  light and dark themes.
+-->
+<link rel="stylesheet" href="../refs/dsh-tokens.css">
+<link rel="stylesheet" href="../refs/sidebar.css">
+<style>
+/* ============================================================ base + harness */
+:root{
+  --dsw-radius-sm:8px; --dsw-radius-md:12px; --dsw-radius-lg:16px;
+  --dsw-radius-xl:20px; --dsw-radius-panel:28px;
+  --dsw-focus-ring-width:2px;
+  --ds-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ds-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  /* menu material, mirroring DSH's --dsw-specific-menu (near-opaque + blur) */
+  --ds-menu-surface: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 94%, transparent);
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{height:100%}
+body{
+  margin:0;font-family:var(--ds-font);font-size:14px;line-height:1.6;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit}
+svg{display:block}
+
+/* prototype-only control bar (NOT part of the plugin) */
+.pt-bar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:8px 14px;font-size:12px;color:var(--dsw-alias-label-secondary);
+  background:var(--dsw-alias-bg-layer-2);border-bottom:1px solid var(--dsw-alias-border-l1);
+}
+.pt-bar b{color:var(--dsw-alias-label-primary);font-weight:600}
+.pt-group{display:flex;align-items:center;gap:6px}
+.pt-group>span{opacity:.7}
+.pt-btn{
+  height:24px;padding:0 9px;border-radius:999px;cursor:pointer;font-size:12px;
+  border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);
+}
+.pt-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pt-btn[data-on]{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l3)}
+.pt-note{margin-left:auto;opacity:.6}
+
+/* app frame */
+.app{height:calc(100% - 41px);display:flex;overflow:hidden;background:var(--dsw-alias-bg-base)}
+.app-side{width:246px;flex:none;height:100%;overflow:hidden}
+.app-main{flex:1;min-width:0;height:100%;overflow:hidden;position:relative}
+
+/* fake harness session list inside the sidebar (shell-owned in the real app) */
+.fx-region{padding:2px 4px 4px;overflow:auto;flex:1;min-height:0}
+.fx-label{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary);padding:10px 8px 4px}
+.fx-row{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:8px;font-size:13px;color:var(--dsw-alias-label-secondary)}
+.fx-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.fx-row>i{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-idle-primary);flex:none}
+.fx-row>i.run{background:var(--dsw-alias-state-business-primary)}
+.fx-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fx-row>u{margin-left:auto;font-size:11px;text-decoration:none;color:var(--dsw-alias-label-tertiary)}
+
+/* ============================================================ DSchat panel */
+.ds-panel{height:100%;display:flex;flex-direction:column;min-width:0;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}
+.ds-scroll{scrollbar-gutter:stable}
+.ds-scroll::-webkit-scrollbar{width:9px;height:9px}
+.ds-scroll::-webkit-scrollbar-track{background:transparent}
+.ds-scroll::-webkit-scrollbar-thumb{background:var(--dsw-alias-scrollbar-bg-l2);border-radius:99px;border:2px solid transparent;background-clip:padding-box}
+.ds-scroll::-webkit-scrollbar-thumb:hover{background:var(--dsw-alias-scrollbar-hover-l2);background-clip:padding-box}
+
+/* ---- header ---- */
+.ds-header{flex:none;height:52px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ds-brand{display:flex;align-items:center;gap:8px;min-width:0}
+.ds-brand-mark{
+  width:22px;height:22px;border-radius:7px;flex:none;display:grid;place-items:center;
+  background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);
+}
+.ds-brand-name{font-size:14px;font-weight:600;letter-spacing:.01em}
+.ds-status{
+  display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:999px;
+  border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);
+  font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;
+}
+.ds-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--dsw-alias-state-idle-primary)}
+.ds-status[data-s="ok"]   .ds-dot{background:var(--dsw-alias-state-success-primary)}
+.ds-status[data-s="busy"] .ds-dot{background:var(--dsw-alias-state-business-primary);animation:ds-pulse 1.1s ease-in-out infinite}
+.ds-status[data-s="warn"] .ds-dot{background:var(--dsw-alias-state-warn-primary)}
+.ds-status[data-s="bad"]  .ds-dot{background:var(--dsw-alias-state-error-primary)}
+@keyframes ds-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.8)}}
+.ds-spacer{flex:1;min-width:8px}
+
+/* buttons */
+.ds-btn{
+  display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm);
+  cursor:pointer;white-space:nowrap;font-size:13px;border:1px solid transparent;
+  background:transparent;color:var(--dsw-alias-label-secondary);
+}
+.ds-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ds-btn:disabled{opacity:.4;cursor:not-allowed;background:transparent}
+.ds-btn-icon{width:28px;padding:0;justify-content:center}
+.ds-btn-primary{
+  background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);
+  font-weight:500;height:30px;padding:0 12px;border-radius:var(--dsw-radius-md);
+}
+.ds-btn-primary:hover{background:var(--dsw-alias-button-primary-hover);color:var(--dsw-alias-label-primary-foreground)}
+.ds-btn-primary:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-primary-foreground)}
+.ds-btn-ghost{border-color:var(--dsw-alias-border-l2)}
+.ds-btn-on{
+  background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, transparent);
+  color:var(--dsw-alias-state-business-primary);
+  border-color:color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, transparent);
+}
+.ds-btn-on:hover{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent);color:var(--dsw-alias-state-business-primary)}
+.ds-caret{width:9px;height:9px;opacity:.75}
+.ds-rail-toggle{margin-right:-2px}
+
+/* ---- body ---- */
+.ds-body{flex:1;min-height:0;display:flex;position:relative}
+
+/* conversation rail */
+.ds-rail{width:238px;flex:none;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--dsw-alias-border-l1);padding:10px 8px 8px}
+.ds-panel[data-rail="hidden"] .ds-rail{display:none}
+/* narrow window: the rail becomes an overlay drawer so the chat keeps its width */
+@media (max-width:1180px){
+  .ds-rail{
+    position:absolute;left:0;top:0;bottom:0;z-index:30;
+    background:var(--dsw-alias-bg-base);
+    box-shadow:0 0 0 1px var(--dsw-alias-border-l1), 12px 0 32px #00000014;
+  }
+  .ds-panel:not([data-rail="open"]) .ds-rail{display:none}
+}
+.ds-search{position:relative;margin:0 2px 8px}
+.ds-search input{
+  width:100%;height:30px;padding:0 8px 0 28px;font:inherit;font-size:13px;outline:none;
+  color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);
+  border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);
+}
+.ds-search input::placeholder{color:var(--dsw-alias-label-tertiary)}
+.ds-search input:focus{border-color:var(--dsw-alias-border-l3)}
+.ds-search>svg{position:absolute;left:8px;top:8px;opacity:.5;pointer-events:none}
+.ds-new{
+  display:flex;align-items:center;gap:7px;height:32px;padding:0 9px;margin:0 2px 8px;
+  border-radius:var(--dsw-radius-sm);cursor:pointer;font-size:13px;font-weight:500;
+  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-button-elevated-fill);color:var(--dsw-alias-label-primary);
+}
+.ds-new:hover{background:var(--dsw-alias-button-floating-hover)}
+.ds-list{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:1px;padding:2px}
+.ds-item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--dsw-radius-sm);cursor:pointer}
+.ds-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ds-item[data-active]{background:var(--dsw-alias-interactive-bg-active)}
+.ds-item-main{min-width:0;flex:1}
+.ds-item-title{font-size:13px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ds-item[data-active] .ds-item-title{font-weight:600}
+.ds-item-meta{font-size:11px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ds-item-acts{display:none;gap:2px;flex:none}
+.ds-item:hover .ds-item-acts{display:flex}
+.ds-mini{width:22px;height:22px;display:grid;place-items:center;border-radius:6px;cursor:pointer;border:none;background:transparent;color:var(--dsw-alias-label-tertiary)}
+.ds-mini:hover{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}
+.ds-mini.danger:hover{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary)}
+.ds-rail-foot{flex:none;display:flex;padding:6px 2px 0;border-top:1px solid var(--dsw-alias-border-l1);margin-top:6px}
+.ds-empty-list{padding:14px 8px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+
+/* chat column */
+.ds-chat{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+.ds-thread{flex:1;min-height:0;overflow:auto;padding:22px 0 8px}
+.ds-thread-inner{max-width:760px;margin:0 auto;padding:0 26px;display:flex;flex-direction:column;gap:20px}
+.ds-day{text-align:center;font-size:11px;color:var(--dsw-alias-label-tertiary)}
+
+.ds-msg{display:flex;flex-direction:column;gap:6px;position:relative}
+.ds-msg[data-role="user"]{align-items:flex-end}
+.ds-msg-head{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.ds-msg[data-role="user"] .ds-msg-head{flex-direction:row-reverse}
+.ds-msg-who{font-weight:600;color:var(--dsw-alias-label-secondary)}
+.ds-msg-body{font-size:14px;line-height:1.72}
+.ds-msg[data-role="user"] .ds-msg-body{
+  max-width:78%;padding:10px 14px;border-radius:var(--dsw-radius-lg);border-bottom-right-radius:6px;
+  background:var(--dsw-alias-interactive-bg-hover);border:1px solid var(--dsw-alias-border-l1);
+}
+.ds-msg[data-role="assistant"] .ds-msg-body{max-width:100%}
+.ds-msg-body p{margin:0 0 10px}
+.ds-msg-body p:last-child{margin-bottom:0}
+.ds-msg-body ul,.ds-msg-body ol{margin:0 0 10px;padding-left:22px}
+.ds-msg-body li{margin:3px 0}
+.ds-msg-body li::marker{color:var(--dsw-alias-label-tertiary)}
+.ds-msg-body strong{font-weight:600}
+.ds-msg-body code{font-family:var(--ds-mono);font-size:.875em;padding:1px 5px;border-radius:6px;background:var(--dsw-alias-markdown-inline-code)}
+.ds-msg-body a{color:var(--dsw-alias-link);text-decoration:none}
+.ds-msg-body a:hover{text-decoration:underline}
+.ds-msg-body blockquote{margin:0 0 10px;padding:2px 0 2px 12px;color:var(--dsw-alias-label-secondary);border-left:2px solid var(--dsw-alias-border-l3)}
+.ds-table{width:100%;border-collapse:collapse;margin:0 0 10px;font-size:13px}
+.ds-table th,.ds-table td{border:1px solid var(--dsw-alias-border-l1);padding:6px 10px;text-align:left}
+.ds-table th{background:var(--dsw-alias-bg-layer-2);font-weight:600}
+
+/* code block */
+.ds-code{margin:0 0 10px;border-radius:var(--dsw-radius-md);overflow:hidden;border:.5px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
+.ds-code-bar{display:flex;align-items:center;gap:8px;padding:5px 10px;background:var(--dsw-alias-markdown-code-block-banner);font-family:var(--ds-mono);font-size:11px;color:var(--dsw-alias-label-secondary)}
+.ds-code-bar .ds-spacer{min-width:4px}
+.ds-code-copy{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:5px;border:none;background:transparent;cursor:pointer;font-size:11px;color:var(--dsw-alias-label-secondary)}
+.ds-code-copy:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ds-code pre{margin:0;padding:12px 14px;overflow:auto;font-family:var(--ds-mono);font-size:12.5px;line-height:1.6}
+
+/* images */
+.ds-imgs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.ds-img{
+  width:132px;height:92px;border-radius:var(--dsw-radius-sm);overflow:hidden;cursor:zoom-in;
+  border:1px solid var(--dsw-alias-border-l1);display:grid;place-items:center;font-size:11px;color:var(--dsw-alias-label-tertiary);
+  background:linear-gradient(135deg,#6d5efc22,#12b5a522),repeating-linear-gradient(45deg,var(--dsw-alias-bg-layer-2) 0 8px,var(--dsw-alias-bg-layer-1) 8px 16px);
+}
+
+/* streaming + error */
+.ds-caret-blink{display:inline-block;width:7px;height:15px;margin-left:2px;vertical-align:-2px;background:var(--dsw-alias-label-primary);animation:ds-blink 1s steps(1) infinite}
+@keyframes ds-blink{50%{opacity:0}}
+.ds-spin{width:12px;height:12px;border-radius:50%;flex:none;border:1.6px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 30%,transparent);border-top-color:var(--dsw-alias-state-business-primary);animation:ds-rot .7s linear infinite}
+@keyframes ds-rot{to{transform:rotate(360deg)}}
+.ds-err{
+  display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;border-radius:var(--dsw-radius-sm);font-size:13px;
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);color:var(--dsw-alias-state-error-primary);
+  border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary) 25%,transparent);
+}
+
+/* message hover actions */
+.ds-msg-acts{
+  display:flex;gap:2px;opacity:0;transition:opacity .12s ease;position:absolute;top:-8px;right:0;
+  padding:2px;border-radius:var(--dsw-radius-sm);background:var(--ds-menu-surface);
+  backdrop-filter:blur(20px) saturate(160%);border:1px solid var(--dsw-alias-border-l1);
+  box-shadow:0 4px 16px #00000014;
+}
+.ds-msg[data-role="user"] .ds-msg-acts{right:auto;left:0}
+.ds-msg:hover .ds-msg-acts{opacity:1}
+.ds-msg-acts button{width:26px;height:26px;display:grid;place-items:center;border:none;border-radius:6px;background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary)}
+.ds-msg-acts button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+
+/* empty state */
+.ds-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:56px 32px}
+.ds-empty-mark{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;margin-bottom:2px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground)}
+.ds-empty h3{margin:0;font-size:17px;font-weight:600}
+.ds-empty p{margin:0;max-width:400px;font-size:13px;color:var(--dsw-alias-label-secondary)}
+.ds-kbd{
+  display:inline-flex;align-items:center;height:19px;padding:0 5px;border-radius:5px;
+  font-family:var(--ds-mono);font-size:11px;color:var(--dsw-alias-label-secondary);
+  background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);
+}
+
+/* composer */
+.ds-composer{flex:none;padding:8px 26px 4px}
+.ds-composer-inner{max-width:760px;margin:0 auto}
+.ds-card{
+  border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl);
+  background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 2px #0000000a,0 8px 24px #00000008;
+  transition:border-color .12s ease;
+}
+.ds-card:focus-within{border-color:var(--dsw-alias-label-tertiary)}
+.ds-attach{display:flex;gap:6px;flex-wrap:wrap;padding:10px 10px 0}
+.ds-chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 4px 0 8px;border-radius:var(--dsw-radius-sm);font-size:12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
+.ds-chip i{width:14px;height:14px;border-radius:4px;background:linear-gradient(135deg,#6d5efc,#12b5a5);flex:none}
+.ds-chip button{width:18px;height:18px;display:grid;place-items:center;border:none;border-radius:4px;background:transparent;cursor:pointer;color:var(--dsw-alias-label-tertiary)}
+.ds-chip button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.ds-input{display:block;width:100%;resize:none;border:none;outline:none;background:transparent;font:inherit;font-size:14px;line-height:1.6;color:var(--dsw-alias-label-primary);padding:12px 14px 4px;min-height:52px;max-height:180px}
+.ds-input::placeholder{color:var(--dsw-alias-label-tertiary)}
+.ds-tools{display:flex;align-items:center;gap:4px;padding:4px 8px 8px}
+.ds-tools .ds-spacer{min-width:4px}
+.ds-hint{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.ds-send{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;cursor:pointer;border:none;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
+.ds-send:disabled{background:var(--dsw-alias-button-primary-dimmed);cursor:not-allowed}
+.ds-stop{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:999px;cursor:pointer;font-size:13px;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1)}
+.ds-stop:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.ds-stop i{width:9px;height:9px;border-radius:2px;background:var(--dsw-alias-state-error-primary)}
+
+/* phase rail */
+.ds-phase{display:flex;align-items:center;gap:10px;justify-content:center;padding:6px 26px 12px;font-size:11.5px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.ds-phase .sep{opacity:.4}
+.ds-phase b{font-weight:600;color:var(--dsw-alias-label-secondary)}
+.ds-phase .ds-spin{width:11px;height:11px}
+
+/* ---- transfer popover ---- */
+.ds-pop-wrap{position:relative}
+.ds-pop{
+  position:absolute;top:36px;right:0;width:348px;z-index:40;padding:12px;border-radius:var(--dsw-radius-lg);
+  background:var(--ds-menu-surface);backdrop-filter:blur(28px) saturate(160%);
+  border:1px solid var(--dsw-alias-border-l2);
+  box-shadow:0 16px 40px #00000024,0 2px 8px #00000014;
+  animation:ds-pop-in .14s ease;
+}
+@keyframes ds-pop-in{from{opacity:0;transform:translateY(-4px) scale(.99)}}
+.ds-pop h4{margin:0 0 2px;font-size:13px;font-weight:600}
+.ds-pop .sub{margin:0 0 10px;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
+.ds-field{margin-bottom:10px}
+.ds-field>label{display:block;font-size:11px;color:var(--dsw-alias-label-tertiary);margin-bottom:4px}
+.ds-seg{display:flex;gap:3px;padding:2px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2)}
+.ds-seg button{flex:1;height:26px;border-radius:6px;border:none;background:transparent;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ds-seg button[data-on]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font-weight:500;box-shadow:0 1px 2px #00000012}
+.ds-select{width:100%;height:30px;padding:0 8px;font:inherit;font-size:12.5px;cursor:pointer;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm)}
+.ds-hintline{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-tertiary);margin:-2px 0 10px}
+.ds-pop-foot{display:flex;align-items:center;gap:8px;margin-top:2px}
+.ds-steps{display:flex;flex-direction:column;gap:7px;padding:4px 0 8px}
+.ds-step{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dsw-alias-label-secondary)}
+.ds-step[data-done]{color:var(--dsw-alias-label-primary)}
+.ds-tick{width:16px;height:16px;border-radius:50%;flex:none;display:grid;place-items:center;border:1.5px solid var(--dsw-alias-border-l3)}
+.ds-step[data-done] .ds-tick{background:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary);color:#fff}
+.ds-step .ds-spin{width:14px;height:14px;border-width:1.8px}
+.ds-prog{height:3px;border-radius:99px;background:var(--dsw-alias-bg-skeleton);overflow:hidden;margin:2px 0 4px}
+.ds-prog>i{display:block;height:100%;width:0;background:var(--dsw-alias-state-business-primary);transition:width .3s ease}
+
+/* toasts */
+.ds-toasts{position:absolute;top:62px;right:18px;z-index:60;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.ds-toast{
+  display:flex;align-items:center;gap:10px;min-height:38px;max-width:420px;padding:8px 8px 8px 12px;
+  border-radius:var(--dsw-radius-md);background:var(--dsw-alias-toast-bg);color:var(--dsw-alias-toast-label);
+  font-size:13px;box-shadow:0 8px 24px #00000029;animation:ds-in .18s ease;
+}
+@keyframes ds-in{from{opacity:0;transform:translateY(-6px)}}
+.ds-toast button{height:24px;padding:0 9px;border-radius:6px;cursor:pointer;font-size:12px;border:none;background:#ffffff24;color:inherit}
+.ds-toast button:hover{background:#ffffff3d}
+.ds-toast .ok{color:#6ee7a8}
+.ds-toast[data-err] .bad{color:#ff9b9b}
+</style>
+</head>
+<body data-platform="darwin">
+
+<!-- ============================== prototype controls (not part of the plugin) -->
+<div class="pt-bar">
+  <b>dsh-DSchat · UI 原型</b>
+  <div class="pt-group">
+    <span>主题</span>
+    <button class="pt-btn" id="pt-light" data-on>浅色</button>
+    <button class="pt-btn" id="pt-dark">深色</button>
+  </div>
+  <div class="pt-group">
+    <span>状态</span>
+    <button class="pt-btn" data-state="ok" data-on>已登录</button>
+    <button class="pt-btn" data-state="busy">思考中</button>
+    <button class="pt-btn" data-state="warn">未登录</button>
+    <button class="pt-btn" data-state="bad">引擎错误</button>
+  </div>
+  <div class="pt-group">
+    <span>场景</span>
+    <button class="pt-btn" id="pt-empty">空会话</button>
+    <button class="pt-btn" id="pt-attach">带附件</button>
+    <button class="pt-btn" id="pt-error">消息出错</button>
+    <button class="pt-btn" id="pt-hover">显示消息操作</button>
+  </div>
+  <span class="pt-note">侧边栏与配色 = DSH 真实样式 · 面板本体 = dsh-DSchat 设计</span>
+</div>
+
+<div class="app">
+  <!-- ============================ DSH sidebar (authentic classes/styles) -->
+  <aside class="app-side">
+    <div class="_3WPZCG_root _3WPZCG_wide">
+      <div class="_3WPZCG_logoRow">
+        <button class="_3WPZCG_brand">
+          <span class="_3WPZCG_brandMark" style="width:20px;height:20px;border-radius:6px;display:grid;place-items:center;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);font-size:11px;font-weight:700;margin-right:8px">D</span>
+          <span class="_3WPZCG_brandName" style="font-size:13px;font-weight:600;white-space:nowrap">DeepSeek Harness</span>
+        </button>
+        <button class="_3WPZCG_iconButton" title="收起侧边栏">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6"/><path d="M6.6 3.2v9.6"/><path d="M11.4 6.6L9.9 8l1.5 1.4"/></svg>
+        </button>
+      </div>
+
+      <button class="_3WPZCG_newSession">＋ 新建会话</button>
+
+      <div class="_3WPZCG_panelList">
+        <button class="_3WPZCG_panelRow">
+          <span class="_3WPZCG_panelGlyph"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.6" y="2.6" width="4.8" height="4.8" rx="1.2"/><rect x="8.6" y="2.6" width="4.8" height="4.8" rx="1.2"/><rect x="2.6" y="8.6" width="4.8" height="4.8" rx="1.2"/><path d="M11 8.9v4.2M8.9 11h4.2"/></svg></span>
+          <span class="_3WPZCG_panelTitle">插件</span>
+        </button>
+        <button class="_3WPZCG_panelRow">
+          <span class="_3WPZCG_panelGlyph"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="11" height="10" rx="1.6"/><path d="M2.5 6.5h11M5.5 2.5v2M10.5 2.5v2"/></svg></span>
+          <span class="_3WPZCG_panelTitle">任务</span>
+        </button>
+        <!-- dsh-DSchat: registered at sidebar.panellist id="dschat" order=20 -->
+        <button class="_3WPZCG_panelRow _3WPZCG_panelActive" aria-current="page">
+          <span class="_3WPZCG_panelGlyph"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/><path d="M5.5 6.5h5M5.5 8.6h3"/></svg></span>
+          <span class="_3WPZCG_panelTitle">DSchat</span>
+        </button>
+      </div>
+
+      <div class="_3WPZCG_regionArea">
+        <div class="fx-region ds-scroll">
+          <div class="fx-label">工作区</div>
+          <div class="fx-row"><i class="run"></i><span>my workshop</span><u>3</u></div>
+          <div class="fx-label">会话</div>
+          <div class="fx-row"><i class="run"></i><span>修复 laya 补丁脚本</span><u>2m</u></div>
+          <div class="fx-row"><i></i><span>插件市场调研</span><u>1h</u></div>
+          <div class="fx-row"><i></i><span>翻译管线重构</span><u>昨天</u></div>
+        </div>
+      </div>
+
+      <div class="_3WPZCG_footArea">
+        <div class="_3WPZCG_settingsArea">
+          <button class="_3WPZCG_panelRow">
+            <span class="_3WPZCG_panelGlyph"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2.6 4.6h10.8M2.6 8h10.8M2.6 11.4h10.8"/><circle cx="6" cy="4.6" r="1.35" fill="var(--dsw-specific-sidebar-fill,transparent)"/><circle cx="10.4" cy="8" r="1.35" fill="var(--dsw-specific-sidebar-fill,transparent)"/><circle cx="5" cy="11.4" r="1.35" fill="var(--dsw-specific-sidebar-fill,transparent)"/></svg></span>
+            <span class="_3WPZCG_panelTitle">设置</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================ DSchat panel (the plugin) -->
+  <main class="app-main">
+    <div class="ds-panel">
+
+      <!-- header -->
+      <header class="ds-header">
+        <button class="ds-btn ds-btn-icon ds-rail-toggle" id="ds-rail-toggle" title="会话列表">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6"/><path d="M6.6 3.2v9.6"/></svg>
+        </button>
+        <div class="ds-brand">
+          <span class="ds-brand-mark">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v6.5H7l-2.6 2.2V10H3z"/></svg>
+          </span>
+          <span class="ds-brand-name">DSchat</span>
+        </div>
+        <button class="ds-status" id="ds-status" data-s="ok" title="DeepSeek 网页端 · 复用网页登录，免 API 额度">
+          <span class="ds-dot"></span><span id="ds-status-text">已就绪 · deepseek-chat</span>
+        </button>
+        <div class="ds-spacer"></div>
+
+        <button class="ds-btn ds-btn-on" id="ds-think" title="深度思考（R1）">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8.6 1.8L3.6 9h3l-.8 5.2L11 7H8z"/></svg>
+          深度思考
+        </button>
+        <button class="ds-btn" id="ds-search" title="联网搜索">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="5.4"/><path d="M2.6 8h10.8M8 2.6c1.6 1.6 2.4 3.4 2.4 5.4S9.6 11.8 8 13.4C6.4 11.8 5.6 10 5.6 8S6.4 4.2 8 2.6z"/></svg>
+          联网
+        </button>
+
+        <div class="ds-pop-wrap">
+          <button class="ds-btn ds-btn-primary" id="ds-transfer">
+            在 Harness 中继续
+            <svg class="ds-caret" viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.8L6 7.8l3-3"/></svg>
+          </button>
+
+          <!-- transfer popover -->
+          <div class="ds-pop" id="ds-pop" hidden>
+            <h4>在 Harness 中继续</h4>
+            <p class="sub">把这段网页对话带进一个 harness 会话</p>
+
+            <div class="ds-field">
+              <label>迁移方式</label>
+              <div class="ds-seg" id="ds-mode">
+                <button data-on data-mode="distill">蒸馏成任务简报</button>
+                <button data-mode="raw">原文完整迁移</button>
+              </div>
+            </div>
+            <p class="ds-hintline" id="ds-mode-hint">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5L6.5 12 13 4.5"/></svg>
+              压缩成可执行简报：目标、约束、已完成、待办
+            </p>
+
+            <div class="ds-field">
+              <label>目标</label>
+              <div class="ds-seg" id="ds-target">
+                <button data-on data-target="new">新建会话</button>
+                <button data-target="continue">追加到已有会话</button>
+              </div>
+            </div>
+
+            <div class="ds-field" id="ds-continue-field" hidden>
+              <label>继续到</label>
+              <select class="ds-select">
+                <option>修复 laya 补丁脚本 · 运行中</option>
+                <option>插件市场调研</option>
+              </select>
+            </div>
+
+            <div class="ds-field">
+              <label>工作区</label>
+              <select class="ds-select">
+                <option>my workshop — ~/Desktop/dsh 工作区/my workshop</option>
+                <option>未分组</option>
+                <option>＋ 新建工作区…</option>
+              </select>
+            </div>
+
+            <div class="ds-steps" id="ds-steps" hidden>
+              <div class="ds-prog"><i id="ds-prog"></i></div>
+              <div class="ds-step" data-step="1"><span class="ds-tick"></span><span>蒸馏对话为任务简报</span></div>
+              <div class="ds-step" data-step="2"><span class="ds-tick"></span><span>创建 harness 会话</span></div>
+              <div class="ds-step" data-step="3"><span class="ds-tick"></span><span>打开会话</span></div>
+            </div>
+
+            <div class="ds-pop-foot">
+              <button class="ds-btn ds-btn-primary" id="ds-go">开始迁移</button>
+              <span class="ds-hint" id="ds-pop-note">迁移后自动打开新会话</span>
+            </div>
+          </div>
+        </div>
+
+        <button class="ds-btn ds-btn-icon" title="更多">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="12.4" cy="8" r="1.15"/></svg>
+        </button>
+      </header>
+
+      <!-- body -->
+      <div class="ds-body">
+
+        <!-- conversation rail -->
+        <aside class="ds-rail">
+          <div class="ds-search">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5" stroke-linecap="round"/></svg>
+            <input placeholder="搜索会话…" id="ds-q">
+          </div>
+          <button class="ds-new" id="ds-new">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+            新对话
+          </button>
+          <div class="ds-list ds-scroll" id="ds-list"></div>
+          <div class="ds-rail-foot">
+            <button class="ds-btn ds-btn-ghost" style="flex:1;justify-content:center" title="把网页端已存在但本地未收录的会话拉回来" id="ds-recover">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7"/><path d="M13.4 2.2v3.1h-3.1"/></svg>
+              从网页恢复
+            </button>
+          </div>
+        </aside>
+
+        <!-- chat column -->
+        <div class="ds-chat">
+          <div class="ds-thread ds-scroll" id="ds-thread">
+            <div class="ds-thread-inner" id="ds-thread-inner"></div>
+          </div>
+
+          <!-- composer -->
+          <div class="ds-composer">
+            <div class="ds-composer-inner">
+              <div class="ds-card">
+                <div class="ds-attach" id="ds-attach" hidden>
+                  <span class="ds-chip"><i></i>截图 2026-10-01 18.02.png<button title="移除">✕</button></span>
+                  <span class="ds-chip"><i></i>error-trace.txt<button title="移除">✕</button></span>
+                </div>
+                <textarea class="ds-input" id="ds-input" rows="1" placeholder="给 DeepSeek 网页端发消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+                <div class="ds-tools">
+                  <button class="ds-btn ds-btn-icon" title="添加图片（也可直接粘贴或拖入）" id="ds-attach-btn">
+                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 6.2l-4.7 4.7a2.1 2.1 0 0 1-3-3l5-5a1.4 1.4 0 0 1 2 2l-5 5a.7.7 0 0 1-1-1l4.4-4.4"/></svg>
+                  </button>
+                  <button class="ds-btn ds-btn-icon" title="深度思考（R1）" id="ds-think2">
+                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8.6 1.8L3.6 9h3l-.8 5.2L11 7H8z"/></svg>
+                  </button>
+                  <button class="ds-btn ds-btn-icon" title="联网搜索" id="ds-search2">
+                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="5.4"/><path d="M2.6 8h10.8M8 2.6c1.6 1.6 2.4 3.4 2.4 5.4S9.6 11.8 8 13.4C6.4 11.8 5.6 10 5.6 8S6.4 4.2 8 2.6z"/></svg>
+                  </button>
+                  <span class="ds-hint" style="margin-left:6px">
+                    <span class="ds-kbd">⌘K</span> 搜索
+                    <span class="ds-kbd">⌘/</span> 聚焦
+                    <span class="ds-kbd">Esc</span> 停止
+                  </span>
+                  <div class="ds-spacer"></div>
+                  <button class="ds-send" id="ds-send" disabled title="发送">
+                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12.5v-9M4.2 7.3L8 3.5l3.8 3.8"/></svg>
+                  </button>
+                  <button class="ds-stop" id="ds-stop" hidden><i></i>停止</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- phase rail -->
+          <div class="ds-phase" id="ds-phase"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ds-toasts" id="ds-toasts"></div>
+  </main>
+</div>
+
+<script>
+/* ================================================================ icons */
+const I = {
+  copy:  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="5.6" y="2.6" width="7.8" height="9.2" rx="1.4"/><path d="M10.4 13.4H4.2a1.6 1.6 0 0 1-1.6-1.6V5.2"/></svg>',
+  regen: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7"/><path d="M13.4 2.2v3.1h-3.1"/></svg>',
+  quote: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3.5v9M8.5 5.2h4.5M8.5 8h4.5M8.5 10.8h3"/><path d="M6.2 6.6L4 4.4 6.2 2.2" /></svg>',
+  edit:  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.3 2.4l2.3 2.3L5.4 12.9H3.1v-2.3z"/></svg>',
+  trash: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 4.2h10.4M6.6 4.2V2.8h2.8v1.4M4.2 4.2l.6 9h6.4l.6-9"/></svg>',
+  check: '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.6L6.3 12 13 4.6"/></svg>',
+  warn:  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 2.6l5.6 10.2H2.4z"/><path d="M8 6.4v3.1M8 11.4v.1"/></svg>',
+};
+
+/* =============================================================== sample data */
+const CONVS = [
+  {
+    id: 'c1', title: 'DSH 插件槽位与 UI 集成方案', time: '刚刚', model: 'deepseek-reasoner',
+    msgs: [
+      { role: 'user', text: 'DSH 的客户端插件能注册原生中心面板吗？还是只能像 dsh-webchat 那样往 DOM 里塞？' },
+      { role: 'assistant', text: `可以注册原生面板，不用碰 DOM。DSH 的 slot 系统里有三个位置正好够用：
+
+- \`sidebar.panellist\`（list，root 作用域）— 全局面板图标，侧边栏自己渲染按钮，它读取 \`id\` / \`order\` / \`label\`
+- \`main\`（keyed，root 作用域）— 由侧边栏条目 id 选中的中央面板
+- \`settings.section\`（list）— 原生设置页
+
+注册长这样：
+
+\`\`\`ts
+ctx.slots.register({ name: 'main', key: 'dschat', locale: 'dsh-dschat' }, DSchatPanel)
+
+ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
+  { name: 'sidebar.panellist', id: 'dschat', order: 20, label: () => t('nav') },
+  DSchatIcon,
+))
+\`\`\`
+
+三个要点：
+
+1. **不要复用 \`conversation\` 这个 key**，那是会话本体，会互相覆盖
+2. \`main\` 面板**不绑定 session**，所以切会话不会把它顶掉
+3. 所有样式消费 \`--dsw-*\` token，浅色／深色与皮肤自动跟随
+
+> 小坑：\`main\` 的 keyDomain 是开放的，但和内置面板撞 key 会**替换**对方，所以要用自己的 id。` },
+      { role: 'user', text: '状态反馈怎么做才不像现在这么糊？' },
+      { role: 'assistant', text: `把「引擎」和「对话」两个状态机分开表达，并且每个阶段都给出**下一步能做什么**：
+
+| 阶段 | 界面表现 | 可做动作 |
+| --- | --- | --- |
+| 未登录 | 琥珀点 · 未登录 | 打开登录窗口 |
+| 启动浏览器 | 蓝点脉冲 + 阶段文案 | 取消 |
+| 就绪 | 绿点 + 模型名 | 发送 |
+| 思考中 | 蓝点脉冲 + 计时 | 停止 |
+| 流式输出 | 光标 + 字数 | 停止 |
+| 出错 | 红点 + 内联错误卡片 | 重试 |
+
+关键是**别让用户猜在等什么**：长操作要有阶段文案，不能只有一个转圈。` },
+      { role: 'user', text: '迁移那块也重做一下吧，现在一堆 select 挤在底部。' },
+      { role: 'assistant', text: `同意。改成头部主按钮 + 下拉面板，一次只问一个问题：
+
+1. 迁移方式：**蒸馏成任务简报**（默认）还是原文完整迁移
+2. 目标：新建会话（默认）还是追加到已有会话
+3. 工作区：默认跟随当前会话所在的 workspace
+
+点「开始迁移」后在面板里显示**阶段进度**（蒸馏 → 创建会话 → 打开），完成后自动跳进新会话；失败可以原地重试，不用重来一遍。` },
+    ],
+  },
+  {
+    id: 'c2', title: 'Playwright 驱动网页端的登录保持', time: '12 分钟前', model: 'deepseek-chat',
+    msgs: [
+      { role: 'user', text: '复用已有 browser profile 会不会有并发问题？' },
+      { role: 'assistant', text: `会有，但可以规避：
+
+1. **单实例锁** —— 引擎持有一个 \`launchPromise\`，同一时刻只允许一个 Chromium 实例
+2. **profile 独占** —— 复用 \`~/.dsh/dsh-webchat/browser-profile\` 前，要先确认旧插件的引擎已经 dispose
+3. **登录窗口与聊天窗口分离** —— 登录用可见窗口，完成后关闭；聊天走无头实例
+
+> 如果用户同时启用 dsh-webchat 和 dsh-DSchat，两个引擎会抢同一个 profile，所以安装时要把旧插件从 profile 的 bundles 里摘掉。` },
+    ],
+  },
+  {
+    id: 'c3', title: '流式回复的增量解析策略', time: '昨天', model: 'deepseek-reasoner',
+    msgs: [
+      { role: 'user', text: '从 DOM 抓流式文本，怎么判断「这一轮说完了」？' },
+      { role: 'assistant', text: `三个信号叠加，避免误判：
+
+1. 「停止生成」按钮消失
+2. 文本哈希连续 N 次轮询不变（N≈2，间隔 600ms）
+3. 出现该轮的复制／重新生成操作条
+
+任一条先到都先记为「疑似完成」，三条都满足才落盘，这样断流时不会把半截话固化成最终回复。` },
+    ],
+  },
+  {
+    id: 'c4', title: '自动标题的提示词设计', time: '2 天前', model: 'deepseek-chat',
+    msgs: [
+      { role: 'user', text: '首条消息生成标题，有什么要注意的？' },
+      { role: 'assistant', text: `约束成「不超过 16 字、名词短语、不带标点、保留专有名词」，并要求只输出标题本身。生成失败就用首条消息前 20 字兜底，不要阻塞发送流程。` },
+    ],
+  },
+];
+
+/* ================================================================== state */
+let activeId = 'c1';
+let query = '';
+let busy = false;
+let streamTimer = null;
+let deleteTimer = null;
+const deleted = new Map();
+
+const $ = (id) => document.getElementById(id);
+const threadInner = $('ds-thread-inner');
+const thread = $('ds-thread');
+const convById = (id) => CONVS.find(c => c.id === id);
+const nowTime = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* =============================================================== markdown */
+function md(src) {
+  const blocks = [];
+  let s = src.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push(
+      `<div class="ds-code"><div class="ds-code-bar"><span>${lang || 'text'}</span><span class="ds-spacer"></span>` +
+      `<button class="ds-code-copy" data-copy>${I.copy} 复制</button></div><pre>${esc(code)}</pre></div>`
+    );
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+
+  s = esc(s);
+  // tables
+  s = s.replace(/^\|(.+)\|\n\|[\s:|-]+\|\n((?:\|.*\|\n?)*)/gm, (m, head, rows) => {
+    const cell = (r) => r.split('|').slice(1, -1).map(x => x.trim());
+    const th = cell(head).map(x => `<th>${x}</th>`).join('');
+    const tr = rows.trim().split('\n').map(r => '<tr>' + cell(r).map(x => `<td>${x}</td>`).join('') + '</tr>').join('');
+    return `<table class="ds-table"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
+  });
+  s = s.replace(/^&gt; (.*)$/gm, '<blockquote>$1</blockquote>');
+
+  // lists: group consecutive markers, then wrap
+  s = s.replace(/^([-*]|\d+\.) (.+)$/gm, (_, mark, text) => (mark === '-' || mark === '*' ? '<l i>' : '<l o>') + text + '</l>');
+  s = s.replace(/(?:<l [io]>[^\n]*<\/l>\n?)+/g, (group) => {
+    const ordered = group.trimStart().startsWith('<l o>');
+    const items = group.trim().split('\n').map(l => l.replace(/^<l [io]>/, '').replace(/<\/l>$/, ''));
+    return `<${ordered ? 'ol' : 'ul'}>` + items.map(t => `<li>${t}</li>`).join('') + `</${ordered ? 'ol' : 'ul'}>`;
+  });
+
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  s = s.split(/\n{2,}/).map(p => {
+    const t = p.trim();
+    if (!t) return '';
+    if (/^<(ul|ol|table|blockquote|div)/.test(t)) return t;
+    return `<p>${t.replace(/\n/g, '<br>')}</p>`;
+  }).join('');
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+}
+
+/* ============================================================== rendering */
+function renderList() {
+  const list = $('ds-list');
+  const items = CONVS.filter(c => !query || c.title.toLowerCase().includes(query.toLowerCase()));
+  list.innerHTML = items.length ? '' : '<div class="ds-empty-list">没有匹配的会话</div>';
+  for (const c of items) {
+    const el = document.createElement('div');
+    el.className = 'ds-item';
+    if (c.id === activeId) el.setAttribute('data-active', '');
+    el.innerHTML = `
+      <div class="ds-item-main">
+        <div class="ds-item-title">${esc(c.title)}</div>
+        <div class="ds-item-meta">${c.msgs.length} 条 · ${c.time}</div>
+      </div>
+      <div class="ds-item-acts">
+        <button class="ds-mini" data-act="rename" title="重命名">${I.edit}</button>
+        <button class="ds-mini danger" data-act="delete" title="删除（可撤销）">${I.trash}</button>
+      </div>`;
+    el.querySelector('.ds-item-main').onclick = () => {
+      activeId = c.id;
+      if (narrow()) panel.setAttribute('data-rail', 'hidden');
+      renderList(); renderThread();
+    };
+    el.querySelector('[data-act="delete"]').onclick = (e) => { e.stopPropagation(); removeConv(c.id); };
+    el.querySelector('[data-act="rename"]').onclick = (e) => {
+      e.stopPropagation();
+      const next = prompt('重命名会话', c.title);
+      if (next && next.trim()) { c.title = next.trim(); renderList(); toast('已重命名'); }
+    };
+    list.appendChild(el);
+  }
+}
+
+function renderThread() {
+  const c = convById(activeId);
+  if (!c) { threadInner.innerHTML = ''; return; }
+  if (!c.msgs.length) {
+    threadInner.innerHTML = `
+      <div class="ds-empty">
+        <div class="ds-empty-mark">${'<svg viewBox="0 0 16 16" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.5h10v6.5H7l-2.6 2.2V10H3z"/></svg>'}</div>
+        <h3>在 DSH 里直接聊 DeepSeek 网页端</h3>
+        <p>复用你的网页登录会话，不消耗 API 额度。聊完可以一键蒸馏成任务简报，在 harness 里继续开发。</p>
+        <p style="margin-top:8px;display:flex;gap:6px;align-items:center;justify-content:center">
+          <span class="ds-kbd">Enter</span> 发送
+          <span class="ds-kbd">⇧Enter</span> 换行
+          <span class="ds-kbd">⌘/</span> 聚焦输入
+        </p>
+      </div>`;
+    if (!busy) setBusy(false);
+    return;
+  }
+  threadInner.innerHTML = '<div class="ds-day">今天</div>' + c.msgs.map((m, i) => {
+    const who = m.role === 'user' ? '你' : (c.model === 'deepseek-reasoner' ? 'DeepSeek · 深度思考' : 'DeepSeek');
+    const acts = m.role === 'user'
+      ? `<div class="ds-msg-acts">
+           <button data-act="edit" title="编辑重发">${I.edit}</button>
+           <button data-act="copy" title="复制">${I.copy}</button>
+         </div>`
+      : `<div class="ds-msg-acts">
+           <button data-act="copy" title="复制">${I.copy}</button>
+           <button data-act="regen" title="重新生成">${I.regen}</button>
+           <button data-act="quote" title="引用到输入框">${I.quote}</button>
+         </div>`;
+    const body = m.role === 'user' ? `<p>${esc(m.text)}</p>` : md(m.text);
+    const err = m.error
+      ? `<div class="ds-err">${I.warn}<span>${esc(m.error)}</span><span class="ds-spacer" style="flex:1"></span><button class="ds-btn ds-btn-ghost" style="height:24px" data-act="regen">重试</button></div>`
+      : '';
+    const imgs = m.images ? `<div class="ds-imgs">${m.images.map(() => '<div class="ds-img">图片附件</div>').join('')}</div>` : '';
+    return `<div class="ds-msg" data-role="${m.role}">
+        <div class="ds-msg-head"><span class="ds-msg-who">${who}</span><span>${m.time || '18:0' + (i % 10)}</span></div>
+        <div class="ds-msg-body">${imgs}${body}${err}${m.streaming ? '<span class="ds-caret-blink"></span>' : ''}</div>
+        ${acts}
+      </div>`;
+  }).join('');
+  if (!busy) setBusy(false);
+}
+
+/* ================================================================ actions */
+function toast(text, kind = 'ok', action) {
+  const el = document.createElement('div');
+  el.className = 'ds-toast';
+  if (kind === 'err') el.setAttribute('data-err', '');
+  el.innerHTML = `<span class="${kind === 'err' ? 'bad' : 'ok'}">${kind === 'err' ? I.warn : I.check}</span><span>${esc(text)}</span>`;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = () => { action.run(); el.remove(); };
+    el.appendChild(b);
+  }
+  $('ds-toasts').appendChild(el);
+  setTimeout(() => el.remove(), action ? 6500 : 3200);
+}
+
+function removeConv(id) {
+  const idx = CONVS.findIndex(c => c.id === id);
+  if (idx < 0) return;
+  const [conv] = CONVS.splice(idx, 1);
+  deleted.set(id, { conv, index: idx });
+  if (activeId === id) activeId = CONVS[0] ? CONVS[0].id : null;
+  renderList(); renderThread();
+  clearTimeout(deleteTimer);
+  toast(`已删除「${conv.title}」`, 'ok', {
+    label: '撤销',
+    run: () => {
+      const d = deleted.get(id);
+      if (!d) return;
+      CONVS.splice(d.index, 0, d.conv);
+      deleted.delete(id);
+      renderList(); renderThread();
+      toast('已恢复');
+    },
+  });
+  deleteTimer = setTimeout(() => deleted.clear(), 6500);
+}
+
+function setStatus(state, text) {
+  $('ds-status').setAttribute('data-s', state);
+  $('ds-status-text').textContent = text;
+}
+
+function setBusy(on, phase) {
+  busy = on;
+  $('ds-send').hidden = on;
+  $('ds-stop').hidden = !on;
+  $('ds-input').disabled = on;
+  const n = (convById(activeId) || { msgs: [] }).msgs.length;
+  $('ds-phase').innerHTML = on
+    ? `<span class="ds-spin"></span><span>${phase}</span><span class="sep">|</span><span>网页会话 <b>已登录</b></span><span class="sep">|</span><span>本轮已输出 <b id="ds-count">0</b> 字</span>`
+    : `<span>就绪</span><span class="sep">|</span><span>网页会话 <b>已登录</b></span><span class="sep">|</span><span>本会话 <b>${n}</b> 条 · 蒸馏迁移约 <b>4s</b></span>`;
+}
+
+const REPLIES = [
+  '这个思路可行。先做最小骨架把链路跑通：引擎 → 路由 → 面板，确认登录和流式都通了再补 UI 细节。',
+  '补充一点：蒸馏不要走网页端，直接用 harness 的 LLM 服务更稳；网页端只负责聊天本身。',
+  '还有个边界要处理——用户在流式中途切会话时，正在跑的那一轮不能丢，应该留在后台并给出「后台运行中」提示。',
+];
+
+function send() {
+  const ta = $('ds-input');
+  const text = ta.value.trim();
+  const c = convById(activeId);
+  if (!text || busy || !c) return;
+  const hasAttach = !$('ds-attach').hidden;
+  c.msgs.push({ role: 'user', text, time: nowTime(), images: hasAttach ? [1, 2] : undefined });
+  $('ds-attach').hidden = true;
+  ta.value = ''; ta.style.height = '';
+  $('ds-send').disabled = true;
+  renderThread();
+  thread.scrollTop = thread.scrollHeight;
+
+  const reply = REPLIES[c.msgs.length % REPLIES.length];
+  const msg = { role: 'assistant', text: '', time: nowTime(), streaming: true };
+  c.msgs.push(msg);
+  renderThread();
+  setStatus('busy', '思考中… 1.2s');
+  setBusy(true, '正在思考… 1.2s');
+
+  let i = 0;
+  clearInterval(streamTimer);
+  streamTimer = setInterval(() => {
+    i += 4;
+    msg.text = reply.slice(0, i);
+    const last = threadInner.querySelector('.ds-msg:last-child .ds-msg-body');
+    if (last) last.innerHTML = md(msg.text) + '<span class="ds-caret-blink"></span>';
+    const count = $('ds-count');
+    if (count) count.textContent = String(msg.text.length);
+    thread.scrollTop = thread.scrollHeight;
+    if (i >= reply.length) {
+      clearInterval(streamTimer);
+      msg.streaming = false;
+      renderThread();
+      setStatus('ok', '已就绪 · deepseek-chat');
+      setBusy(false);
+      renderList();
+    }
+  }, 34);
+}
+
+function regen() {
+  const c = convById(activeId);
+  if (!c) return;
+  while (c.msgs.length && c.msgs[c.msgs.length - 1].role === 'assistant') c.msgs.pop();
+  renderThread();
+  toast('已重新生成');
+}
+
+function stopStream() {
+  clearInterval(streamTimer);
+  const c = convById(activeId);
+  const last = c && c.msgs[c.msgs.length - 1];
+  if (last && last.streaming) last.streaming = false;
+  setBusy(false);
+  setStatus('ok', '已就绪 · deepseek-chat');
+  renderThread();
+}
+
+/* ================================================================ wiring */
+$('ds-list').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'copy') toast('已复制');
+  if (act === 'regen') regen();
+  if (act === 'quote') { $('ds-input').value = '> 引用上一轮的结论\n\n'; $('ds-input').focus(); }
+  if (act === 'edit') toast('已把该消息放回输入框');
+});
+$('ds-thread').addEventListener('click', (e) => {
+  if (e.target.closest('[data-copy]')) { toast('已复制代码块'); return; }
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'copy') toast('已复制');
+  if (act === 'regen') regen();
+  if (act === 'quote') { $('ds-input').value = '> ' + (threadInner.textContent || '').trim().slice(0, 40) + '\n\n'; $('ds-input').focus(); }
+  if (act === 'edit') toast('已把该消息放回输入框');
+});
+$('ds-q').oninput = (e) => { query = e.target.value; renderList(); };
+/* rail toggle: a permanent hide on wide windows, a drawer on narrow ones */
+const panel = document.querySelector('.ds-panel');
+const narrow = () => window.matchMedia('(max-width:1180px)').matches;
+$('ds-rail-toggle').onclick = () => {
+  if (narrow()) panel.setAttribute('data-rail', panel.getAttribute('data-rail') === 'open' ? 'hidden' : 'open');
+  else panel.setAttribute('data-rail', panel.getAttribute('data-rail') === 'hidden' ? '' : 'hidden');
+};
+$('ds-new').onclick = () => {
+  const id = 'c' + Date.now();
+  CONVS.unshift({ id, title: '新对话', time: '刚刚', model: 'deepseek-chat', msgs: [] });
+  activeId = id; renderList(); renderThread(); $('ds-input').focus();
+};
+$('ds-recover').onclick = () => toast('网页端没有未同步的会话');
+$('ds-input').oninput = (e) => {
+  const ta = e.target;
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
+  $('ds-send').disabled = ta.value.trim() === '';
+};
+$('ds-input').onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === 'Escape') stopStream();
+};
+$('ds-send').onclick = send;
+$('ds-stop').onclick = stopStream;
+$('ds-attach-btn').onclick = () => { $('ds-attach').hidden = !$('ds-attach').hidden; };
+document.querySelectorAll('#ds-attach button').forEach(b => {
+  b.onclick = () => { b.parentElement.remove(); if (!$('ds-attach').children.length) $('ds-attach').hidden = true; };
+});
+const toggleBtn = (b) => b.classList.toggle('ds-btn-on');
+$('ds-think').onclick = () => toggleBtn($('ds-think'));
+$('ds-think2').onclick = () => { toggleBtn($('ds-think2')); toggleBtn($('ds-think')); };
+$('ds-search').onclick = () => toggleBtn($('ds-search'));
+$('ds-search2').onclick = () => { toggleBtn($('ds-search2')); toggleBtn($('ds-search')); };
+
+/* transfer popover */
+$('ds-transfer').onclick = (e) => { e.stopPropagation(); $('ds-pop').hidden = !$('ds-pop').hidden; };
+$('ds-pop').onclick = (e) => e.stopPropagation();
+document.addEventListener('click', () => { $('ds-pop').hidden = true; });
+
+$('ds-mode').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  [...e.currentTarget.children].forEach(x => x.removeAttribute('data-on'));
+  b.setAttribute('data-on', '');
+  $('ds-mode-hint').innerHTML = b.dataset.mode === 'raw'
+    ? `${I.check} 原文迁移：完整保留逐字记录，作为上下文附在首条消息`
+    : `${I.check} 压缩成可执行简报：目标、约束、已完成、待办`;
+};
+$('ds-target').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  [...e.currentTarget.children].forEach(x => x.removeAttribute('data-on'));
+  b.setAttribute('data-on', '');
+  const cont = b.dataset.target === 'continue';
+  $('ds-continue-field').hidden = !cont;
+  $('ds-pop-note').textContent = cont ? '追加为已有会话的新消息' : '迁移后自动打开新会话';
+  $('ds-go').textContent = cont ? '追加到会话' : '开始迁移';
+};
+
+$('ds-go').onclick = () => {
+  const steps = $('ds-steps');
+  steps.hidden = false;
+  $('ds-go').disabled = true;
+  $('ds-prog').style.width = '0%';
+  steps.querySelectorAll('.ds-step').forEach(s => {
+    s.removeAttribute('data-done');
+    s.querySelector('.ds-tick, .ds-spin').outerHTML = '<span class="ds-spin"></span>';
+  });
+  let i = 0;
+  const tick = setInterval(() => {
+    i++;
+    const cur = steps.querySelector(`.ds-step[data-step="${i}"]`);
+    if (cur) {
+      cur.setAttribute('data-done', '');
+      cur.querySelector('.ds-tick, .ds-spin').outerHTML = `<span class="ds-tick">${I.check}</span>`;
+    }
+    $('ds-prog').style.width = (Math.min(i, 3) / 3 * 100) + '%';
+    if (i >= 3) {
+      clearInterval(tick);
+      $('ds-go').disabled = false;
+      $('ds-pop').hidden = true;
+      toast('已创建会话 · 正在打开', 'ok', { label: '打开', run: () => toast('已切到新会话') });
+    }
+  }, 700);
+};
+
+/* prototype controls */
+$('pt-light').onclick = () => { document.body.removeAttribute('data-ds-dark-theme'); $('pt-light').setAttribute('data-on', ''); $('pt-dark').removeAttribute('data-on'); };
+$('pt-dark').onclick = () => { document.body.setAttribute('data-ds-dark-theme', ''); $('pt-dark').setAttribute('data-on', ''); $('pt-light').removeAttribute('data-on'); };
+document.querySelectorAll('[data-state]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('[data-state]').forEach(x => x.removeAttribute('data-on'));
+    b.setAttribute('data-on', '');
+    const s = b.dataset.state;
+    if (s === 'ok') { setStatus('ok', '已就绪 · deepseek-chat'); setBusy(false); }
+    if (s === 'busy') { setStatus('busy', '思考中… 3.2s'); setBusy(true, '正在思考… 3.2s'); }
+    if (s === 'warn') { setStatus('warn', '未登录 · 需要打开登录窗口'); setBusy(false); }
+    if (s === 'bad') { setStatus('bad', '引擎错误：浏览器启动失败'); setBusy(false); }
+  };
+});
+$('pt-empty').onclick = () => {
+  CONVS.unshift({ id: 'empty' + Date.now(), title: '新对话', time: '刚刚', model: 'deepseek-chat', msgs: [] });
+  activeId = CONVS[0].id; renderList(); renderThread();
+};
+$('pt-attach').onclick = () => { $('ds-attach').hidden = false; };
+$('pt-error').onclick = () => {
+  const c = convById(activeId);
+  if (!c || !c.msgs.length) return;
+  const last = c.msgs[c.msgs.length - 1];
+  if (last.role === 'assistant') last.error = '网页端返回 429（请求过于频繁），已自动退避，可重试。';
+  renderThread();
+};
+$('pt-hover').onclick = () => {
+  const first = threadInner.querySelector('.ds-msg[data-role="assistant"]') || threadInner.querySelector('.ds-msg');
+  if (first) first.querySelector('.ds-msg-acts').style.opacity = '1';
+};
+
+window.toast = toast;
+renderList();
+renderThread();
+setBusy(false);
+$('ds-think').classList.add('ds-btn-on');
+</script>
+</body>
+</html>

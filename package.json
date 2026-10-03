@@ -1,0 +1,87 @@
+{
+  "name": "dsh-dschat",
+  "version": "0.3.8",
+  "private": true,
+  "description": "Chat with DeepSeek's web端 (chat.deepseek.com) inside DeepSeek Harness as a native panel, then distill or replay the conversation into a new harness session.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "deepseek",
+    "dschat",
+    "webchat",
+    "chatgpt-mode",
+    "deepseek-web",
+    "harness-plugin",
+    "plugin"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "lib/index.js",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "meta": {
+    "title": "dsh-DSchat",
+    "description": "在 DSH 原生面板里聊 DeepSeek 网页端，并一键迁移成 harness 会话"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "playwright-core": "^1.62.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "schemastery": "^3.18.0"
+  },
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md",
+    "NOTICE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CLnum42/dsh-DSchat.git"
+  },
+  "homepage": "https://github.com/CLnum42/dsh-DSchat#readme",
+  "bugs": {
+    "url": "https://github.com/CLnum42/dsh-DSchat/issues"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "test": "node --test test/*.test.ts"
+  }
+}

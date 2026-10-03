@@ -1,0 +1,17 @@
+# Dependencies — never committed. `npm install --ignore-scripts` recreates them.
+node_modules/
+
+# Build / release artifacts.
+# The install tarball is packed OUTSIDE the repository:
+#   npm pack --pack-destination ~/.dsh/dschat-dist
+dist/
+*.tgz
+
+# Scratch output of the probe and screenshot scripts (scripts/ui-*.mjs,
+# scripts/token-probe.mjs, scripts/asar-probe.mjs, and the *.test.ts runners).
+.tmp-*/
+.dschat-probe/
+.asar-probe/
+
+# macOS
+.DS_Store

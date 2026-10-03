@@ -1,0 +1,11 @@
+# dsh-DSchat bundle patch: inserts the plugin row into the profile roster.
+#
+# The row is a bare plugin by package name: the host half (exports ".") runs in
+# the host process (DeepSeek web browser engine, /api/dsh-dschat routes, agent
+# tools), and the `dsh.client` declaration in package.json makes the browser
+# half (exports "./client", served at /plugins/<id>/client.js) load in the web
+# GUI, where it registers the sidebar entry (`sidebar.panellist`) and the native
+# center panel (`main`).
+- insert:
+    - id: dschat
+      name: 'dsh-dschat'

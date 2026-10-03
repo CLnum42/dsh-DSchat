@@ -1,0 +1,20 @@
+dsh-DSchat
+Copyright 2026 CLnum42
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It is a derivative work of the dsh-webchat plugin, which is also licensed
+under the Apache License, Version 2.0. The following parts are carried over
+from that project:
+
+  - the browser engine that drives chat.deepseek.com through playwright-core
+    (src/engine/engine.ts, src/engine/html-md.ts)
+  - the transcript store and the web-side transcript parsing
+    (src/store.ts, and the recover paths in src/routes.ts)
+  - the distillation / transfer machinery that turns a web conversation into
+    a harness session (src/transfer.ts)
+
+The panel UI, the slot registration (sidebar.panellist / main /
+settings.section), the route namespace (/api/dsh-dschat/*) and the tool
+namespace (dschat_*) were rewritten for this plugin; the namespaces are
+independent so both plugins can be installed side by side.
