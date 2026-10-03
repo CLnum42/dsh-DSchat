@@ -4,13 +4,22 @@
  * fenced on the host.
  */
 
-import { DSCHAT_API, type TransferMode, type DSchatState, type DSchatTail, type WebChatSummary } from '../protocol.ts'
+import { DSCHAT_API, type TransferMode, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
 
 /** Shape every /api/dsh-dschat response carries: ok plus optional error. */
 interface ApiResult {
   ok: boolean
   error?: string
 }
+
+/**
+ * The client's name for the wake/login reply.
+ *
+ * It mirrors `WakeResult` from the protocol rather than redeclaring the fields,
+ * because the two halves are wired over one JSON body: a field added on the host
+ * and forgotten here is a silent no-op on the panel.
+ */
+export type ApiWakeResult = WakeResult
 
 /** Endpoint payloads always extend ApiResult. */
 type EndpointResult<T> = T & ApiResult
@@ -122,8 +131,19 @@ export class DSchatApi {
     return request<DSchatTail>(`${DSCHAT_API.tail}?${query.toString()}`, undefined, TIMEOUT.poll)
   }
 
-  openLogin(): Promise<EndpointResult<{ ok: boolean }>> {
-    return request<{ ok: boolean }>(DSCHAT_API.openLogin, undefined, TIMEOUT.login)
+  openLogin(): Promise<EndpointResult<ApiWakeResult>> {
+    return request<ApiWakeResult>(DSCHAT_API.openLogin, undefined, TIMEOUT.login)
+  }
+
+  /**
+   * "I want to type": start the web page in the mode that suits an existing
+   * session, without assuming the visible login window is wanted.
+   *
+   * See `WakeResult`: `loginWindow` means a visible window is already open, so
+   * the caller must not ask for one again.
+   */
+  wake(): Promise<EndpointResult<ApiWakeResult>> {
+    return request<ApiWakeResult>(DSCHAT_API.wake, undefined, TIMEOUT.login)
   }
 
   closeBrowser(): Promise<EndpointResult<{ ok: boolean }>> {

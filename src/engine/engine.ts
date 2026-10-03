@@ -34,6 +34,7 @@ import type {
   DSchatTranscript,
   RecoverResult,
   RecoverSource,
+  WakeResult,
   WebChatSummary,
 } from '../protocol.ts'
 import { hasAnswerBody, sourcesOf } from '../protocol.ts'
@@ -488,6 +489,110 @@ function stripSearchTrace(text: string): string {
     .replace(/FINISHED+/g, '\n\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+/**
+ * The previous turn's reply, as it stood before the new message was submitted.
+ *
+ * Returns the WHOLE stored message, reasoning block included, because that is
+ * what the DOM fallback scrapes: comparing a scrape against a body-only copy
+ * would line up the previous answer against the previous reasoning and report
+ * every replica as new (the exact mistake this guard exists to prevent, one
+ * level down).
+ *
+ * The last message is not always the reply — a question whose answer never
+ * arrived leaves a user message last — so this walks back to the newest
+ * assistant message that carries any text, and returns `''` when the
+ * conversation has no assistant turn at all (a fresh chat: nothing to repeat).
+ *
+ * @param messages - the active chat's stored messages, in order.
+ */
+export function previousReplyMessage(messages: readonly DSchatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message === undefined || message.role !== 'assistant') continue
+    const text = message.content.trimStart()
+    // A reply still streaming its reasoning has no body yet, but it is still
+    // the previous reply and still the thing a scrape can echo.
+    if (text !== '') return text
+  }
+  return ''
+}
+
+/**
+ * Strip everything that differs between two RENDERINGS of one reply.
+ *
+ * The same answer reaches this file two ways: as the model's own markdown from
+ * the teed stream, and as markdown re-serialized from the page's DOM. They
+ * differ in whitespace (the DOM collapses block boundaries to spaces), in
+ * emphasis markers and quote glyphs (the DOM's innerHTML loses the opening
+ * `**` of an interrupted span), and in heading markers. None of that is
+ * content, and comparing identity is the entire job here.
+ */
+function normalizeReplyText(text: string): string {
+  return text
+    .replace(/<\/?(?:details|summary)[^>]*>/gi, '')
+    .replace(/[*_`~>#|]/g, '')
+    // Everything that is not a letter or a digit, in any script: whitespace,
+    // both quote styles, the em dash the web uses for subtitles, CJK
+    // punctuation. `\p{L}`/`\p{N}` are what make this safe for 中文 as well as
+    // ASCII — a class listing the punctuation by hand always misses some.
+    .replace(/[^\p{L}\p{N}]/gu, '')
+}
+
+/**
+ * Shortest normalized text worth comparing.
+ *
+ * Was 25, which was simply too high: a live reply is scraped while it is still
+ * being written, so the text under judgement is routinely a short opening
+ * fragment rather than a finished answer. At 25 the guard stayed silent for
+ * exactly the replies it exists for — a real-browser replay caught a
+ * 「思考过程旧思考旧答复」 replica (10 normalized characters) being committed
+ * with the guard reporting "not a replica".
+ *
+ * 10 is safe at the other end because the overlap ratio is what decides: below
+ * this length a shared prefix is normal Chinese prose (「你好」「好的，我…
+ * 」), and a false refusal would cost the reader a genuine answer.
+ */
+const REPLICA_MIN_CHARS = 10
+
+/** Share of the shorter text that must overlap to call it the same reply. */
+const REPLICA_OVERLAP = 0.9
+
+/**
+ * Whether `scraped` is a re-rendering of `previous` rather than a new answer.
+ *
+ * "Starts with" alone was too strict: the observed replica was a collapsed copy
+ * CUT SHORT mid-answer, so its 49 normalized characters sat entirely inside the
+ * previous reply's 74 and then it simply stopped. Overlap of the shorter text is
+ * what survives truncation, whitespace collapse and markdown loss while still
+ * being far too specific for two DIFFERENT answers to share — a real answer
+ * turns over within its first sentence.
+ *
+ * Both directions count, because the scrape can be longer than the stored copy
+ * when the previous turn itself was stored from an early, partial scrape.
+ *
+ * @param scraped - markdown from the DOM fallback.
+ * @param previous - the previous reply as stored (see `previousReplyMessage`).
+ */
+export function repeatsPreviousReply(scraped: string, previous: string): boolean {
+  if (previous === '') return false
+  const a = normalizeReplyText(previous)
+  const b = normalizeReplyText(scraped)
+  const shortest = Math.min(a.length, b.length)
+  if (shortest < REPLICA_MIN_CHARS) return false
+  const overlap = a.startsWith(b) || b.startsWith(a)
+    ? shortest
+    : commonPrefixLength(a, b)
+  return overlap / shortest >= REPLICA_OVERLAP
+}
+
+/** Length of the shared prefix of two strings. */
+function commonPrefixLength(a: string, b: string): number {
+  const limit = Math.min(a.length, b.length)
+  let index = 0
+  while (index < limit && a[index] === b[index]) index += 1
+  return index
 }
 
 /** True when a fragment type is the R1 reasoning (THINK / THINKING). */
@@ -958,8 +1063,26 @@ export class DeepSeekWebEngine {
    * launch and lets the status view report 'launching' honestly meanwhile.
    */
   private relaunchPending = false
+  /**
+   * The launch currently in flight, if any.
+   *
+   * `ensureBrowser` used to answer a SECOND caller by polling for ten seconds
+   * and then throwing 「浏览器启动超时」 — while one launch is
+   * `launchPersistentContext` plus a 45 s `page.goto`, i.e. routinely longer
+   * than that budget. Two callers reaching a cold engine (the panel waking it,
+   * the `/state` self-heal, or a wake that overtook a send) therefore turned
+   * into a spurious timeout on the second one. Holding the promise makes every
+   * caller await the SAME launch and see its real outcome.
+   */
+  private launchInFlight: Promise<Page> | undefined
   private launchedOnce = false
-  /** True while a headed one-time login window is open (auto-closes on login). */
+  /**
+   * True while a headed one-time login window is open.
+   *
+   * Cleared as soon as the page reports a session — but the page is no longer
+   * closed at that moment (see `watchLogin`), because that close was half of the
+   * "网页端启动了两次" report.
+   */
   private loginMode = false
   /** Remembered login state — survives the auto-close so the panel stays "已登录". */
   private loggedInOnce = false
@@ -1036,10 +1159,6 @@ export class DeepSeekWebEngine {
     return { ...candidates[0], args }
   }
 
-  /**
-   * Ensure the browser + chat.deepseek.com page exist. Launches the persistent
-   * context on first call; subsequent calls reuse the page.
-   */
   /** True when the cached page/context are still connected (not closed by the user). */
   private isPageAlive(): boolean {
     if (this.page === undefined || this.context === undefined) return false
@@ -1050,16 +1169,57 @@ export class DeepSeekWebEngine {
     }
   }
 
+  /**
+   * True when this browser profile has been used before — i.e. it plausibly
+   * holds a DeepSeek session.
+   *
+   * It exists to keep the FIRST run to a single browser launch. A login needs a
+   * visible window and a visible window cannot be produced by a browser that is
+   * already running, so "launch headless, discover /sign_in, relaunch headed"
+   * costs a first-time reader two launches for one login. An empty profile dir
+   * settles the question before the first launch: nothing to reuse, so go
+   * straight to the login window. A profile that HAS run before is the opposite
+   * case — it is very likely still authenticated, and waking it headless is
+   * both faster and invisible.
+   */
+  private hasProfileData(): boolean {
+    const marks = [
+      join(this.profileDir, 'Default', 'Cookies'),
+      join(this.profileDir, 'Cookies'),
+      join(this.profileDir, 'Default', 'Local Storage'),
+    ]
+    return marks.some(mark => {
+      try {
+        return existsSync(mark)
+      } catch {
+        return false
+      }
+    })
+  }
+
+  /**
+   * Ensure the browser + chat.deepseek.com page exist. Launches the persistent
+   * context on first call; subsequent calls reuse the page.
+   *
+   * Concurrent callers share ONE launch (see `launchInFlight`): this method is
+   * reached from three directions at once — the panel waking the engine, the
+   * `/state` self-heal, and a send — and each of them used to be able to start
+   * its own browser.
+   */
   async ensureBrowser(): Promise<Page> {
     if (this.isPageAlive()) return this.page!
-    if (this.state === 'launching') {
-      // Another call is already launching; wait for it.
-      for (let attempt = 0; attempt < 100 && !this.isPageAlive(); attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 100))
-      }
-      if (this.isPageAlive()) return this.page!
-      throw new Error('浏览器启动超时')
+    if (this.launchInFlight !== undefined) return await this.launchInFlight
+    const task = this.launchBrowser()
+    this.launchInFlight = task
+    try {
+      return await task
+    } finally {
+      if (this.launchInFlight === task) this.launchInFlight = undefined
     }
+  }
+
+  /** The launch itself: pick a browser, open the chat page, report 'ready'. */
+  private async launchBrowser(): Promise<Page> {
     // Clear any stale (dead) page/context before relaunching.
     if (this.page !== undefined || this.context !== undefined) await this.disposeBrowser()
     this.setState('launching')
@@ -1190,39 +1350,146 @@ export class DeepSeekWebEngine {
   }
 
   /**
-   * Open a visible browser window for the one-time login. The window is forced
-   * headed (login needs a user) and auto-closes as soon as the page reaches the
-   * chat UI; normal chatting then runs headless on the persisted profile.
+   * Bring the web page up for a reader who wants to type — WITHOUT assuming a
+   * login window is what they need.
+   *
+   * This is what the panel calls when the composer is clicked or a message is
+   * submitted while the engine is down. It is deliberately NOT `openLoginWindow`:
+   * a profile that is already authenticated only needs a browser, and asking for
+   * the visible login window first is what made one click cost two launches —
+   * the window opened (headed, disposing whatever was running), saw the
+   * persisted session, closed itself again, and the following send had to launch
+   * a second, headless browser to do the actual work.
+   *
+   * So the wake is one launch in the right mode:
+   *   - a live page is reused, never relaunched;
+   *   - a profile with no history at all goes straight to the visible login
+   *     window (there is nothing to reuse, and a login needs a human);
+   *   - everything else wakes headless per the browser settings, and only a page
+   *     that reports /sign_in escalates to the visible window afterwards.
+   *
+   * Serialized on the engine queue: a wake may dispose and relaunch a browser,
+   * which must never happen while a send is typing into the old one.
    */
-  async openLoginWindow(): Promise<{ ok: boolean; error?: string }> {
+  async wake(): Promise<WakeResult> {
+    return this.queue.run(async () => {
+      if (this.isPageAlive()) {
+        const loggedIn = await this.isLoggedIn()
+        if (loggedIn === true) this.loggedInOnce = true
+        return { ok: true, loggedIn, launched: false }
+      }
+      /*
+       * First run (nothing in the profile, nothing logged in this process): the
+       * only useful thing a browser can show is the sign-in page, so open the
+       * visible window directly instead of paying for a headless launch that is
+       * guaranteed to land on /sign_in and then be thrown away. A profile that
+       * has run before gets the quiet path — if its session has expired after
+       * all, the panel escalates to the login window on the wake's answer.
+       */
+      if (!this.loggedInOnce && !this.hasProfileData()) {
+        /*
+         * Dead handles are dropped FIRST, and deliberately before the mode is
+         * set: `disposeBrowser` resets `loginMode`, so setting it first would be
+         * silently undone by the dispose inside `launchBrowser` and the
+         * first-run window would come up headless — i.e. the launch this branch
+         * exists to avoid.
+         */
+        if (this.page !== undefined || this.context !== undefined) await this.disposeBrowser()
+        this.loginMode = true
+      }
+      try {
+        await this.ensureBrowser()
+      } catch (error) {
+        this.loginMode = false
+        return { ok: false, error: String(error), loggedIn: null, launched: false }
+      }
+      const loggedIn = await this.isLoggedIn()
+      if (loggedIn === true) {
+        this.loggedInOnce = true
+        this.loginMode = false
+        return { ok: true, loggedIn: true, launched: true }
+      }
+      if (this.loginMode) {
+        // The visible window is up and waiting for a human; watch it so the
+        // panel's next poll flips to 已登录 the moment they finish.
+        void this.watchLogin()
+        return { ok: true, loggedIn: false, launched: true, loginWindow: true }
+      }
+      return { ok: true, loggedIn, launched: true }
+    })
+  }
+
+  /**
+   * Open a visible browser window for the one-time login (the panel's explicit
+   * 「打开登录窗口」, and the escalation a wake takes when it finds /sign_in).
+   *
+   * Idempotent and non-destructive on purpose:
+   *   - a live page that is ALREADY logged in is reused and brought forward. The
+   *     old version disposed it first, so a click that raced a stale "not logged
+   *     in" snapshot tore down a perfectly good browser and relaunched it —
+   *     the worst form of the double launch;
+   *   - a login window that is already open is reused too, so a second click
+   *     (or a second panel) cannot spawn a second browser;
+   *   - only a page that genuinely cannot log in — the sign-in screen itself, or
+   *     no page at all — is replaced by a fresh headed window.
+   */
+  async openLoginWindow(): Promise<WakeResult> {
+    return this.queue.run(() => this.openLoginInner())
+  }
+
+  /** The queued-open form: `wake` already runs on the queue and calls this. */
+  private async openLoginInner(): Promise<WakeResult> {
+    if (this.isPageAlive()) {
+      if (this.loginMode) {
+        await this.page?.bringToFront().catch(() => undefined)
+        return { ok: true, loggedIn: false, launched: false, loginWindow: true, reused: true }
+      }
+      if (await this.isLoggedIn() === true) {
+        this.loggedInOnce = true
+        await this.page?.bringToFront().catch(() => undefined)
+        return { ok: true, loggedIn: true, launched: false, reused: true }
+      }
+    }
     try {
-      // Close any running (possibly headless) browser first so we always open a
-      // fresh *visible* window for the one-time login.
+      // Close the running (necessarily not-logged-in, probably headless)
+      // browser first so we always open a fresh *visible* window.
       if (this.page !== undefined || this.context !== undefined) await this.disposeBrowser()
       this.loginMode = true
       await this.ensureBrowser()
-      await this.page?.bringToFront()
-      void this.watchLoginAndClose()
-      return { ok: true }
+      await this.page?.bringToFront().catch(() => undefined)
+      void this.watchLogin()
+      return { ok: true, loggedIn: false, launched: true, loginWindow: true }
     } catch (error) {
       this.loginMode = false
-      return { ok: false, error: String(error) }
+      return { ok: false, error: String(error), loggedIn: null, launched: false }
     }
   }
 
-  /** Poll the login window and close it once the user has logged in. */
-  private async watchLoginAndClose(): Promise<void> {
+  /**
+   * Poll a login window and mark the engine ready once the user has signed in.
+   *
+   * It used to CLOSE the browser at that moment, and that single line is the
+   * other half of the "网页端又启动了一次" report: the next send found no page
+   * and launched a fresh (headless) browser, so one login cost two launches and
+   * threw away a page that was already sitting on the chat UI, authenticated.
+   * The page is KEPT — the next send types straight into it. 「关闭浏览器」 in the
+   * panel's ··· menu is how a reader gets rid of the visible window.
+   */
+  private async watchLogin(): Promise<void> {
     for (let attempt = 0; attempt < 600; attempt++) {
       if (!this.loginMode) return
       if (!this.isPageAlive()) {
-        // The user closed the window manually; stop watching.
+        // The user closed the window manually; stop watching. Report it as
+        // stopped, or the `/state` self-heal would relaunch a browser behind an
+        // abandoned login attempt (it heals a dead page in state 'ready').
         this.loginMode = false
+        if (this.state !== 'error') this.setState('stopped')
         return
       }
       if (await this.isLoggedIn() === true) {
         this.loginMode = false
         this.loggedInOnce = true
-        await this.disposeBrowser().catch(() => undefined)
+        this.setState('ready')
         return
       }
       await new Promise(resolve => setTimeout(resolve, 1000))
@@ -2259,7 +2526,7 @@ export class DeepSeekWebEngine {
       this.setLastError(message, 'PAGE_CHANGED')
       return { ok: false, error: message, code: 'PAGE_CHANGED' }
     }
-    if (this.page === undefined) {
+    if (!this.isPageAlive()) {
       try {
         await this.ensureBrowser()
       } catch (error) {
@@ -2315,6 +2582,25 @@ export class DeepSeekWebEngine {
        * whether this turn's own row appeared.
        */
       const baselineKeys = await this.messageKeys()
+      /*
+       * The previous answer's BODY, snapshotted where it is still the page's
+       * answer and nothing else.
+       *
+       * The key set above says whether the list grew a row, which is not the
+       * same as "the page moved on": a virtualizer remounts and recycles rows,
+       * so a key can be new while the row under it is an old message, and the
+       * submit check accepts that as "this turn started". The DOM fallback then
+       * scraped the previous reply and committed it — with no error — as the
+       * answer to a question it does not answer. Seen live: 「开封有什么适合
+       * 自驾游的景点？」 stored as a 453-character whitespace-collapsed replica
+       * of 3-hour-old 「这个文件的题目是什么？」, 1.8 s after the question, with
+       * the page still showing that question in its composer.
+       *
+       * Content is that guard's only dependable identity (see
+       * `repeatsPreviousReply`): row keys, timestamps and the page's own
+       * affordances have all been observed to lie here, the text has not.
+       */
+      const previousReply = previousReplyMessage(this.store.getChat(chat.id)?.messages ?? [])
       await page.keyboard.press('Enter')
 
       /*
@@ -2366,10 +2652,10 @@ export class DeepSeekWebEngine {
       if (!wait) {
         // Fire-and-forget for the GUI: the background loop streams into the
         // transcript; the panel tails /tail and renders live.
-        void this.streamReply(chat.id, assistantId, baselineKeys)
+        void this.streamReply(chat.id, assistantId, baselineKeys, previousReply)
         return { ok: true, chatId: chat.id, stored }
       }
-      const result = await this.streamReply(chat.id, assistantId, baselineKeys)
+      const result = await this.streamReply(chat.id, assistantId, baselineKeys, previousReply)
       return { ...result, stored }
     } catch (error) {
       const message = `发送失败：${String(error)}`
@@ -2388,8 +2674,17 @@ export class DeepSeekWebEngine {
    *   submitted (see `messageKeys`). The DOM fallback uses them to tell this
    *   turn's reply from the previous turn's, which is otherwise what a scrape
    *   taken too early returns.
+   * @param previousReply - the previous answer's body as it stood before Enter
+   *   (see {@link previousReplyMessage}). The DOM fallback refuses any snapshot
+   *   that merely repeats it — the second, content-based half of the same
+   *   "is this really a new reply?" question the keys answer structurally.
    */
-  private async streamReply(chatId: string, assistantId: string, baselineKeys: readonly string[] = []): Promise<SendResult> {
+  private async streamReply(
+    chatId: string,
+    assistantId: string,
+    baselineKeys: readonly string[] = [],
+    previousReply = '',
+  ): Promise<SendResult> {
     if (this.page === undefined) return { ok: false, error: '浏览器未启动' }
     this.busy = true
     this.busySince = Date.now()
@@ -2408,6 +2703,12 @@ export class DeepSeekWebEngine {
     let replyCode: DSchatErrorCode | undefined
     let domChangedAt = 0
     let lastDom = ''
+    /**
+     * Set when a scrape was thrown away for being the previous reply. The
+     * error path turns it into a message the reader can act on instead of a
+     * generic timeout (see the loop's exit).
+     */
+    let staleDomSeen = false
 
     /**
      * When the reasoning of THIS turn first produced text, 0 before that.
@@ -2449,8 +2750,21 @@ export class DeepSeekWebEngine {
       const assistant = [...scraped].reverse().find(message => message.role === 'assistant')
       if (assistant === undefined) return { markdown: '' }
       const think = stripSearchTrace(assistant.parts.filter(part => part.kind === 'think').map(part => part.text).join('\n\n')).trim()
-      const bodyHtml = assistant.parts.find(part => part.kind === 'body')?.markdown ?? ''
-      const bodyMd = bodyHtml === '' ? '' : stripSearchTrace(serializeToMarkdown(parseMarkup(bodyHtml)))
+      /*
+       * The body part carries its rendered HTML in `markdown` and its plain text
+       * in `text`. Reading only the first one meant a reply with no rendered
+       * markup — an answer taking shape as a bare text node, which is what a
+       * live reply looks like before its first block element exists — came back
+       * with an EMPTY body. The loop then settled on the reasoning alone:
+       * `DOM_STABLE_MS` fired, the turn was committed as finished, and the
+       * answer never appeared. Fall back to the text, exactly as the recovery
+       * path (`scrapedToMessages`) already does.
+       */
+      const bodyPart = assistant.parts.find(part => part.kind === 'body')
+      const bodyMarkdown = bodyPart === undefined
+        ? ''
+        : (bodyPart.markdown === '' ? bodyPart.text : serializeToMarkdown(parseMarkup(bodyPart.markdown)))
+      const bodyMd = stripSearchTrace(bodyMarkdown)
       const thinkMd = think === '' ? '' : `<details><summary>思考过程</summary>\n\n${think}\n\n</details>`
       return { markdown: [thinkMd, bodyMd].filter(Boolean).join('\n\n') }
     }
@@ -2535,12 +2849,25 @@ export class DeepSeekWebEngine {
            * evidence to compare against: the old accept-anything behaviour is
            * kept there, because refusing would turn "we cannot tell" into "the
            * reply is lost".
+           *
+           * The keys alone were not enough — the reported case was a scrape
+           * that passed this check and was still the previous answer (a
+           * virtualizer hands out a fresh key when it re-renders an old row, so
+           * "a key I have not seen" does not mean "a message I have not seen").
+           * So the scrape is ALSO refused when it merely repeats `previousReply`
+           * as it stood before Enter: a genuine new answer diverges from it
+           * within a few characters, while a replica never does (see
+           * `repeatsPreviousReply`). Refusing costs a few ticks of streaming
+           * smoothness; accepting costs the reader an answer to someone else's
+           * question, which is the bug being fixed.
            */
           const keys = await this.messageKeys()
           const fresh = baselineKeys.length === 0 || keys.some(key => !baselineKeys.includes(key))
           if (fresh) {
             const dom = await domSnapshot()
-            if (dom.markdown !== '') {
+            const replica = dom.markdown !== '' && repeatsPreviousReply(dom.markdown, previousReply)
+            if (replica) staleDomSeen = true
+            if (dom.markdown !== '' && !replica) {
               noteThinking(dom.markdown)
               if (dom.markdown !== lastDom) {
                 lastDom = dom.markdown
@@ -2561,6 +2888,16 @@ export class DeepSeekWebEngine {
         if (captureSeen && captureCompleted) {
           replyError = '页面协议疑似改版：已捕获到回复流但无法解析出内容，请升级 dsh-dschat 插件'
           replyCode = 'PAGE_CHANGED'
+        } else if (staleDomSeen) {
+          /*
+           * The page never produced anything but its own previous answer, so
+           * this question was very likely never submitted: the send was typed
+           * and lost (a composer that was not ready, a page that re-rendered
+           * instead of sending). Saying so is the whole point — the alternative
+           * is committing that old answer as this one's reply.
+           */
+          replyError = '网页端没有回复这次提问（页面上仍然是上一条回复）。请确认消息是否已送出，或重新发送。'
+          replyCode = 'TIMEOUT'
         } else {
           replyError = '等待回复超时（未捕获到网页回复流；可能未登录或页面结构已变化）'
           replyCode = 'TIMEOUT'
@@ -2569,12 +2906,23 @@ export class DeepSeekWebEngine {
         replyError = '生成超时，已返回部分内容'
         replyCode = 'TIMEOUT'
       }
-      this.store.upsertMessage(chatId, {
-        id: assistantId, role: 'assistant', content: replyMarkdown, ts: Date.now(),
-        streaming: false, error: replyError,
-        ...(thinkingMs === undefined ? {} : { thinkingMs }),
-        ...(replySources === undefined ? {} : { sources: replySources }),
-      })
+      /*
+       * An empty turn writes NO message row.
+       *
+       * A reply that never produced a byte has nothing to show, and the row it
+       * used to leave behind was reported as a permanently blank assistant
+       * bubble whose error text was the only thing in it. The reader already
+       * gets the failure twice over — the panel's error line and this method's
+       * return — so the transcript keeps only what was actually said.
+       */
+      if (replyMarkdown !== '') {
+        this.store.upsertMessage(chatId, {
+          id: assistantId, role: 'assistant', content: replyMarkdown, ts: Date.now(),
+          streaming: false, error: replyError,
+          ...(thinkingMs === undefined ? {} : { thinkingMs }),
+          ...(replySources === undefined ? {} : { sources: replySources }),
+        })
+      }
       this.store.setStreaming(chatId, false)
       // The turn is over: land the coalesced writes now rather than leaving the
       // finished reply in a 1 s debounce window.
@@ -2584,12 +2932,14 @@ export class DeepSeekWebEngine {
     } catch (error) {
       const message = `生成过程中断：${String(error)}`
       this.setLastError(message)
-      this.store.upsertMessage(chatId, {
-        id: assistantId, role: 'assistant', content: replyMarkdown, ts: Date.now(),
-        streaming: false, error: message,
-        ...(thinkingMs === undefined ? {} : { thinkingMs }),
-        ...(replySources === undefined ? {} : { sources: replySources }),
-      })
+      if (replyMarkdown !== '') {
+        this.store.upsertMessage(chatId, {
+          id: assistantId, role: 'assistant', content: replyMarkdown, ts: Date.now(),
+          streaming: false, error: message,
+          ...(thinkingMs === undefined ? {} : { thinkingMs }),
+          ...(replySources === undefined ? {} : { sources: replySources }),
+        })
+      }
       this.store.setStreaming(chatId, false)
       this.store.flush()
       return { ok: false, chatId, reply: replyMarkdown, error: message }

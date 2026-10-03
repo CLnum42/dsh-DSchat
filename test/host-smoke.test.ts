@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -250,6 +250,7 @@ test('host half imports and registers its surfaces', async () => {
     for (const path of [
       '/api/dsh-dschat/state',
       '/api/dsh-dschat/context',
+      '/api/dsh-dschat/wake',
       '/api/dsh-dschat/open-login',
       '/api/dsh-dschat/close-browser',
       '/api/dsh-dschat/new-chat',
@@ -266,6 +267,17 @@ test('host half imports and registers its surfaces', async () => {
       '/api/dsh-dschat/web-chats',
       '/api/dsh-dschat/recover',
     ]) assert.ok(paths.includes(path), `missing route ${path}`)
+
+    /*
+     * The same check, derived rather than hand-written: every constant in
+     * `DSCHAT_API` is a path the panel fetches, so a constant without a route is
+     * a guaranteed 404 in the UI. The hard-coded list above documents the
+     * contract; this one catches the edit that forgets to extend it.
+     */
+    const { DSCHAT_API } = await import('../src/protocol.ts')
+    for (const [name, path] of Object.entries(DSCHAT_API)) {
+      assert.ok(paths.includes(path), `DSCHAT_API.${name} (${path}) has no route`)
+    }
 
     // The five agent tools keep their documented names.
     assert.deepEqual(
@@ -949,6 +961,261 @@ test('status keeps a real error while the browser is still connected', async () 
 
     const status = await engine.status()
     assert.equal(status.engineError, '无法打开 https://chat.deepseek.com：net::ERR_INTERNET_DISCONNECTED')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The double launch, pinned at the engine.
+ *
+ * Reported: clicking the composer started a browser, and then typing/sending
+ * started ANOTHER one before the conversation worked. Two engine behaviours
+ * produced that, and both are asserted here:
+ *
+ *   1. `openLoginWindow` disposed whatever was running before it opened the
+ *      visible window — so a click that merely raced a stale "not logged in"
+ *      snapshot tore down a working, authenticated page and relaunched it;
+ *   2. the login watcher closed the browser once it saw the session, leaving the
+ *      following send with no page, i.e. one more launch.
+ *
+ * These tests never touch a real browser: the engine's ONE launch seam
+ * (`launchBrowser`) is replaced with a recorder. That is both safer and
+ * sharper than the real call — it answers not just "how many launches" but
+ * "was the launch in login mode", which is the whole first-run decision.
+ */
+function engineFixture(name: string) {
+  const dataDir = mkdtempSync(join(tmpdir(), `dschat-${name}-`))
+  return { dataDir, profileDir: join(dataDir, 'profile') }
+}
+
+/** A page whose only interesting answer is whether the chat UI is loaded. */
+function pageMock(options: { signedIn: boolean; onBringToFront?: () => void }) {
+  return {
+    isClosed: () => false,
+    url: () => (options.signedIn ? 'https://chat.deepseek.com/a/chat/s/abc' : 'https://chat.deepseek.com/sign_in'),
+    // A mounted composer is what `isLoggedIn` reads as "the chat UI".
+    locator: () => ({ count: async () => (options.signedIn ? 1 : 0) }),
+    bringToFront: async () => { options.onBringToFront?.() },
+  }
+}
+
+/**
+ * Replace the launch seam with a recorder that hands back `page`.
+ *
+ * Returning the page AND installing it on the engine is what the real
+ * `launchBrowser` does, so everything downstream (`isLoggedIn`, the login
+ * watcher, a later send) sees a consistent engine.
+ */
+function recordLaunches(
+  engine: unknown,
+  page: unknown,
+  context: { close: () => Promise<void> },
+): Array<{ loginMode: boolean }> {
+  const launches: Array<{ loginMode: boolean }> = []
+  Object.assign(engine as object, {
+    launchBrowser: async () => {
+      launches.push({ loginMode: (engine as { loginMode: boolean }).loginMode })
+      Object.assign(engine as object, { page, context })
+      return page
+    },
+  })
+  return launches
+}
+
+test('waking a live, signed-in page reuses it instead of launching a browser', async () => {
+  const { dataDir, profileDir } = engineFixture('wake')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const counts = { disposed: 0 }
+    const context = { close: async () => { counts.disposed++ } }
+    const page = pageMock({ signedIn: true })
+    Object.assign(engine, { context, page })
+    const launches = recordLaunches(engine, page, context)
+
+    const woken = await engine.wake()
+    assert.equal(woken.ok, true)
+    assert.equal(woken.loggedIn, true, 'a mounted composer means signed in')
+    assert.equal(woken.launched, false, 'the live page was reused')
+    assert.equal(launches.length, 0, 'and no browser was launched')
+    assert.equal(counts.disposed, 0, 'nothing was torn down either')
+    assert.equal(engine.getState(), 'stopped', 'the engine state was never even flipped to launching')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('openLoginWindow keeps a working signed-in browser instead of relaunching it', async () => {
+  const { dataDir, profileDir } = engineFixture('login-reuse')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const counts = { disposed: 0, front: 0 }
+    const context = { close: async () => { counts.disposed++ } }
+    const page = pageMock({ signedIn: true, onBringToFront: () => { counts.front++ } })
+    Object.assign(engine, { context, page })
+    const launches = recordLaunches(engine, page, context)
+
+    const opened = await engine.openLoginWindow()
+    assert.equal(opened.ok, true)
+    assert.equal(opened.reused, true, 'the page was reused')
+    assert.equal(opened.launched, false)
+    assert.equal(launches.length, 0, 'no second browser for an authenticated session')
+    assert.equal(counts.disposed, 0, 'the working browser must not be disposed')
+    assert.equal(counts.front, 1, 'it is brought forward instead, so the reader sees it')
+    assert.equal((engine as unknown as { page?: unknown }).page, page, 'and it stays the engine\'s page')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('openLoginWindow still replaces a page that cannot log in (the sign-in screen)', async () => {
+  const { dataDir, profileDir } = engineFixture('login-escalate')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const counts = { disposed: 0 }
+    const context = { close: async () => { counts.disposed++ } }
+    const stale = pageMock({ signedIn: false })
+    Object.assign(engine, { context, page: stale })
+    const launches = recordLaunches(engine, pageMock({ signedIn: false }), context)
+
+    const opened = await engine.openLoginWindow()
+    assert.equal(opened.ok, true)
+    assert.equal(opened.loginWindow, true, 'a visible window is now waiting for the user')
+    assert.ok(counts.disposed >= 1, 'the unusable page was disposed so a headed window can open')
+    assert.equal(launches.length, 1, 'exactly one launch')
+    assert.equal(launches[0].loginMode, true, 'and it is a HEADED one: the only launch a login can use')
+    // Leave no login watcher polling behind (it would hold the test process
+    // open for its full ten-minute window): this is the panel's 「关闭浏览器」.
+    await engine.disposeBrowser()
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('the first wake on an empty profile goes straight to the login window', async () => {
+  const { dataDir, profileDir } = engineFixture('first-run')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const context = { close: async () => undefined }
+    const launches = recordLaunches(engine, pageMock({ signedIn: false }), context)
+
+    const woken = await engine.wake()
+    assert.equal(woken.ok, true)
+    assert.equal(launches.length, 1, 'a first run launches ONCE, not twice')
+    assert.equal(launches[0].loginMode, true, 'straight into the visible window')
+    assert.equal(woken.loginWindow, true, 'and the panel is told not to ask for one itself')
+    // Same reason as above: stop the watcher this wake started.
+    await engine.disposeBrowser()
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a profile that has run before wakes headless', async () => {
+  const { dataDir, profileDir } = engineFixture('returning')
+  try {
+    // The mark `hasProfileData` looks for: a used profile holds cookies, so a
+    // browser launched here is very likely still authenticated and must stay
+    // out of the way.
+    mkdirSync(join(profileDir, 'Default'), { recursive: true })
+    writeFileSync(join(profileDir, 'Default', 'Cookies'), 'sqlite')
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const context = { close: async () => undefined }
+    const launches = recordLaunches(engine, pageMock({ signedIn: false }), context)
+
+    const woken = await engine.wake()
+    assert.equal(launches.length, 1)
+    assert.equal(launches[0].loginMode, false, 'the quiet path: no visible window for a returning reader')
+    assert.equal(woken.loginWindow, undefined, 'so the panel escalates only if it has to')
+    assert.equal(woken.loggedIn, false, 'the page here is the sign-in screen')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('the login watcher keeps the page once the user signs in', async () => {
+  const { dataDir, profileDir } = engineFixture('watch')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    const counts = { disposed: 0 }
+    const context = { close: async () => { counts.disposed++ } }
+    // Not signed in yet — the state a login window starts in. The context is
+    // NOT installed up front: a browser already there would be disposed on the
+    // way in, and this test counts exactly those disposals.
+    const page = pageMock({ signedIn: false })
+    recordLaunches(engine, page, context)
+    await engine.openLoginWindow()
+
+    // The user signs in.
+    Object.assign(page, pageMock({ signedIn: true }))
+    await new Promise(resolve => setTimeout(resolve, 1_500))
+
+    assert.equal(counts.disposed, 0, 'the browser is KEPT: closing it is what forced the second launch')
+    assert.equal(engine.getState(), 'ready', 'and the engine reports a usable page')
+    assert.equal(
+      (engine as unknown as { loginMode: boolean }).loginMode, false,
+      'the login window is no longer a login window — it is the working page',
+    )
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('one launch serves every concurrent caller', async () => {
+  const { dataDir, profileDir } = engineFixture('coalesce')
+  try {
+    const { DeepSeekWebEngine } = await import('../src/engine/engine.ts')
+    const engine = new DeepSeekWebEngine(
+      { createChat: () => ({ id: 'chat-1' }), listChats: () => [], getChat: () => undefined } as never,
+      { dataDir, profileDir },
+    )
+    let launches = 0
+    /*
+     * Stand in for `launchBrowser`: it answers with a page that is alive but NOT
+     * signed in, and it deliberately does NOT install itself on the engine —
+     * that keeps `isPageAlive()` false, which is the state all three callers
+     * arrive in (a page already alive short-circuits `ensureBrowser`).
+     */
+    Object.assign(engine, {
+      launchBrowser: async () => {
+        launches++
+        await new Promise(resolve => setTimeout(resolve, 30))
+        return pageMock({ signedIn: false })
+      },
+    })
+
+    const [first, second, third] = await Promise.all([
+      engine.ensureBrowser(),
+      engine.ensureBrowser(),
+      engine.ensureBrowser(),
+    ])
+    assert.equal(launches, 1, 'three callers, one browser')
+    assert.equal(first, second)
+    assert.equal(second, third)
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
   }

@@ -393,6 +393,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [attachBusy, setAttachBusy] = useState(false)
+  /**
+   * True while `ensureReady` is bringing the web page up.
+   *
+   * The engine does report 'launching', but only on its next snapshot — up to
+   * 1.5 s away, which is the whole click. This makes the composer say
+   * 「正在启动网页端…」 on the same frame as the click that asked for it.
+   */
+  const [waking, setWaking] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [railWidth, setRailWidth] = useState<number>(() => storedRailWidth())
   const [railDragging, setRailDragging] = useState(false)
@@ -932,6 +940,79 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   /* ------------------------------------------------------------ operations */
 
   /**
+   * Bring the web page up because the reader wants to type — and only ask for
+   * the visible login window when it is genuinely needed.
+   *
+   * This replaces the old "focus ⇒ openLogin()" shortcut, which is what made a
+   * single click cost two browser launches. `openLogin` always disposes and
+   * relaunches a HEADED window, so on a profile that is already authenticated
+   * (the normal case — the session lives in the persistent browser profile) it
+   * opened a window it did not need, the login watcher saw the session and
+   * closed that window again, and the next send had no page left to use and
+   * launched a second, headless browser to do the actual work.
+   *
+   * Now: wake (reuse the page if there is one, otherwise launch ONCE in the mode
+   * the profile deserves) → escalate to the login window only on a sign-in page.
+   * The engine coalesces concurrent launches; this ref coalesces the panel's own
+   * requests, so clicking around the card cannot queue a wake per click.
+   */
+  const wakeRef = useRef<Promise<boolean> | null>(null)
+  const ensureReady = useCallback(async (): Promise<boolean> => {
+    if (wakeRef.current !== null) return await wakeRef.current
+    const task = (async (): Promise<boolean> => {
+      setWaking(true)
+      try {
+        const woken = await api.wake().catch(() => undefined)
+        if (woken === undefined) return false
+        if (woken.ok !== true) {
+          /*
+           * A host that predates `/wake` answers 404 — and that pairing is REAL,
+           * not hypothetical: the two halves are installed together but loaded
+           * independently (the browser half is fetched from disk, the host half
+           * is a module generation that only a Harness restart replaces), so a
+           * page refresh after an upgrade meets exactly this. Falling back to
+           * the login route keeps the composer working; on a matching host the
+           * wake answers and this branch never runs.
+           */
+          if (/HTTP 404/.test(woken.error ?? '')) {
+            await api.openLogin().catch(() => undefined)
+            return false
+          }
+          toast(woken.error ?? tr('toast.wake.failed'), { error: true })
+          return false
+        }
+        if (woken.loggedIn === true) return true
+        /*
+         * Up, but on the sign-in screen. `loginWindow` already true means the
+         * wake itself opened the visible window (a profile with no history at
+         * all goes straight there) — asking again would dispose that fresh
+         * window and open a second one.
+         */
+        if (woken.loginWindow !== true) {
+          const opened = await api.openLogin().catch(() => undefined)
+          if (opened !== undefined && opened.ok !== true && opened.error !== undefined) {
+            toast(opened.error, { error: true })
+            return false
+          }
+        }
+        return false
+      } finally {
+        setWaking(false)
+        // Flip the composer to editable NOW. The 1.5 s snapshot poll would get
+        // there on its own, but that lag is exactly the pause that reads as
+        // "the click did nothing".
+        void refreshState()
+      }
+    })()
+    wakeRef.current = task
+    try {
+      return await task
+    } finally {
+      wakeRef.current = null
+    }
+  }, [api, toast, tr, refreshState])
+
+  /**
    * Retry a failed exchange: resend the last user message the web session
    * actually received.
    *
@@ -953,7 +1034,19 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
 
   const send = useCallback(async (): Promise<void> => {
     const text = draft.trim()
-    if ((text === '' && images.length === 0) || busy || loggedIn !== true) return
+    if (text === '' && images.length === 0) return
+    if (busy) return
+    /*
+     * Enter on a composer whose engine is down used to be a silent no-op: the
+     * message stayed in the box and nothing explained why. The reader's intent
+     * is unambiguous (they wrote a message and pressed Enter), so wake the
+     * engine first and only refuse if there is genuinely nobody logged in — the
+     * draft is left in place either way.
+     */
+    if (loggedIn !== true && !await ensureReady()) {
+      toast(tr('toast.send.needLogin'), { error: true })
+      return
+    }
     setDraft('')
     const sentImages = images
     setImages([])
@@ -1003,7 +1096,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       if (sentImages.length > 0) setImages(current => (current.length === 0 ? sentImages : current))
       toast(String(error), { error: true })
     }
-  }, [draft, images, busy, loggedIn, api, toast, tr, refreshState, retry])
+  }, [draft, images, busy, loggedIn, api, toast, tr, refreshState, retry, ensureReady])
 
   const stop = useCallback(async (): Promise<void> => {
     await api.stop().catch(() => undefined)
@@ -1445,7 +1538,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           'data-phase': engine.phase,
           title: whaleTitle,
           'aria-label': whaleTitle,
-          onClick: () => { if (loggedIn !== true) void openLogin() },
+          /*
+           * The mark is also the panel's "bring it up" button, and it means the
+           * same thing here as a click in the composer: start the web engine.
+           * It used to call `openLogin` — a headed relaunch — which is wrong for
+           * the common case it actually faces, a page that is merely down while
+           * the persisted session is perfectly good. The explicit
+           * 「打开登录窗口」 entries (the banner, the ··· menu, the settings page)
+           * are where a visible window is asked for by name.
+           */
+          onClick: () => { if (loggedIn !== true || !engineLive) void ensureReady() },
         },
         createElement(WhaleMark, { size: 19 }),
       ),
@@ -1998,6 +2100,19 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           'div',
           {
             className: dragging ? 'dsh-dschat-card dsh-dschat-dragging' : 'dsh-dschat-card',
+            /*
+             * The whole card is the "start me" affordance the offline
+             * placeholder advertises — it wears the accent wash and the pointer
+             * cursor — but only the textarea inside it took focus, so a click on
+             * the padding did nothing. Guarded on `target === currentTarget` so
+             * this never steals a click from a chip, a pill or the attach
+             * button: only a click on the card itself is forwarded to the input.
+             */
+            onClick: (event: { target: unknown; currentTarget: unknown }) => {
+              if (event.target !== event.currentTarget) return
+              inputRef.current?.focus()
+              if (loggedIn !== true && !busy) void ensureReady()
+            },
             // Paste and drop both end at the same place: bytes to the host,
             // path back, chip in the composer. `isAttachableFile` only rules out
             // empty entries — the page's own file input is the authority on
@@ -2069,21 +2184,25 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
             readOnly: busy || loggedIn !== true,
             placeholder: busy
               ? tr('composer.busy')
-              : state?.engine === 'launching'
+              : (waking || state?.engine === 'launching')
                 ? tr('composer.connecting')
                 : loggedIn !== true
                   ? (engineLive ? tr('composer.notLoggedIn') : tr('composer.offline'))
                   : tr('composer.placeholder'),
             onFocus: () => {
               if (busy) return
-              // 'launching' means a window is already on its way; re-asking
-              // would spawn a second one.
-              if (state?.engine === 'launching') return
-              if (loggedIn === true) return
-              // Not logged in and/or no page: bring the browser up. openLogin
-              // opens a VISIBLE window (and closes it again once the chat UI
-              // loads), so this is the right call for both cases.
-              void openLogin()
+              /*
+               * Already up and signed in: nothing to do. Every other case —
+               * stopped, launching, or a live page that is not signed in — goes
+               * through `ensureReady`, which is idempotent:
+               *   - a wake that is already in flight is joined, not repeated;
+               *   - the engine reuses a live page instead of relaunching one;
+               *   - the visible login window is opened only for a sign-in page.
+               * The old handler called `openLogin` here, which forced a headed
+               * relaunch even for a profile that was still authenticated.
+               */
+              if (loggedIn === true && !waking) return
+              void ensureReady()
             },
             onChange: (event: { target: { value: string } }) => setDraft(event.target.value),
             onKeyDown: (event: {
@@ -2114,10 +2233,13 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
              * The pills, their icons and their two states are the web app's own
              * (34px tall, 18px radius, and the same blue when on — see the
              * `.dsh-dschat-toggle` rules), so a reader who knows the page
-             * recognises the switches instead of re-learning them. 附件 follows
-             * them on the left at 34px, then the row breaks: the send circle is
-             * the one control that belongs at the far right, exactly where the
-             * page puts it.
+             * recognises the switches instead of re-learning them.
+             *
+             * The row reads left to right as two groups: the pills on the left
+             * ("what should this message ask for"), then the spacer, then 附件
+             * and the send circle on the right ("act on this message now") —
+             * the page's own grouping, with the paperclip immediately left of
+             * the send button.
              */
             createElement(
               'button',
@@ -2146,8 +2268,29 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               createElement('span', { className: 'dsh-dschat-toggle-text' }, tr('toggle.search')),
             ),
             /*
+             * 附件 is NOT here any more.
+             *
+             * It sat at the end of the pill group — 34px further left than the
+             * page puts it — because the row "had to hold two pills AND the send
+             * circle". But the spacer between them is the one part of the row
+             * that carries no meaning, and the page's own composer (and the
+             * harness's) groups the paperclip with the send control, on the
+             * right: both are "act on this message now", while the pills are
+             * "what should this message ask for". It now lives there — see the
+             * block below the spacer.
+             */
+            createElement('div', { className: 'dsh-dschat-spacer' }),
+            preparingNewChat && createElement(
+              'span',
+              { className: 'dsh-dschat-hintline', style: { margin: 0 } },
+              createElement('span', { className: 'dsh-dschat-spin' }),
+              tr('composer.preparing'),
+            ),
+            /*
              * 附件: the OS file dialog, and the ONLY way files are attached
-             * from the panel's own chrome.
+             * from the panel's own chrome — immediately left of the send
+             * control, where chat.deepseek.com and the harness's own composer
+             * both put it.
              *
              * A hidden `<input type="file">` clicked from here is the only way
              * to reach Finder — the packaged app has no file-picking API at all
@@ -2203,13 +2346,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               attachBusy
                 ? createElement('span', { className: 'dsh-dschat-spin' })
                 : createElement(ClipIcon, { size: 16 }),
-            ),
-            createElement('div', { className: 'dsh-dschat-spacer' }),
-            preparingNewChat && createElement(
-              'span',
-              { className: 'dsh-dschat-hintline', style: { margin: 0 } },
-              createElement('span', { className: 'dsh-dschat-spin' }),
-              tr('composer.preparing'),
             ),
             /*
              * The 「⌘K 搜索」 hint that used to sit here is GONE.

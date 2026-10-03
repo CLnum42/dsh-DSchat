@@ -43,9 +43,9 @@
   单条消息最多 10 个；附件 7 天后自动清理。
   这是**唯一**能拿到本地文件的入口——打包后的 harness 没有任何"返回文件路径"的原生对话框
   （唯一的原生对话框是选目录的 `dsh-desktop:directory-pick`），`ctx.fileUpload` 收的是字节、
-  `ctx.conversation.pickFiles()` 只回一个 boolean，都不给路径。输入区那一排按钮的顺序是
-  **深度思考 → 智能搜索 → 附件**（都描述"这条消息要带什么"；附件按钮只有图标，文字在
-  `aria-label` / `title` 上，和网页端一致）。
+  `ctx.conversation.pickFiles()` 只回一个 boolean，都不给路径。输入区那一排是**两组**：
+  左边 **深度思考 → 智能搜索**（这条消息要怎么答），右边 **附件 → 发送**（现在就动这条消息；
+  附件按钮只有图标，文字在 `aria-label` / `title` 上，位置与网页端一致——回形针是发送圆的左邻）。
 - **链接一律交给本机默认浏览器**：面板里没有内嵌浏览器，也没有「点开跑到别处」的歧义——
   正文链接、`[citation:N]` 芯片、参考来源每一行都走 `window.open(url, "_blank")`，即宿主自己的
   外链通道（Electron 主进程 `setWindowOpenHandler` → `shell.openExternal`），并用系统默认浏览器
@@ -137,7 +137,14 @@ test/host-smoke.test.ts   宿主半区：导入、路由、工具、附件落盘
 test/streaming.test.ts    流式链路：增量解析器与整段解析等价、/tail 增量契约、落盘合并
 test/reply.test.ts        正文 / 思考切分：引用与复制取正文，流式中不吐半截标签
 test/client-render.test.ts 浏览器半区：组件真渲染 + 信封与槽位注册自检 + 外链接管 +
-                          思考用时三种状态 + 来源列表折叠与时序 + 会话列表拖宽
+                          思考用时三种状态 + 来源列表折叠与时序 + 会话列表拖宽 +
+                          composer 两组控件的位置 + 「点一下只启动一次」的接线
+test/stale-reply.test.ts  上一轮回复不许被当成这一轮的答案：内容身份判据 + 假页面的
+                          「只重排旧行、不给新答案」与「稍后给出新答案」两条链路
+test/stale-reply-e2e.test.ts 真浏览器 e2e：本地假会话页回放同一个故障（旧答案绝不落库）
+                          与它的反例（真正的新答案照常落库，含思考）
+test/wake-e2e.test.ts     真浏览器 e2e：本地假聊天页上验证 wake 只启动一次、
+                          「打开登录窗口」复用已登录的浏览器（不重启）
 docs/screenshots/         README 顶部的三张图：真实组件 + 真实主题的渲染，
                           由 scripts/ui-shot.mjs --synthetic 的产物转成 1600px WebP
 prototype/                定稿的 UI 原型与截图（静态 HTML，不是插件本身）
@@ -443,7 +450,7 @@ try { await handle.append(events); await handle.flush() } finally { await handle
 
 守卫测试：`a transcript link opens in the machine browser, and only for web schemes`。
 
-## 输入框下方的一排：深度思考 / 智能搜索 / 附件 → 发送
+## 输入框下方的一排：深度思考 / 智能搜索 …… 附件 → 发送
 
 网页端把这两个开关放在**输入框下方**（它们描述的是"你要发的这条消息"），本面板一度放在头部——
 在中栏里那是和标题抢位置的 chrome，且不指向任何具体东西。现在这一段是网页端自己的版式，
@@ -458,12 +465,18 @@ try { await handle.append(events); await handle.flush() } finally { await handle
 | 图标 | 原子轨道（深度思考）、地球（智能搜索）、实心回形针、实心向上箭头 | 逐路径照搬，见 `icons.tsx` |
 | 发送 | 34px 实心圆，accent 填充；不可用时整颗降到 40% 不透明度 | 同（`state-business-primary` + `opacity: .4`） |
 
-顺序固定为 **深度思考 → 智能搜索 → 附件 →（右端）发送**：前两个说"这条消息要怎么答"，
-第三个说"这条消息带什么"，而发送是这一行唯一的终点动作，网页端也把它放在最右。
+这一行是**两组**，中间由 `flex: 1` 的 spacer 分开：左边 **深度思考 → 智能搜索**，右边
+**附件 → 发送**（网页端自己的分组——回形针紧挨在发送圆左边，harness 自己的输入框也是这样）。
+分组不是排版偏好：两个胶囊描述的是"这条消息要怎么答"，而附件与发送都是"现在就动这条消息"，
+把附件留在胶囊队尾会让它看起来像第三个模式开关。
+
+附件曾经就在胶囊后面（"这一行在 320px 下要塞下两个胶囊 AND 发送圆"），但真正不承载含义的
+恰恰是两组之间的 spacer，把附件挪过去既不动宽度也不动控件数——它只是回到了该在的位置。
 标签用网页端自己的措辞：**智能搜索**（不是「联网」）。
 附件按钮**只剩图标**（网页端就是一枚回形针），文字改挂 `aria-label` 与 `title`——
 这是它没有变成"看不懂的图标"的原因，也是
-`the composer carries 深度思考, 智能搜索 and 附件 in that order` 会盯住的东西。
+`the composer groups 深度思考 + 智能搜索 on the left, 附件 + 发送 on the right` 会盯住的东西
+（它同时断言 spacer 在两者之间、附件排在发送左边）。
 
 **一次特异性事故值得记下来**：`.dsh-dschat-toggle-on`（0,1,0）打不过本文件开头那条
 `.dsh-dschat button { color: inherit }`（0,1,1），于是"点亮"的颜色只落在标签 `<span>` 上
@@ -533,8 +546,8 @@ preload 只暴露 `dsh-desktop:directory-pick` 一个对话框通道；`ctx.file
 （一个 24 MB 上限、一个不限；一个按字节、一个按路径），于是"为什么这个能加那个不能"永远解释不完。
 现在文件只有一个入口——**Finder**（外加拖拽/粘贴这两个手势，它们不占按钮），
 按路径添加的能力随之取消，「选择根目录」也不再有存在理由。守卫测试
-`the composer carries 深度思考, 智能搜索 and 附件 in that order` 会盯住"第二个附件按钮"不再回来，
-也会盯住"这枚按钮仍然有可读的名字"。
+`the composer groups 深度思考 + 智能搜索 on the left, 附件 + 发送 on the right` 会盯住"第二个附件按钮"
+不再回来，也会盯住"这枚按钮仍然有可读的名字"。
 
 ## 思考用时：「已思考（用时 X 分 Y 秒）」从哪来
 
@@ -867,6 +880,46 @@ preload 只暴露 `dsh-desktop:directory-pick` 一个对话框通道；`ctx.file
   或第一次快照还在路上）没法把增量合进去，只能回退去拉 `/state`；如果不加 `lastReconcileRef` 节流，
   这个回退就变成 100ms 一次的 2.5 MB 轮询——正好把这次修掉的东西原样装回去。
 
+## 新问题被上一轮的答案回答：DOM 兜底只认"键"是不够的
+
+**症状**：一段闲置三小时的会话里问「开封有什么适合自驾游的景点？」，面板 1.8 秒后落库了
+**上一轮**的答复——「这个文件的题目是……「口语」与「经典」之间……」，`streaming: false`、
+没有 `thinkingMs`、**没有任何 error**；而网页端的输入框里还留着刚问的这句话。落库那份还是
+**塌成一行的版本**（换行全变空格、开头的 `**` 和引号丢失、正文截在中途）——那正是 DOM
+`innerText` + `serializeToMarkdown` 往返的指纹，说明它来自兜底抓取，不是模型重新答的。
+
+链路是这样的：
+
+1. 这一轮的 `/chat/completion` 请求没有进到 teed 捕获，`streamReply` 在第一个 tick 就走了 DOM 兜底；
+2. 兜底的"新鲜度"判据是**虚拟列表键集合有没有变**（与 `baselineKeys` 的差集）。虚拟列表在插入时
+   会重排、重挂旧行并给出**新键**——于是"出现了没见过的键"成立，而列表里最后一条 assistant 行
+   仍然是上一轮的回复；
+3. `domSnapshot()` 取的就是最后一条 assistant 行，那份旧回复被当成这一轮的答案写进转录；
+4. 之后它再也不变，`DOM_STABLE_MS`（1s）到点，循环**以成功退出**。
+
+修的是三处，缺一处都还会漏：
+
+- **内容身份，而不只是结构身份。** 回车前把上一轮回复的**整条正文**（含思考块，因为兜底抓到的
+  就是整条）快照下来（`previousReplyMessage`），兜底每次抓取都比一次
+  （`repeatsPreviousReply`）：归一化去空白/标点/`**` 后，**短的一侧有 ≥90% 落在共同前缀里**就判定
+  是复刻，直接丢弃这次抓取。键可以撒谎（重挂的旧行也会拿到新键），文本不会。
+- **只靠键的那道判据留着，但不再是唯一一道。** 空 `baselineKeys`（选择器什么都没匹配到）仍然
+  沿用旧的"接受一切"行为，因为"判断不了"不能当成"回复丢了"——现在有内容那道闸兜着它。
+- **整轮什么都没产生时不再写空消息**，并给出能读懂的错误
+  （「网页端没有回复这次提问（页面上仍然是上一条回复）」）。旧代码会写一条 `content: ''` 的
+  assistant 行——面板上就是一条永远空白的回复气泡。顺带修好了同源的另一个缺陷：
+  `domSnapshot` 只读 body part 的 `markdown`（渲染后的 HTML），**完全忽略 `text`**，
+  于是"正文刚出现、还没有块级标签"的那一段会被判成空正文，循环只带着思考块就结算了。
+
+两个阈值都是被真浏览器打回来之后才定对的，写进注释免得下次再踩：`REPLICA_MIN_CHARS` 最初取 25，
+而线上抓到的复刻只有 10 个归一化字符（真浏览器回放里它照样落库）；`repeatsPreviousReply`
+最初只判"谁是谁的前缀"，而真实的复刻是**截断**的（49 个字符全落在上一轮 74 个字符之内、然后断掉）。
+
+守卫测试：`test/stale-reply.test.ts`（3 条，含一份逐字节来自真实故障的复刻文本，以及四条反例：
+无关答复、开头相同但随后转折的答复、空会话、过短文本）与 `test/stale-reply-e2e.test.ts`
+（2 条，**真 Chrome + 本地假会话页**：A 页只重排旧行、永远不给新答案 → 旧答案必须只出现一次
+且这一轮报错；B 页稍后渲染出真正的新答案 → 必须照常落库，含思考）。
+
 ## 消息 id 是身份：重复 id 为什么会让旧回复留在新会话里
 
 **症状**：点「新对话」后，面板里既出现了空状态卡片（「在 DSH 里直接聊 DeepSeek 网页端」），
@@ -984,13 +1037,45 @@ preload 只暴露 `dsh-desktop:directory-pick` 一个对话框通道；`ctx.file
 - **空结果之前先等条件，不要等固定时长。** 接口**明确答复** 0 条时，直接判定「空会话」并返回，
   不再为此打开页面（省掉一次导航 + 缓存轮询）。其余情况用 `waitForFunction` 等消息节点出现。
 
-## 引擎没启动时的输入框
+## 引擎没启动时的输入框：一次点击，一次启动
 
 - **用 `readOnly`，不要用 `disabled`。** `disabled` 会把元素移出 tab 序列并吞掉所有指针事件——点击输入框
   完全没有反应（用户报的「点击输入框无反应」）。`readOnly` 保留焦点与悬停，于是 `onFocus` 可以把
-  「我想打字」翻译成「把引擎拉起来」（调用 `openLogin`，它会开一个可见窗口并在进入聊天界面后自动关闭）。
+  「我想打字」翻译成「把引擎拉起来」。
 - 占位符要说清楚当前是哪种状态：启动中 / 未登录 / 已登录但浏览器已关。离线态的占位符用 accent 色并配
-  指针光标，卡片加一层极淡的 accent 底色，避免看起来像坏掉的输入框。
+  指针光标，卡片加一层极淡的 accent 底色，避免看起来像坏掉的输入框。**整张卡片**都是这个"启动我"的
+  按钮（`onClick` 只在 `target === currentTarget` 时把焦点交给 textarea，所以不会抢走 chip、胶囊或附件
+  按钮的点击）——以前只有覆盖卡片一部分的 textarea 能聚焦，点内边距等于什么都不做。
+
+### 为什么"点一下"曾经会启动两次浏览器
+
+- **老的 `onFocus` 直接调 `openLogin`（= 打开可见登录窗口）**，而 `openLoginWindow` 会先
+  `disposeBrowser()` 再启动一个 **headed** 窗口。可 profile 里通常**已经登录**了：窗口一打开就发现
+  有会话，登录监听随即把窗口关掉（老代码在登录成功那一刻 `disposeBrowser()`），于是随后的发送
+  发现没有页面，**又启动第二个（无头）浏览器**去干真正的活。一次点击 = 两次启动，而且第一次
+  还把可能正在工作的浏览器拆掉了。
+- 现在分成两个路由，因为它们是两个不同的请求：
+  - `POST /api/dsh-dschat/wake` —— 「我想说话」：有活页面就**复用**，没有就**按 profile 该有的方式启动一次**
+    （profile 里从来没登录过 ⇒ 直接开可见登录窗口；用过 ⇒ 按 `headless` 设置无头启动，安静且快）。
+  - `POST /api/dsh-dschat/open-login` —— 「给我看登录窗口」：面板上点名的入口（空会话页的按钮、
+    `···` 菜单、设置页）以及 **wake 发现落在 `/sign_in` 时的升级动作**。它现在是幂等的：页面已经
+    登录就**只 bringToFront、不重启**；登录窗口已经开着就复用，不会开第二个。
+- **登录成功后不再关闭浏览器。** `watchLogin` 只把 `loginMode` 收掉、状态置 `ready`——那已经是一个
+  登录好的、停在聊天界面的页面，关掉它等于把下一次发送推进"再启动一次"。想关掉这个可见窗口就用
+  `···` 菜单的「关闭浏览器」。
+- **并发只启动一次。** `ensureBrowser()` 现在把进行中的启动 promise 记在 `launchInFlight` 上给所有
+  调用方共用；旧实现在第二个调用方那里轮询 10 秒然后抛「浏览器启动超时」，而一次启动是
+  `launchPersistentContext` 加 45 秒的 `page.goto`，本来就比这个预算长——面板 wake、`/state` 自愈、
+  一次发送三方同时到达冷引擎时，第二个必然误报超时。
+- `send()` 在引擎没起来时**先 wake 再发**（以前是发现 `loggedIn !== true` 就静默 return，写完的话
+  等于丢了）；wake 完仍无人登录时给一条 toast 说明，草稿留在输入框里。
+- 守卫测试分两层：`test/host-smoke.test.ts` 里 `waking a live, signed-in page reuses it instead of
+  launching a browser`、`openLoginWindow keeps a working signed-in browser instead of relaunching it`、
+  `the login watcher keeps the page once the user signs in`、`one launch serves every concurrent caller`、
+  `the first wake on an empty profile goes straight to the login window`、`a profile that has run before
+  wakes headless`（这些把启动点换成记录器，离线且永不真的拉起浏览器）；`test/wake-e2e.test.ts` 则用
+  **真浏览器**打本地假聊天页，把"点一下 → wake → 再 wake → 打开登录窗口"整条序列跑一遍，断言只启动了
+  一次、且「打开登录窗口」没有拆掉正在工作的浏览器。
 - `/api/dsh-dschat/probe-page` 是只读诊断路由，返回当前页面里各选择器的命中数与样本，用来替代一句
   无法证伪的「页面可能已改版」。
 - 流式期间面板只按 `/tail` 更新（内容 + `busy`/`busySince`），`/state` 固定 1.5s 兜底。
@@ -998,7 +1083,8 @@ preload 只暴露 `dsh-desktop:directory-pick` 一个对话框通道；`ctx.file
 
 ## 已知限制
 
-- 首次登录需要可交互的图形环境（会弹出一个可见浏览器窗口，登录后自动关闭）。
+- 首次登录需要可交互的图形环境：会弹出一个可见浏览器窗口，**登录成功后它不再自动关闭**（关掉它
+  就等于让下一次发送再启动一次浏览器），用完请点 `···` 菜单的「关闭浏览器」。
 - 恢复的第一层用的是网页端**自己的** history 接口（同源、同 token、页面自己就在调）而不是官方
   API：它受网页端改版影响。为此保留了两层后备（IndexedDB 缓存 → DOM 抓取），任何一层成功即可；
   三层全空时报的是「接口、页面缓存与页面抓取三种来源都是空的」加上真实 URL 与节点数，而不是一句

@@ -118,7 +118,7 @@ test('the mounted panel neither sends on an IME Enter nor keeps the box at two l
         tail: async () => ok({ busy: false, streaming: false }),
         context: async () => ok({ workspaces: [], cwd: '/' }),
         send: async (text, images) => { window.__sent.push({ text, images }); return ok({ chatId: 'c1', stored: true }) },
-        newChat: async () => ok({ chatId: 'c1' }), stop: pending, openLogin: pending, closeBrowser: pending,
+        newChat: async () => ok({ chatId: 'c1' }), stop: pending, wake: pending, openLogin: pending, closeBrowser: pending,
         setDeepThink: pending, setSearch: pending, transfer: pending, exportFile: pending,
         renameChat: pending, deleteChat: pending, clearChats: pending, webChats: pending,
         recover: pending, restore: pending, attach: pending,

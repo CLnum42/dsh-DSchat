@@ -442,6 +442,27 @@ export interface TransferResult {
  */
 export type TransferMode = 'distill' | 'raw'
 
+/**
+ * Result of `wake` (and of `openLoginWindow`): whether a usable page is up, and
+ * whether it is the user's turn.
+ *
+ * `loginWindow` is the flag the panel acts on: when it is true a VISIBLE window
+ * is already open and waiting for a human, so the panel must NOT ask for one
+ * again — asking used to dispose the fresh window and open a second one.
+ */
+export interface WakeResult {
+  readonly ok: boolean
+  /** null = no page to judge; false = the page is on the sign-in screen. */
+  readonly loggedIn: boolean | null
+  /** True when this call actually launched a browser. */
+  readonly launched: boolean
+  /** True when a visible login window is (now) open and waiting for the user. */
+  readonly loginWindow?: boolean
+  /** True when a live page was reused instead of a new one being launched. */
+  readonly reused?: boolean
+  readonly error?: string
+}
+
 /** API path constants shared by host routes and the browser panel. */
 export const DSCHAT_API = {
   state: '/api/dsh-dschat/state',
@@ -451,6 +472,15 @@ export const DSCHAT_API = {
    */
   tail: '/api/dsh-dschat/tail',
   context: '/api/dsh-dschat/context',
+  /**
+   * Start the web engine for someone who wants to type, in the right mode.
+   *
+   * Split from `openLogin` because they are different requests: this one means
+   * "I want to chat" (reuse the persisted session, stay out of the way), while
+   * `openLogin` means "give me the visible window" and is the escalation taken
+   * only when the wake reports a sign-in page.
+   */
+  wake: '/api/dsh-dschat/wake',
   openLogin: '/api/dsh-dschat/open-login',
   closeBrowser: '/api/dsh-dschat/close-browser',
   newChat: '/api/dsh-dschat/new-chat',
