@@ -3396,11 +3396,32 @@ export class DeepSeekWebEngine {
 }
 
 /**
+ * HTML void elements: the tags that can NEVER have children.
+ *
+ * The parser used to recognise a self-closing tag only by a literal `/>`, which
+ * standard HTML almost never writes — `<br>`, `<img>`, `<hr>` and `<input>` all
+ * arrive bare. Each one was therefore parsed as an OPEN tag that swallowed every
+ * following sibling as its child, and the markdown converter then threw those
+ * children away (see html-md.ts), so a reply containing a line break lost
+ * everything after it. Silent, and invisible in the stored transcript.
+ *
+ * The list is the spec's own; `wbr` and `source`/`track` are included because
+ * DeepSeek's renderer emits them in code blocks and media figures.
+ */
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+])
+
+/**
  * Minimal HTML fragment parser used to round-trip scraped `.ds-markdown`
  * innerHTML through htmlToMarkdown (the in-page evaluate returns HTML
  * strings; the converter consumes a light DOM-shaped object graph).
+ *
+ * Exported for the round-trip tests: the void-element rule below is a data-loss
+ * boundary, and it is only observable through this function.
  */
-function parseMarkup(html: string): MarkupNode {
+export function parseMarkup(html: string): MarkupNode {
   return new MarkupParser(html).parse()
 }
 
@@ -3425,12 +3446,30 @@ class MarkupParser {
   }
 
   parse(): MarkupNode {
-    const root = this.parseChildren(undefined)
+    const root: MarkupNode = { nodeType: 1, children: [], attributes: {} }
+    this.fill(root, undefined)
     return root
   }
 
-  private parseChildren(parent: MarkupNode | undefined): MarkupNode {
-    const node: MarkupNode = { nodeType: 1, children: [], attributes: {}, parent }
+  /**
+   * Fill `node` with everything up to ITS OWN close tag.
+   *
+   * The close tag has to be compared against the element being filled — and that
+   * is the rule this parser got wrong from the start: it filled a fresh,
+   * unnamed container and compared the tag against `node.tagName`, which is
+   * `undefined` for that container. The comparison was therefore false for every
+   * real tag, every `</p>`/`</strong>`/`</code>` was read as "mismatched close:
+   * ignore", and NOTHING ever closed: each element swallowed every following
+   * sibling down to the end of the fragment. The damage was visible only on the
+   * DOM-fallback paths, and it was severe — the converter reads `<code>` and
+   * `<pre>` bodies from `textContent`, so a reply with one code block lost the
+   * code and everything after it.
+   *
+   * @param node - the element to fill (the synthetic root at the top level).
+   * @param tagName - the lowercased tag that closes `node`; undefined at the top
+   *   level, where only the end of the tokens stops the loop.
+   */
+  private fill(node: MarkupNode, tagName: string | undefined): void {
     while (this.index < this.tokens.length) {
       const token = this.tokens[this.index]
       if (!token.startsWith('<')) {
@@ -3441,8 +3480,11 @@ class MarkupParser {
       const close = /^<\/([a-zA-Z0-9]+)>$/.exec(token)
       if (close !== null) {
         this.index++
-        if (close[1].toLowerCase() === (node.tagName ?? '').toLowerCase()) return node
-        continue // mismatched close: ignore
+        // A close tag for an element we are not filling (an unclosed parent, a
+        // stray tag from a malformed fragment) is skipped rather than obeyed:
+        // closing someone else's element would truncate this one.
+        if (tagName !== undefined && close[1].toLowerCase() === tagName) return
+        continue
       }
       const open = /^<([a-zA-Z0-9]+)((?:\s+[a-zA-Z0-9-]+(?:=(?:"[^"]*"|'[^']*'|[^\s>]*))?)*)\s*(\/?)>$/.exec(token)
       if (open === null) {
@@ -3456,18 +3498,29 @@ class MarkupParser {
         const attrRe = /([a-zA-Z0-9-]+)(?:=("[^"]*"|'[^']*'|[^\s>]*))?/g
         let match: RegExpExecArray | null
         while ((match = attrRe.exec(attrsRaw)) !== null) {
-          const value = match[2] === undefined ? undefined : match[2].replace(/^["']|["']$/g, '')
+          /*
+           * A value-less attribute is stored as `''`, not `undefined`.
+           *
+           * That is what the DOM itself answers for a boolean attribute, and the
+           * difference is not cosmetic: `attributes.checked !== undefined` is how
+           * the converter recognises a checked checkbox, so `undefined` made
+           * EVERY checkbox in a scraped reply render as unchecked.
+           */
+          const value = match[2] === undefined ? '' : match[2].replace(/^["']|["']$/g, '')
           attributes[match[1]] = value
         }
       }
       this.index++
-      const element: MarkupNode = { tagName: tag, nodeType: 1, children: [], attributes, parent }
-      if (!open[3].endsWith('/')) {
-        const child = this.parseChildren(element)
-        for (const grandchild of child.children) element.children.push(grandchild)
-      }
+      const element: MarkupNode = { tagName: tag, nodeType: 1, children: [], attributes, parent: node }
+      /*
+       * A void element has no children BY DEFINITION, so recursion must stop at
+       * it whether or not the markup said `/>`. See {@link VOID_ELEMENTS}: a
+       * bare `<br>` used to take the rest of the fragment as its children, which
+       * the converter then discarded.
+       */
+      const selfClosing = open[3] === '/' || VOID_ELEMENTS.has(tag)
+      if (!selfClosing) this.fill(element, tag)
       node.children.push(element)
     }
-    return node
   }
 }
