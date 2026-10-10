@@ -73,7 +73,23 @@ test('a send anchors its question to the top, and the navigator jumps between qu
         // panel's memos key off the transcript's identity, so returning the same
         // mutated object would hide a real update (and did, in this test's first
         // draft).
-        state: async () => ({ ok: true, ...state, chats: state.chats.map(c => ({ ...c, messages: [...c.messages] })) }),
+        state: async () => ({
+          ok: true,
+          /*
+           * SUMMARIES, like the host: /state carries no messages now, and the
+           * body arrives from chat() below. The panel renders this fixture only
+           * if both halves are modelled — which is the real routes' contract.
+           *
+           * No backticks in this block: it is itself inside a template literal.
+           */
+          ...state,
+          chats: state.chats.map(({ messages: own, ...summary }) => ({ ...summary, messageCount: own.length })),
+        }),
+        chat: async (id) => {
+          const wanted = id ?? state.activeChatId
+          const chat = state.chats.find(candidate => candidate.id === wanted) ?? state.chats[0]
+          return ok({ chat: { ...chat, messages: [...chat.messages] } })
+        },
         tail: async () => ok({ busy: false, streaming: false }),
         context: async () => ok({ workspaces: [], cwd: '/' }),
         send: async (text) => {

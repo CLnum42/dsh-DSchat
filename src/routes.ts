@@ -30,7 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { DeepSeekWebEngine } from './engine/engine.ts'
 import type { TranscriptStore } from './store.ts'
-import type { DSchatApiCode, DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
+import type { DSchatApiCode, DSchatChatSummary, DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
 import { exportTranscriptFile, previewHarnessTransfer, transferToHarnessSession } from './transfer.ts'
 import type { DistillConfig } from './transfer.ts'
 import { ATTACHMENT_DIR, SAFE_EXTENSION, attachmentDir, isInsideDirectory, isSameOrInsideDirectory } from './attachments.ts'
@@ -380,6 +380,55 @@ function failure(res: ServerResponse, status: number, code: DSchatApiCode, error
 }
 
 /**
+ * One conversation, without its messages.
+ *
+ * `/state` answers with these instead of whole transcripts: it is polled every
+ * 1.5 s, and the store on this machine is 5.86 MB — none of which a sidebar row
+ * or a streaming flag needs. See {@link DSchatChatSummary}.
+ */
+export function summarizeChat(chat: DSchatTranscript): DSchatChatSummary {
+  return {
+    id: chat.id,
+    title: chat.title,
+    createdAt: chat.createdAt,
+    updatedAt: chat.updatedAt,
+    model: chat.model,
+    streaming: chat.streaming,
+    messageCount: chat.messages.length,
+    ...(chat.webSessionId === undefined ? {} : { webSessionId: chat.webSessionId }),
+  }
+}
+
+/** How many conversation ids one search answers with. */
+const SEARCH_LIMIT = 50
+
+/**
+ * Which conversations match `needle`, by title or by any message body.
+ *
+ * Runs in the host because that is where the text is: the panel's filter used to
+ * scan the messages it held, which only worked while `/state` shipped the whole
+ * store. Newest first (the list is already in that order), and bounded — a
+ * one-letter query matches everything, and the panel only needs to know which
+ * rows to show.
+ *
+ * @param needle - the raw query; trimmed and lower-cased here.
+ */
+export function searchChats(store: TranscriptStore, needle: string): string[] {
+  const query = needle.trim().toLowerCase()
+  if (query === '') return []
+  const hits: string[] = []
+  for (const chat of store.list()) {
+    if (hits.length >= SEARCH_LIMIT) break
+    if (chat.title.toLowerCase().includes(query)) {
+      hits.push(chat.id)
+      continue
+    }
+    if (chat.messages.some(message => message.content.toLowerCase().includes(query))) hits.push(chat.id)
+  }
+  return hits
+}
+
+/**
  * Validate the message list a `/restore` caller hands over.
  *
  * 「撤销」 re-imports the conversation the panel still holds, so this body is
@@ -671,7 +720,9 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       version: build.version,
       build: build.build,
       activeChatId: store.activeChat()?.id,
-      chats: store.list(),
+      // Summaries, NOT transcripts: this is the 1.5 s poll. The bodies travel
+      // on `/chat?id=` for the one conversation the panel is rendering.
+      chats: store.list().map(summarizeChat),
     }
   }
 
@@ -771,6 +822,46 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       handler: (req, res) => {
         if (!guard(req, res)) return
         writeJson(res, 200, { ok: true, csrfToken })
+      },
+    },
+    {
+      /**
+       * One conversation WITH its messages.
+       *
+       * The other half of `/state`'s summary: the panel fetches the body of the
+       * conversation it renders, and of the one a reply is streaming into. `id`
+       * omitted means the active conversation, so the first paint after a reload
+       * needs no id at all.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/chat',
+      handler: (req, res) => {
+        if (!guard(req, res)) return
+        const query = new URL(req.url ?? '/', 'http://x').searchParams
+        const id = query.get('id') ?? store.activeChat()?.id
+        const chat = id === undefined ? undefined : store.getChat(id)
+        if (chat === undefined) {
+          failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
+          return
+        }
+        writeJson(res, 200, { ok: true, chat })
+      },
+    },
+    {
+      /**
+       * Which conversations contain a string.
+       *
+       * Read-only and loopback-fenced like every other route. It answers with
+       * IDS, not transcripts: the panel already has the summaries, and a search
+       * that shipped the matching bodies would recreate the very payload this
+       * change removed.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/search-conversations',
+      handler: (req, res) => {
+        if (!guard(req, res)) return
+        const query = new URL(req.url ?? '/', 'http://x').searchParams
+        writeJson(res, 200, { ok: true, ids: searchChats(store, query.get('q') ?? '') })
       },
     },
     {

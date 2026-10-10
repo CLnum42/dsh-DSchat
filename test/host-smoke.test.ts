@@ -2222,16 +2222,30 @@ test('a cited reply hands its source table to the panel, and an uncited one stay
       'no search means no field at all — an empty array would erase a stored table',
     )
 
-    // /state carries the same messages, so a reload or a chat switch keeps them.
+    /*
+     * A reload or a chat switch must still find the table, and the two routes
+     * that can deliver it now split the job: `/state` reports the conversation
+     * as a summary, `/chat?id=` the body.
+     */
     const state = fakeResponse()
     const stateRoute = table.find(route => route.path === '/api/dsh-dschat/state')!
     await stateRoute.handler(fakeRequest(), state)
-    const stored = (state.captured.body.chats as Array<{ id: string; messages: Array<Record<string, unknown>> }>)
+    const summary = (state.captured.body.chats as Array<{ id: string; messageCount: number }>)
       .find(chat => chat.id === citedId)
+    assert.equal(summary?.messageCount, 2, '/state counts the conversation without shipping it')
+    assert.equal(
+      Object.hasOwn(summary as object, 'messages'), false,
+      'and carries no messages at all — that is the point of the summary',
+    )
+
+    const chatRoute = table.find(route => route.path === '/api/dsh-dschat/chat')!
+    const body = fakeResponse()
+    await chatRoute.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/chat?id=${citedId}`), body)
+    const stored = body.captured.body.chat as { messages: Array<Record<string, unknown>> }
     assert.deepEqual(stored?.messages[1]?.sources, [
       { url: 'https://a.example/1', title: '甲页' },
       { url: 'https://b.example/2' },
-    ], 'and the store keeps the table across a full snapshot')
+    ], 'and the store keeps the table across a reload')
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     dispose()
@@ -2559,10 +2573,20 @@ test('the restore route drops malformed records instead of persisting them', asy
     const state = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/state')!
     const view = fakeResponse()
     await state.handler(fakeRequest(undefined), view)
-    const [chat] = (view.captured.body.chats as Array<{ messages: Array<Record<string, unknown>> }>)
-    assert.equal(chat?.messages.length, 2, 'only the usable messages were stored')
-    assert.deepEqual(chat?.messages.map(message => message.id), ['ok1', 'ok2'])
-    assert.equal(chat?.messages[1]?.streaming, false, 'a restored message is never left streaming')
+    /*
+     * `/state` reports SUMMARIES now (see DSchatChatSummary): the count is the
+     * honest thing to check there, and the bodies come from `/chat?id=`.
+     */
+    const [summary] = (view.captured.body.chats as Array<{ id: string; messageCount: number }>)
+    assert.equal(summary?.messageCount, 2, 'only the usable messages were stored')
+
+    const chatRoute = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/chat')!
+    const body = fakeResponse()
+    await chatRoute.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/chat?id=${String(summary?.id)}`), body)
+    const chat = body.captured.body.chat as { messages: Array<Record<string, unknown>> }
+    assert.equal(chat.messages.length, 2, 'the body route returns exactly those messages')
+    assert.deepEqual(chat.messages.map(message => message.id), ['ok1', 'ok2'])
+    assert.equal(chat.messages[1]?.streaming, false, 'a restored message is never left streaming')
 
     // Nothing usable at all is a refusal, not an empty conversation.
     const empty = fakeResponse()
@@ -2654,6 +2678,127 @@ test('a transfer previews before it writes, and the write uses those exact bytes
     const seed = record!.events.find(event => event.type === 'user/message') as unknown as
       { data?: { content?: Array<{ text?: string }> } } | undefined
     assert.equal(seed?.data?.content?.[0]?.text, edited, 'the confirmed bytes are what lands, edits included')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+/* --------------------------------------------------------- the summarized poll */
+
+/*
+ * `/state` answers with SUMMARIES; the bodies travel on `/chat`.
+ *
+ * The snapshot is polled every 1.5 s and used to carry every transcript — 5.75
+ * MiB of them on this machine's store, i.e. ~3.8 MiB/s of pointless loopback
+ * traffic to render one conversation. Splitting the two is only safe if the
+ * summary says everything the LIST needs and the body route really has the rest,
+ * which is what these two tests check.
+ */
+test('the state poll carries summaries, and the chat route carries the bodies', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-summary-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const table = routes as Route[]
+    const restore = table.find(route => route.path === '/api/dsh-dschat/restore')!
+
+    const first = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '第一个会话', model: 'deepseek-chat',
+      messages: [
+        { id: 'm1', role: 'user', content: '问题一', ts: 1 },
+        { id: 'm2', role: 'assistant', content: '回答一', ts: 2, sources: [{ url: 'https://a.example/1' }] },
+      ],
+    }), first)
+    const second = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '第二个会话', model: 'deepseek-reasoner',
+      messages: [{ id: 'n1', role: 'user', content: '问题二', ts: 3 }],
+    }), second)
+    const firstId = first.captured.body.chatId as string
+
+    const state = fakeResponse()
+    await table.find(route => route.path === '/api/dsh-dschat/state')!.handler(fakeRequest(undefined), state)
+    const summaries = state.captured.body.chats as Array<Record<string, unknown>>
+    assert.equal(summaries.length, 2, 'both conversations are listed')
+    for (const summary of summaries) {
+      assert.equal(Object.hasOwn(summary, 'messages'), false, 'a summary carries no messages at all')
+      assert.equal(typeof summary['messageCount'], 'number', 'it counts them instead')
+      assert.equal(typeof summary['title'], 'string')
+      assert.equal(typeof summary['updatedAt'], 'number')
+      assert.equal(typeof summary['streaming'], 'boolean', 'phaseOf reads the streaming flag off the list')
+    }
+    // Newest first (`importTranscript` unshifts), each with its OWN count — a
+    // summary that counted the wrong conversation would be worse than none.
+    assert.deepEqual(summaries.map(summary => summary['messageCount']), [1, 2], 'newest first, each with its own count')
+
+    // The body, on demand.
+    const chatRoute = table.find(route => route.path === '/api/dsh-dschat/chat')!
+    const body = fakeResponse()
+    await chatRoute.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/chat?id=${firstId}`), body)
+    const chat = body.captured.body.chat as { id: string; messages: Array<Record<string, unknown>> }
+    assert.equal(chat.id, firstId)
+    assert.deepEqual(chat.messages.map(message => message.id), ['m1', 'm2'])
+    assert.deepEqual(chat.messages[1]?.['sources'], [{ url: 'https://a.example/1' }], 'the citation table travels with the body')
+
+    // No id = the ACTIVE conversation, so the first paint after a reload needs none.
+    const active = fakeResponse()
+    await chatRoute.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', '/api/dsh-dschat/chat'), active)
+    assert.equal(active.captured.body.chat.id, state.captured.body.activeChatId, 'the default is the active conversation')
+
+    // An unknown id is a coded 404, not an empty body.
+    const missing = fakeResponse()
+    await chatRoute.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', '/api/dsh-dschat/chat?id=chat-nope'), missing)
+    assert.equal(missing.captured.status, 404)
+    assert.equal(missing.captured.body.code, 'NOT_FOUND')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('the search route finds conversations by title and by message text', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-search-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const table = routes as Route[]
+    const restore = table.find(route => route.path === '/api/dsh-dschat/restore')!
+    const seed = async (title: string, content: string): Promise<string> => {
+      const res = fakeResponse()
+      await restore.handler(fakeRequest({
+        title, model: 'deepseek-chat', messages: [{ id: `m-${title}`, role: 'user', content, ts: 1 }],
+      }), res)
+      return res.captured.body.chatId as string
+    }
+    const byTitle = await seed('红楼梦 讨论', '正文与标题无关')
+    const byBody = await seed('另一个会话', '正文里提到 红楼梦 这本书')
+    await seed('毫不相关', '完全不同的内容')
+
+    const search = table.find(route => route.path === '/api/dsh-dschat/search-conversations')!
+    const hit = async (q: string): Promise<string[]> => {
+      const res = fakeResponse()
+      await search.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/search-conversations?q=${encodeURIComponent(q)}`), res)
+      assert.equal(res.captured.status, 200)
+      return res.captured.body.ids as string[]
+    }
+    const hits = await hit('红楼梦')
+    assert.deepEqual([...hits].sort(), [byTitle, byBody].sort(), 'a title match and a message match, both found')
+    assert.deepEqual(await hit('ZHENGWEN'), [], 'case-insensitive, so an upper-case miss stays a miss')
+    assert.deepEqual(await hit('正文里提到'), [byBody], 'and a phrase matches only where it appears')
+    assert.deepEqual(await hit('   '), [], 'a blank query matches nothing rather than everything')
+    /*
+     * It answers IDS, not bodies: a search that shipped the matching transcripts
+     * would put back the payload the summary split just removed.
+     */
+    const res = fakeResponse()
+    await search.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', '/api/dsh-dschat/search-conversations?q=%E7%BA%A2%E6%A5%BC%E6%A2%A6'), res)
+    assert.equal(Object.hasOwn(res.captured.body, 'chats'), false, 'no conversations in the answer')
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     dispose()

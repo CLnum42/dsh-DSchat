@@ -425,6 +425,26 @@ test('the panel merge reconstructs the host transcript from deltas alone', async
     } as any)
     assert.equal(healed.chats[0].messages[1].content, full, 'a resend replaces the corrupt copy')
 
+    /*
+     * A tail that APPENDS a message bumps the conversation's count.
+     *
+     * `/state` reports summaries and the panel keeps a loaded body only while
+     * its length agrees with that count (see the panel's staleness check), so a
+     * count that lagged behind an appended message would look like a stale body
+     * on every poll — a re-fetch of the whole conversation, once per 1.5 s, for
+     * the one conversation the reader is watching.
+     */
+    const appended = mergeTail(healed, {
+      ok: true, chatId: 'c1', activeChatId: 'c1', busy: true, streaming: true,
+      message: { id: 'a2', role: 'assistant', ts: 3, streaming: true, length: 2, head: 0, tail: '新' },
+    } as any)
+    assert.equal(appended.chats[0].messages.length, healed.chats[0].messages.length + 1, 'the message is appended')
+    assert.equal(
+      appended.chats[0].messageCount,
+      healed.chats[0].messageCount + 1,
+      'and the count follows it, so the summary and the body stay in step',
+    )
+
     // An unchanged response must return the SAME object: at ~10 folds/s, a new
     // object every time would re-render the whole panel for nothing.
     const idle = mergeTail(healed, {

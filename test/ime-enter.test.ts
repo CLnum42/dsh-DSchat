@@ -114,7 +114,16 @@ test('the mounted panel neither sends on an IME Enter nor keeps the box at two l
       const ok = async (extra) => ({ ok: true, ...extra })
       const pending = () => new Promise(() => undefined)
       const api = {
-        state: async () => ({ ok: true, ...state }),
+        state: async () => ({
+          ok: true,
+          ...state,
+          chats: state.chats.map(({ messages: own, ...summary }) => ({ ...summary, messageCount: own.length })),
+        }),
+        chat: async (id) => {
+          const wanted = id ?? state.activeChatId
+          const chat = state.chats.find(candidate => candidate.id === wanted) ?? state.chats[0]
+          return ok({ chat: { ...chat, messages: [...chat.messages] } })
+        },
         tail: async () => ok({ busy: false, streaming: false }),
         context: async () => ok({ workspaces: [], cwd: '/' }),
         send: async (text, images) => { window.__sent.push({ text, images }); return ok({ chatId: 'c1', stored: true }) },

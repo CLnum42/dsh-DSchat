@@ -29,6 +29,7 @@ import {
   type DSchatMessage,
   type DSchatState,
   type DSchatTail,
+  type DSchatView,
   type DSchatTranscript,
   type TransferMode,
 } from '../../protocol.ts'
@@ -255,6 +256,15 @@ interface QueuedMessage {
 type EnsureReadyResult = { ok: true } | { ok: false; reason: 'login' | 'failed' | 'cooldown' }
 
 /** How often the panel polls /state — the whole-store reconciliation snapshot. */
+/**
+ * How long typing settles before the host is asked which conversations match.
+ *
+ * A conversation's text lives in the host now (see the search effect), so every
+ * keystroke is a request; 180 ms is below the point a reader notices and above
+ * the point a fast typist produces one request per letter.
+ */
+const SEARCH_DEBOUNCE_MS = 180
+
 const POLL_IDLE_MS = 1_500
 /**
  * How often the panel polls /tail while a reply is in flight.
@@ -579,7 +589,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     [t, tt],
   )
 
-  const [state, setState] = useState<DSchatState | null>(null)
+  /**
+   * The panel's snapshot: conversation SUMMARIES plus the bodies it has fetched.
+   *
+   * `/state` used to answer with every transcript in full — 5.86 MB on this
+   * machine, re-sent every 1.5 s. It now answers with summaries, and a body
+   * arrives from `/chat?id=` when a conversation is opened (see `ensureBody`).
+   * Everything downstream — rendering, the tail merge, the navigator — still
+   * works on messages, so the summarization stops here at the transport edge.
+   */
+  const [state, setState] = useState<DSchatView | null>(null)
   const [viewChatId, setViewChatId] = useState<string | undefined>(undefined)
   const [draft, setDraft] = useState('')
   const [images, setImages] = useState<ComposerAttachment[]>([])
@@ -897,8 +916,41 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     try {
       const snapshot = await api.state()
       if (snapshot.ok !== true) return
-      const next = snapshot as unknown as DSchatState
-      setState(next)
+      const next = snapshot as unknown as DSchatView
+      /*
+       * The summaries replace the list, but a body already fetched is KEPT: the
+       * poll runs every 1.5 s and re-fetching the open conversation on each tick
+       * would put back the traffic this change removes. `messageCount` is the
+       * host's, so a conversation that grew while its body was not loaded is
+       * still reported honestly by the row.
+       */
+      /*
+       * A loaded body is kept ONLY while it still agrees with the host's count.
+       *
+       * The count is the one thing `/state` still knows about a conversation's
+       * contents, which makes it the staleness oracle: a body of 4 messages
+       * against a summary of 5 means the conversation grew without this panel
+       * (the reader's own send, an import, a recover, another window), and
+       * keeping the 4 would silently show a transcript that is missing a turn.
+       * The re-fetch is queued below rather than here so the whole comparison
+       * happens against one snapshot.
+       */
+      const stale: string[] = []
+      const held = stateRef.current
+      for (const chat of next.chats) {
+        const previous = held?.chats.find(candidate => candidate.id === chat.id)
+        if (previous?.loaded === true && previous.messages.length !== chat.messageCount) stale.push(chat.id)
+      }
+      setState(previousView => ({
+        ...next,
+        chats: next.chats.map(chat => {
+          const previous = previousView?.chats.find(candidate => candidate.id === chat.id)
+          return previous === undefined || previous.loaded !== true
+            ? { ...chat, messages: [] }
+            : { ...chat, messages: previous.messages, loaded: true }
+        }),
+      }))
+      for (const id of stale) void ensureBody(id, true)
       setViewChatId(previous => {
         if (previous !== undefined && next.chats.some(chat => chat.id === previous)) return previous
         return next.activeChatId ?? next.chats[0]?.id
@@ -908,6 +960,52 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       // loop retries on its own.
     }
   }, [api])
+
+  /**
+   * Fetch one conversation's body, unless it is already loaded.
+   *
+   * The body is what the panel renders, searches within (the navigator), quotes,
+   * exports and transfers, so "opening a conversation" has to mean fetching it.
+   * `loading` is tracked separately from the view because the fetch is async and
+   * two callers (the effect below and the tail loop) can want the same chat at
+   * once — one request, not two.
+   */
+  const bodyRequests = useRef(new Map<string, Promise<void>>())
+  const ensureBody = useCallback(async (chatId: string | undefined, force = false): Promise<void> => {
+    if (chatId === undefined) return
+    const current = stateRef.current?.chats.find(chat => chat.id === chatId)
+    // `force` is for the caller that KNOWS the body moved on — the send path,
+    // and the staleness check in `refreshState`.
+    if (!force && current?.loaded === true) return
+    if (bodyRequests.current.has(chatId)) return bodyRequests.current.get(chatId)
+    const request = (async () => {
+      try {
+        const answer = await api.chat(chatId)
+        if (answer.ok !== true || answer.chat === undefined) return
+        const messages = answer.chat.messages
+        setState(previous => previous === null ? previous : {
+          ...previous,
+          chats: previous.chats.map(chat => (chat.id === chatId ? { ...chat, messages, loaded: true } : chat)),
+        })
+      } catch {
+        // A body that will not load leaves the summary on screen; opening the
+        // conversation again retries.
+      } finally {
+        bodyRequests.current.delete(chatId)
+      }
+    })()
+    bodyRequests.current.set(chatId, request)
+    return request
+  }, [api])
+
+  /**
+   * Whatever is on screen must have its body.
+   *
+   * One effect covers every way the viewed conversation changes — a click, the
+   * first snapshot, a new chat, a transfer — because they all go through
+   * `viewChatId`.
+   */
+  useEffect(() => { void ensureBody(viewChatId) }, [viewChatId, ensureBody])
 
   // Poll /state for the authoritative, whole-store snapshot.
   //
@@ -1229,13 +1327,43 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     [viewChat, tr],
   )
 
+  /**
+   * Which conversations match the query.
+   *
+   * Title matches are decided here (instant, no round trip, and that is what a
+   * reader is usually typing). MESSAGE matches are asked of the host, which is
+   * where the text is: this filter used to scan the messages the panel held,
+   * which only worked while `/state` shipped the whole store — with summaries it
+   * would quietly stop finding anything outside the conversations that happen to
+   * be open.
+   *
+   * Debounced, and the previous answer is kept while the next one is in flight,
+   * so typing does not make rows flicker.
+   */
+  const [messageHits, setMessageHits] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    const needle = query.trim()
+    if (needle === '') {
+      setMessageHits(new Set())
+      return undefined
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void api.searchConversations(needle)
+        .then(answer => {
+          if (cancelled || answer.ok !== true) return
+          setMessageHits(new Set(answer.ids ?? []))
+        })
+        .catch(() => undefined)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [api, query])
+
   const filtered = useMemo(() => {
-    if (query.trim() === '') return chats
     const needle = query.trim().toLowerCase()
-    return chats.filter(chat =>
-      chat.title.toLowerCase().includes(needle)
-      || chat.messages.some(message => message.content.toLowerCase().includes(needle)))
-  }, [chats, query])
+    if (needle === '') return chats
+    return chats.filter(chat => chat.title.toLowerCase().includes(needle) || messageHits.has(chat.id))
+  }, [chats, query, messageHits])
 
   /*
    * The append-to-existing-session targets, read from the shell's own session
@@ -2875,7 +3003,9 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         },
         createElement('div', { className: 'dsh-dschat-item-title', title: chat.title }, chat.title),
         createElement('div', { className: 'dsh-dschat-item-meta' },
-          `${fmt(tr('chats.count'), { count: String(chat.messages.length) })} · ${relativeTime(chat.updatedAt, tr)}`),
+          // `messageCount` from the summary: the body may not be loaded, and the
+          // row's job is to describe the conversation, not to have fetched it.
+          `${fmt(tr('chats.count'), { count: String(chat.messageCount) })} · ${relativeTime(chat.updatedAt, tr)}`),
       ),
       createElement(
         'div',

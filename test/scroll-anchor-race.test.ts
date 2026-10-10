@@ -84,7 +84,18 @@ async function bootPanel(options: {
     const pending = () => new Promise(() => undefined)
     const api = {
       // A fresh object per poll, exactly as JSON over the wire does.
-      state: async () => ({ ok: true, ...state, chats: state.chats.map(c => ({ ...c, messages: [...c.messages] })) }),
+      state: async () => ({
+        ok: true,
+        // Summaries only; the body comes from chat() — see the sibling note in
+        // scroll-anchor.test.ts (and note: no backticks inside this template).
+        ...state,
+        chats: state.chats.map(({ messages: own, ...summary }) => ({ ...summary, messageCount: own.length })),
+      }),
+      chat: async (id) => {
+        const wanted = id ?? state.activeChatId
+        const chat = state.chats.find(candidate => candidate.id === wanted) ?? state.chats[0]
+        return ok({ chat: { ...chat, messages: [...chat.messages] } })
+      },
       tail: async () => ok({ busy: false, streaming: false }),
       context: async () => ok({ workspaces: [], cwd: '/' }),
       send: async (text) => {

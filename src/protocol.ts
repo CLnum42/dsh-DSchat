@@ -83,6 +83,50 @@ export interface DSchatTranscript {
   webSessionId?: string
 }
 
+/**
+ * One conversation as the LIST routes report it: no message bodies.
+ *
+ * `/state` used to answer with every transcript in full — 5.86 MB on this
+ * machine's 215-conversation store, re-sent every 1.5 s to a panel that renders
+ * one conversation. The summary is what the parts that scan the list actually
+ * need: the sidebar row, the counts, the streaming flag (`phaseOf` reads it) and
+ * the delta logic. Anything that needs the text asks `/chat` for that ONE
+ * conversation — see {@link DSchatChatView}.
+ */
+export interface DSchatChatSummary {
+  readonly id: string
+  readonly title: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly model: string
+  readonly streaming: boolean
+  /** How many messages the conversation has (the sidebar's row label). */
+  readonly messageCount: number
+  readonly webSessionId?: string
+}
+
+/**
+ * A summary with its messages attached — what the panel renders.
+ *
+ * `loaded` distinguishes "this conversation is empty" from "its body has not
+ * been fetched yet", which the message list alone cannot say. A chat that is not
+ * loaded renders as a summary and is fetched the moment it is opened.
+ */
+export interface DSchatChatView extends DSchatChatSummary {
+  readonly messages: DSchatMessage[]
+  readonly loaded?: boolean
+}
+
+/**
+ * The panel's own snapshot: the wire state, with whichever bodies it has fetched.
+ *
+ * `mergeTail` and every renderer work on this, so the summarization happened at
+ * the transport edge and nowhere else.
+ */
+export interface DSchatView extends Omit<DSchatState, 'chats'> {
+  readonly chats: DSchatChatView[]
+}
+
 /** One conversation as listed by the web sidebar. */
 export interface WebChatSummary {
   title: string
@@ -208,7 +252,11 @@ export interface DSchatState {
   /** Internet-search toggle state read from the page. */
   readonly search: boolean
   readonly activeChatId?: string
-  readonly chats: DSchatTranscript[]
+  /**
+   * Conversation SUMMARIES. The message bodies live behind `/chat?id=`, because
+   * this snapshot is polled every 1.5 s and used to carry the whole store.
+   */
+  readonly chats: DSchatChatSummary[]
   /** True while a message is being sent / replied (serialized engine busy). */
   readonly busy: boolean
   /**
@@ -445,7 +493,7 @@ export function sameSources(left: readonly DSchatSource[] | undefined, right: re
  * a response in ~10×/s and React bails out of re-rendering only on identity.
  * Pure, so the merge is testable without a browser.
  */
-export function mergeTail(state: DSchatState, tail: DSchatTail): DSchatState {
+export function mergeTail(state: DSchatView, tail: DSchatTail): DSchatView {
   const status = {
     busy: tail.busy,
     busySince: tail.busySince,
@@ -461,7 +509,9 @@ export function mergeTail(state: DSchatState, tail: DSchatTail): DSchatState {
   if (chatIndex < 0 || message === null) return statusChanged ? { ...state, ...status } : state
 
   const chat = state.chats[chatIndex]
-  const position = chat.messages.findIndex(item => item.id === message.id)
+  // A conversation whose body has not been fetched holds no messages; the tail
+  // then starts it from the delta alone, which is exactly `head: 0`.
+  const position = (chat.messages ?? []).findIndex(item => item.id === message.id)
   const existing = position < 0 ? undefined : chat.messages[position]
   const content = (existing?.content ?? '').slice(0, message.head) + message.tail
   /*
@@ -506,6 +556,13 @@ export function mergeTail(state: DSchatState, tail: DSchatTail): DSchatState {
           ...item,
           streaming: tail.streaming,
           updatedAt: tail.updatedAt ?? item.updatedAt,
+          /*
+           * The count follows the body. A tail that APPENDS a message is the one
+           * case where the sidebar would otherwise understate a conversation
+           * until the next `/state` — and it is the visible case, because the
+           * reply the reader is watching is the message being counted.
+           */
+          messageCount: position < 0 ? item.messageCount + 1 : item.messageCount,
           messages: position < 0
             ? [...item.messages, merged]
             : item.messages.map((candidate, j) => (j === position ? merged : candidate)),
@@ -631,6 +688,23 @@ export const DSCHAT_API = {
    * `openLogin` means "give me the visible window" and is the escalation taken
    * only when the wake reports a sign-in page.
    */
+  /**
+   * One conversation WITH its messages.
+   *
+   * The counterpart of the summarized `/state`: the panel asks for the body of
+   * the conversation it is about to render, and of the one a reply is streaming
+   * into. `id` omitted means the active conversation.
+   */
+  chat: '/api/dsh-dschat/chat',
+  /**
+   * Which conversations contain a string, answered by the HOST.
+   *
+   * The panel used to filter the list by scanning every message it held, which
+   * only worked because `/state` carried the whole store. With summaries there
+   * is nothing local to scan, and fetching 215 bodies to answer one keystroke is
+   * worse than the problem being solved — so the scan happens where the data is.
+   */
+  search: '/api/dsh-dschat/search-conversations',
   wake: '/api/dsh-dschat/wake',
   openLogin: '/api/dsh-dschat/open-login',
   closeBrowser: '/api/dsh-dschat/close-browser',

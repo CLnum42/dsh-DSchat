@@ -209,7 +209,27 @@ async function bundle(dir) {
            */
           version: '0.5.1', build: '2026-10-10T10:27:53.040Z',
           ...window.__state,
+          /*
+           * SUMMARIES, like the host. messageCount is what the row prints and
+           * what the panel uses to notice a body has moved on; the messages ride
+           * the chat route above. (No backticks: this block is inside a template
+           * literal, where one would end the template.)
+           */
+          chats: (window.__state.chats ?? []).map(({ messages, ...summary }) => ({
+            ...summary, messageCount: (messages ?? []).length,
+          })),
         }),
+        /*
+         * The body route (see the note on the /state fixture below): the panel
+         * renders messages, and they arrive from here now. Answering with the
+         * same fixture keeps every shot showing real transcript content.
+         */
+        chat: async (id) => {
+          const wanted = id ?? window.__state.activeChatId
+          const chats = window.__state.chats ?? []
+          const chat = chats.find(candidate => candidate.id === wanted) ?? chats[0]
+          return chat === undefined ? { ok: false, error: 'no chat' } : ok({ chat })
+        },
         tail: async () => ok({ busy: window.__state.busy === true, streaming: window.__state.streaming === true }),
         wake: record('wake', wake),
         context: async () => ok({
@@ -1314,7 +1334,7 @@ try {
    * page there is nothing to judge, and the panel's phase is then 'stopped'
    * rather than 'need-login' (see `phaseOf`).
    */
-  await mount({ engine: 'stopped', loggedIn: null, busy: false, streaming: false, chats: streamingChats, activeChatId: 'chat-a' })
+  await mount({ engine: 'stopped', loggedIn: null, busy: false, streaming: false, chats: streamingChats, activeChatId: fixture.chats[0].id })
   await view.waitForTimeout(300)
   report.probes.offlineNotice = await view.evaluate(() => {
     const notice = document.querySelector('.dsh-dschat-notice')
@@ -1326,7 +1346,7 @@ try {
   })
   await shot('16c-notice-offline', { clip: { x: 260, y: 300, width: 1020, height: 420 } })
 
-  await mount({ engine: 'ready', loggedIn: false, busy: false, streaming: false, chats: streamingChats, activeChatId: 'chat-a' })
+  await mount({ engine: 'ready', loggedIn: false, busy: false, streaming: false, chats: streamingChats, activeChatId: fixture.chats[0].id })
   await view.waitForTimeout(300)
   report.probes.loginNotice = await view.evaluate(() => {
     const notice = document.querySelector('.dsh-dschat-notice')

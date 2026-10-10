@@ -4,7 +4,7 @@
  * fenced on the host.
  */
 
-import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type TransferPreview, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
+import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type TransferPreview, type DSchatState, type DSchatTail, type DSchatTranscript, type WakeResult, type WebChatSummary } from '../protocol.ts'
 
 /** Shape every /api/dsh-dschat response carries: ok plus optional error. */
 interface ApiResult {
@@ -244,6 +244,31 @@ export class DSchatApi {
 
   newChat(): Promise<EndpointResult<{ ok: boolean; chatId?: string }>> {
     return request<{ ok: boolean; chatId?: string }>(DSCHAT_API.newChat, {}, TIMEOUT.login)
+  }
+
+  /**
+   * One conversation with its messages (`id` omitted = the active one).
+   *
+   * `/state` reports summaries only, so this is how a body is obtained: the
+   * panel asks for the conversation it is rendering, and for the one a reply is
+   * streaming into.
+   */
+  chat(id?: string): Promise<EndpointResult<{ ok: boolean; chat?: DSchatTranscript }>> {
+    const query = id === undefined ? '' : `?id=${encodeURIComponent(id)}`
+    return request<{ ok: boolean; chat?: DSchatTranscript }>(`${DSCHAT_API.chat}${query}`, undefined, TIMEOUT.poll)
+  }
+
+  /**
+   * Which conversations contain `q`, answered by the host.
+   *
+   * Deferred to the host because the text lives there: with `/state` summarized,
+   * a client-side scan would only ever search the bodies it happened to have
+   * fetched, which is a search that silently stops working.
+   */
+  searchConversations(q: string): Promise<EndpointResult<{ ok: boolean; ids?: string[] }>> {
+    return request<{ ok: boolean; ids?: string[] }>(
+      `${DSCHAT_API.search}?q=${encodeURIComponent(q)}`, undefined, TIMEOUT.poll,
+    )
   }
 
   /** Host facts: workspace list + the most recent session cwd. */
