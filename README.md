@@ -145,6 +145,23 @@ profile 的 `cordis.patch.yml` —— 在 `dschat` 那一行（`name: 'dsh-dscha
   —— 这是把轮询流量从 MiB 级降到 KB 级的原因。脚本要搜会话请用
   `GET /api/dsh-dschat/search-conversations?q=`，它返回会话 id，不返回正文。
 
+### 开发
+
+```sh
+npm install --ignore-scripts   # 依赖（含 @deepseek-ai/* 的类型，供类型检查用）
+npm run build                  # 产出 lib/index.js（Host）与 lib/client.js（浏览器）
+npm run typecheck              # tsc --noEmit，覆盖 src/（strict）
+npm test                       # node --test，180 个用例，含真实浏览器 e2e
+```
+
+`typecheck` 只覆盖 `src/`（发布产物由它构建）；`test/` 是直接用 Node 的类型擦除运行的 ESM
+TypeScript，由**执行**验证，不参与类型检查。
+
+> ⚠️ **链接安装（`link:`）时不要把 `@deepseek-ai/*` 装进插件自己的 `node_modules`**。共享实例的
+> dsh 包必须由宿主提供：profile 内的副本会按「profile > runtime」的优先级遮蔽宿主版本。本仓库把
+> 它们写在 `devDependencies`（只为类型检查），如果你把这份 checkout 以 `link:` 方式装进了正在使用的
+> profile，请在**另一份 clone** 里跑类型检查，或先 `dsh plugin remove`，避免副本进入运行期解析路径。
+
 ### 相关
 
 引擎、网页端解析、蒸馏与迁移机制沿用 Apache-2.0 的 dsh-webchat；界面已重写为 DSH 原生面板（`main` 与
@@ -318,6 +335,24 @@ renders no form for it. Configuration lives in the profile's `cordis.patch.yml` 
 - The 1.5 s poll carries conversation SUMMARIES only (title, times, counts); a body is fetched on demand from
   `GET /api/dsh-dschat/chat?id=` — which is what took the poll from megabytes to kilobytes. Scripts that want to
   search conversations should use `GET /api/dsh-dschat/search-conversations?q=`, which answers ids, not bodies.
+
+### Development
+
+```sh
+npm install --ignore-scripts   # deps, including the @deepseek-ai/* types typechecking needs
+npm run build                  # writes lib/index.js (host) and lib/client.js (browser)
+npm run typecheck              # tsc --noEmit over src/ (strict)
+npm test                       # node --test, 180 cases including real-browser e2e
+```
+
+`typecheck` covers `src/` only — that is what ships, and what `lib/` is built from. `test/` is ESM TypeScript
+run directly by Node's type stripping and is verified by EXECUTION, not by the compiler.
+
+> ⚠️ **With a `link:` install, do not put `@deepseek-ai/*` into this checkout's own `node_modules`.** Packages
+> that must be a single shared instance come from the host: a copy inside the profile shadows the runtime one
+> (`profile > runtime`). They are listed under `devDependencies` here purely so typechecking can resolve them,
+> so if this checkout is linked into the profile you are running, typecheck from a **separate clone** — or
+> `dsh plugin remove` first — instead of `npm install`-ing copies into the live resolution path.
 
 ### Related
 

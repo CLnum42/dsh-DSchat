@@ -31,6 +31,18 @@ export function SessionId(value: string): string {
   return value
 }
 
+/**
+ * The session-position brand.
+ *
+ * The real `@deepseek-ai/dsh-session` exports this as an identity function whose
+ * only job is to make a plain number into an opaque `SessionSeq`; the transfer
+ * path brands every seq it writes, so the stub has to provide it or the
+ * smoke test cannot import the module under test at all.
+ */
+export function SessionSeq(value: number): number {
+  return value
+}
+
 export const chromium = {
   launch: async (): Promise<never> => { throw new Error('browser launch is not exercised by the offline smoke test') },
 }

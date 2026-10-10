@@ -7,6 +7,85 @@ All notable changes to dsh-DSchat are recorded here. The format follows
 Versioning note: `0.5.1` and `0.6.0` are the first two releases cut from a
 committed tree — everything before them shipped as `0.4.2` and earlier.
 
+## [0.6.2] — 2026-10-10
+
+A conformance pass against the official plugin contract: the repository's first
+typecheck (which found real defects), the tool abort signal, the data-dir
+resolution, and the manifest's dependency metadata. Restart the host to load it
+(a `link:` install picks up new `lib/` only on a profile restart).
+
+### Fixed
+- **`dataDir`/`profileDir` resolved to a second `.dsh` whenever `DSH_HOME` was
+  exported.** `DSH_HOME` already IS the harness home (`~/.dsh` by default; the
+  machine-level config layer is `$DSH_HOME/cordis.patch.yml`), but the plugin
+  appended `.dsh` again — `$DSH_HOME/.dsh/dsh-dschat`. On a host that exports the
+  variable (the documented way to relocate the harness home, or to launch a
+  headless profile) that split the transcript store in two and made the
+  `dsh-webchat` browser profile invisible, which reads as a lost login. Both
+  copies (`index.ts`, `store.ts`) now follow the official
+  `@deepseek-ai/dsh-home-paths` `resolveDshHome` precedence, including its
+  "a blank override is unset" rule. Regression test: `test/data-dir.test.ts`.
+- **The six agent tools now honour `exec.signal`.** `dschat_send` could hold a
+  call open for `replyTimeoutMs` (180 s by default) with no way to cancel it, and
+  `dschat_transfer` distils a whole conversation through several sequential model
+  calls. A cancel now performs the engine's own cooperative stop, so the partial
+  reply is still reported (`stopped: true`) instead of an empty one, and the
+  distillation path aborts between chunks and between calls.
+- **The `session/title` event is written only where the deployment declares it.**
+  The type belongs to `@deepseek-ai/dsh-session-title`, not to the core, and
+  `SessionEventMap` members are required-on-read: on a deployment that does not
+  mount that package, a transferred session carrying the event would refuse to
+  open. The write is now gated on `ctx.get('sessionTitle')` — the service that
+  owns the type and its projection.
+- **`dsh.client.inject` named a package that does not exist**
+  (`@deepseek-ai/dsh-client-runtime`). It now names the rows this plugin
+  registers into: the renderer (which declares `ctx.slots`), the layout and
+  sidebar packages (which DECLARE the `main` and `sidebar.panellist` slots), and
+  the locale package.
+- **The client half waited on a `layout` service it never read** — a hard
+  dependency whose absence would have made the whole panel silently fail to
+  mount. Removed from `inject`.
+- **Config values are now validated, not just typed.** `browserChannel` and
+  `browserProxy` were bare strings whose doc comments claimed an enum, and
+  `replyTimeoutMs` accepted a negative number; a typo was therefore accepted at
+  load time and surfaced minutes later as a failed browser launch. The schema now
+  carries the constraints, so a bad value fails loud at startup.
+- **The panel has its own crash fence.** A throwing render used to blank the
+  `main` entry with nothing to distinguish "broken" from "nothing to show"; the
+  panel is now wrapped in an error boundary that renders one localized sentence
+  plus the error, keyed off the new `panel.crashed` locale string.
+- Unbounded growth in the transfer preview cache: entries expired by TTL were
+  never evicted, so an unconfirmed preview (a whole distilled brief) lived until
+  the plugin unloaded. Expired entries are now pruned, with a hard cap.
+- Stale or inaccurate comments: the file header listed five of the six tools, the
+  guidance doc pointed at a function that no longer exists, and the stylesheet
+  claimed every colour was a token.
+
+### Added
+- **`tsconfig.json` + `npm run typecheck`.** No command had ever run `tsc`, so
+  several of the defects above (and the whole client half's slot typing) were
+  invisible to the compiler while the code claimed types caught them. `src/`
+  typechecks clean under `strict`; `test/` is validated by execution.
+- `test/data-dir.test.ts` (3 cases) and a case pinning the `session/title` guard
+  (no title event is written where the type is unknown).
+- `peerDependencies`/`devDependencies` for every harness package the plugin
+  imports, with the officially published compatibility range rather than `*`;
+  `dsh.manifestVersion`; `@types/react`, `@types/react-dom`, `typescript`, the
+  client type packages, and the slot-declaring packages that typechecking needs.
+
+### Changed
+- `engines.node` is `^22.19.0 || >=24.0.0` (the `test` script needs Node's type
+  stripping; `>=22` promised support for versions where it fails).
+- `files` lists `lib` instead of `lib/**/*.js`; `exports` also exposes `./icon`.
+- `dsh.client.immediately` dropped: it forced a 304 KB browser bundle into the
+  boot barrier for a panel the shell does not need in order to render.
+- Removed the undocumented top-level `meta` field (display metadata comes from
+  `locale/*.json`; the fallback order is `meta.title` → `package.json.name`).
+- `apply` no longer hand-copies the schema defaults into a second table, and the
+  dead teardown-and-re-register path (`sync`, called exactly once) is gone.
+- Full-round radii in the panel stylesheet are now paired with
+  `corner-shape: round`, as the harness radius standard requires.
+
 ## [0.6.1] — 2026-10-10
 
 Three defects reported against 0.6.0, and one prompt-cost decision. The panel

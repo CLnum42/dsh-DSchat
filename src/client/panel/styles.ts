@@ -1,10 +1,24 @@
 /**
  * dsh-DSchat panel stylesheet.
  *
- * Every colour is a harness theme token (`--dsw-*`) so the panel follows the
- * active light/dark palette and skins; the only literal colours are the
- * artwork gradients. Class names are prefixed `dsh-dschat` and scoped under
- * the panel root, so nothing here can reach the rest of the UI.
+ * Colours come from harness theme tokens (`--dsw-alias-*` for anything
+ * theme-sensitive, `--dsw-static-*`/`--dsw-elevation-*` where the host uses
+ * those) so the panel follows the active light/dark palette and skins; class
+ * names are prefixed `dsh-dschat` and scoped under the panel root, so nothing
+ * here can reach the rest of the UI.
+ *
+ * What is deliberately NOT a token:
+ *   · artwork gradients;
+ *   · shadows and black/white alpha scrims, which the host also spells as
+ *     literals inside its elevation material;
+ *   · the toast's own status colours. The toast surface
+ *     (`--dsw-alias-toast-bg`) is dark in BOTH themes, so the theme-dependent
+ *     `--dsw-alias-state-*` tokens would be dark-on-dark in light mode; these
+ *     two values are picked against that fixed surface instead;
+ *   · the `body[data-ds-dark-theme]` branches below, which exist where a single
+ *     token cannot express the needed light/dark distinction (the host asks
+ *     feature CSS to leave theming to the theme owner; these are the exceptions
+ *     that remain, each one a measured contrast fix).
  *
  * The layout follows the host's own page composition: a 52px header row with a
  * hairline, a left list column, a centered readable message column, and a
@@ -48,7 +62,7 @@ export const PANEL_CSS = `
 .dsh-dschat-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
 .dsh-dschat-scroll::-webkit-scrollbar-track { background: transparent; }
 .dsh-dschat-scroll::-webkit-scrollbar-thumb {
-  background: var(--dsw-alias-scrollbar-bg-l2); border-radius: 99px;
+  background: var(--dsw-alias-scrollbar-bg-l2); border-radius: 99px; corner-shape: round;
   border: 2px solid transparent; background-clip: padding-box;
 }
 .dsh-dschat-scroll::-webkit-scrollbar-thumb:hover {
@@ -162,12 +176,12 @@ export const PANEL_CSS = `
  */
 .dsh-dschat-lamp {
   width: 22px; height: 22px; flex: none; display: grid; place-items: center;
-  border: none; border-radius: 50%; background: transparent; cursor: pointer;
+  border: none; border-radius: 50%; corner-shape: round; background: transparent; cursor: pointer;
 }
 .dsh-dschat-lamp:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dschat-lamp > i,
 .dsh-dschat-lamp-dot {
-  width: 7px; height: 7px; border-radius: 50%; display: block; flex: none;
+  width: 7px; height: 7px; border-radius: 50%; corner-shape: round; display: block; flex: none;
   background: var(--dsw-alias-state-idle-primary);
 }
 .dsh-dschat-lamp[data-tone="green"] > i,
@@ -247,7 +261,7 @@ export const PANEL_CSS = `
  */
 .dsh-dschat-tbtn {
   display: inline-flex; align-items: center; gap: 6px; flex: none;
-  height: 30px; padding: 0 11px; border-radius: 999px;
+  height: 30px; padding: 0 11px; border-radius: 999px; corner-shape: round;
   border: 1px solid transparent; background: transparent; cursor: pointer;
   white-space: nowrap; font-size: 13px; color: var(--dsw-alias-label-secondary);
 }
@@ -538,7 +552,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-latestwrap { position: absolute; right: 22px; bottom: 14px; z-index: 5; }
 .dsh-dschat-latest {
   display: inline-flex; align-items: center; height: 30px; padding: 0 13px;
-  border-radius: 999px; cursor: pointer; font: inherit; font-size: 12.5px;
+  border-radius: 999px; corner-shape: round; cursor: pointer; font: inherit; font-size: 12.5px;
   border: 1px solid var(--dsw-alias-border-l2);
   background: var(--dschat-surface); color: var(--dsw-alias-label-secondary);
   box-shadow: 0 4px 14px #00000024;
@@ -814,7 +828,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 }
 @keyframes dsh-dschat-blink { 50% { opacity: 0; } }
 .dsh-dschat-spin {
-  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  width: 12px; height: 12px; border-radius: 50%; corner-shape: round; flex: none;
   border: 1.6px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, transparent);
   border-top-color: var(--dsw-alias-state-business-primary);
   animation: dsh-dschat-rot .7s linear infinite;
@@ -990,7 +1004,7 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
 .dsh-dschat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .dsh-dschat-thumb button {
   position: absolute; top: 2px; right: 2px; width: 17px; height: 17px; padding: 0;
-  display: grid; place-items: center; border: none; border-radius: 50%; cursor: pointer;
+  display: grid; place-items: center; border: none; border-radius: 50%; corner-shape: round; cursor: pointer;
   background: color-mix(in srgb, #000 58%, transparent); color: #fff;
   font-size: 10px; line-height: 1; opacity: 0;
 }
@@ -1092,7 +1106,7 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
  */
 .dsh-dschat-attach {
   width: 30px; height: 30px; flex: none; display: grid; place-items: center;
-  border: none; border-radius: 50%; background: transparent; cursor: pointer;
+  border: none; border-radius: 50%; corner-shape: round; background: transparent; cursor: pointer;
   color: var(--dsw-alias-label-secondary);
 }
 .dsh-dschat-attach:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
@@ -1134,7 +1148,7 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
  */
 .dsh-dschat-toggle {
   display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px;
-  border-radius: 999px; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500;
+  border-radius: 999px; corner-shape: round; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500;
   border: 1px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
@@ -1253,7 +1267,7 @@ body[data-ds-dark-theme] .dsh-dschat-toggle:hover { background: var(--dsw-alias-
  * keeps its edge in the one theme where a dimmed accent has nothing to sit on.
  */
 .dsh-dschat-send {
-  width: 30px; height: 30px; flex: none; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
+  width: 30px; height: 30px; flex: none; border-radius: 50%; corner-shape: round; display: grid; place-items: center; cursor: pointer;
   border: none; background: var(--dsw-alias-state-business-primary);
   color: var(--dsw-alias-label-primary-inverted);
 }
@@ -1269,7 +1283,7 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
 }
 .dsh-dschat-stop {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
-  border-radius: 999px; cursor: pointer; font-size: 13px;
+  border-radius: 999px; corner-shape: round; cursor: pointer; font-size: 13px;
   border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-1);
 }
 .dsh-dschat-stop:hover { background: var(--dsw-alias-interactive-bg-hover); }
@@ -1463,7 +1477,7 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
 .dsh-dschat-step[data-done] { color: var(--dsw-alias-label-primary); }
 .dsh-dschat-tick {
-  width: 16px; height: 16px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  width: 16px; height: 16px; border-radius: 50%; corner-shape: round; flex: none; display: grid; place-items: center;
   border: 1.5px solid var(--dsw-alias-border-l3);
 }
 .dsh-dschat-step[data-done] .dsh-dschat-tick {
@@ -1471,7 +1485,7 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
   border-color: var(--dsw-alias-state-success-primary); color: #fff;
 }
 .dsh-dschat-step .dsh-dschat-spin { width: 14px; height: 14px; border-width: 1.8px; }
-.dsh-dschat-prog { height: 3px; border-radius: 99px; background: var(--dsw-alias-bg-skeleton); overflow: hidden; margin: 2px 0 4px; }
+.dsh-dschat-prog { height: 3px; border-radius: 99px; corner-shape: round; background: var(--dsw-alias-bg-skeleton); overflow: hidden; margin: 2px 0 4px; }
 .dsh-dschat-prog > i { display: block; height: 100%; width: 0; background: var(--dsw-alias-state-business-primary); transition: width .3s ease; }
 
 /* ---------- run-status card (panel modal, not a settings page) ---------- */
@@ -1564,4 +1578,23 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-toast button:hover { background: #ffffff3d; }
 .dsh-dschat-toast .dsh-dschat-ok { color: #6ee7a8; }
 .dsh-dschat-toast .dsh-dschat-bad { color: #ff9b9b; }
+/*
+ * The crash fence (panel/slot.tsx). Centred, quiet, and readable on its own:
+ * it is what the reader sees INSTEAD of the panel, and its job is to say so
+ * without looking like the panel half-rendered.
+ */
+.dsh-dschat-crash {
+  align-items: center; justify-content: center; gap: 10px; padding: 32px 24px;
+  text-align: center; height: 100%;
+}
+.dsh-dschat-crash-message {
+  margin: 0; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.6; max-width: 46ch;
+}
+.dsh-dschat-crash-detail {
+  margin: 0; max-width: 100%; overflow: auto; text-align: left;
+  padding: 10px 12px; border-radius: var(--dschat-radius-sm);
+  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dschat-surface-border);
+  color: var(--dsw-alias-state-error-primary);
+  font-family: var(--dschat-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+}
 `

@@ -27,6 +27,7 @@ import {
   phaseOf,
   sourcesOf,
   type DSchatMessage,
+  type DSchatChatView,
   type DSchatState,
   type DSchatTail,
   type DSchatView,
@@ -863,7 +864,11 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * snapshot is mirrored into a ref alongside the conversation it should
    * follow.
    */
-  const stateRef = useRef<DSchatState | null>(null)
+  // `DSchatView`, not the wire `DSchatState`: this snapshot already has the
+  // fetched bodies merged in, which is what every reader of `stateRef` below
+  // relies on (`chat.loaded`, `chat.messages`). Typing it as the wire state made
+  // those reads invisible to the compiler.
+  const stateRef = useRef<DSchatView | null>(null)
   const tailChatRef = useRef<string | undefined>(undefined)
   /** Epoch ms until which the loop keeps tailing regardless of `/state`. */
   const tailUntilRef = useRef(0)
@@ -3065,7 +3070,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     setJumpId(matchedMessageIds(chat)[0])
   }
 
-  function chatRow(chat: DSchatTranscript): ReactNode {
+  /**
+   * One sidebar row.
+   *
+   * Takes the VIEW (a summary, with whatever body has been fetched), not the
+   * full transcript: the row is built from `state.chats`, and its label has to
+   * report `messageCount` — the count the summary carries — because the body
+   * may not be loaded yet and the row's job is to describe the conversation,
+   * not to have fetched it.
+   */
+  function chatRow(chat: DSchatChatView): ReactNode {
     return createElement(
       'div',
       {

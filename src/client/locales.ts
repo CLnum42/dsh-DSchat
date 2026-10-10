@@ -9,6 +9,7 @@
 export interface DSchatDict {
   'nav.label': string
   'panel.title': string
+  'panel.crashed': string
 
   'settings.title': string
   'settings.description': string
@@ -302,6 +303,7 @@ export interface DSchatDict {
 export const zh: DSchatDict = {
   'nav.label': '聊天',
   'panel.title': '聊天',
+  'panel.crashed': '面板渲染出错，页面其余部分不受影响。重新载入页面即可恢复；若反复出现请把下面的信息反馈给维护者。',
   'settings.title': 'DSchat',
   'settings.description': 'DeepSeek 网页端聊天与 harness 迁移设置',
   'settings.status': '状态',
@@ -590,6 +592,7 @@ export const zh: DSchatDict = {
 export const en: DSchatDict = {
   'nav.label': 'Chat',
   'panel.title': 'Chat',
+  'panel.crashed': 'The panel failed to render. The rest of the page is unaffected; reloading recovers it. If it keeps happening, please report the details below.',
   'settings.title': 'DSchat',
   'settings.description': 'DeepSeek web chat and harness handoff settings',
   'settings.status': 'Status',

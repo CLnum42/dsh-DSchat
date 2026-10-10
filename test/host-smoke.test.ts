@@ -160,7 +160,15 @@ test('attachment pruning never deletes a file a transcript still references', as
   }
 })
 
-/** Minimal cordis context recording every registration the plugin makes. */function fakeContext(options: { persistence?: unknown } = {}) {
+/**
+ * Minimal cordis context recording every registration the plugin makes.
+ *
+ * `sessionTitle` is opt-in: the real deployment decides whether the package that
+ * declares the `session/title` event is mounted, and the transfer path asks
+ * exactly that question before writing one (`ctx.get('sessionTitle')`), so a
+ * case can exercise both answers.
+ */
+function fakeContext(options: { persistence?: unknown; sessionTitle?: boolean } = {}) {
   const routes: Array<{ path: string }> = []
   const tools: Array<{ name: string }> = []
   const sections: Array<{ name: string }> = []
@@ -178,6 +186,9 @@ test('attachment pruning never deletes a file a transcript still references', as
       if (name === 'workspaceRegistry') return { list: () => [{ id: 'w1', path: '/tmp/ws', title: 'ws' }] }
       if (name === 'sessions') return { list: () => [{ header: { cwd: '/tmp/ws' } }] }
       if (name === 'sessionPersistence') return options.persistence
+      // Presence only: the plugin asks WHETHER the type's owner is mounted, and
+      // never calls into the service on the cold-session write path.
+      if (name === 'sessionTitle') return options.sessionTitle === true ? {} : undefined
       return undefined
     },
     emit(event: string, ...args: unknown[]) {
@@ -623,7 +634,7 @@ test('transfer writes a cold session through the persistence write handle', asyn
   const dataDir = mkdtempSync(join(tmpdir(), 'dschat-transfer-'))
   try {
     const { service, created } = fakePersistence()
-    const { ctx, routes, tools, emitted } = fakeContext({ persistence: service })
+    const { ctx, routes, tools, emitted } = fakeContext({ persistence: service, sessionTitle: true })
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
     await armCsrf(routes)
 
@@ -737,6 +748,48 @@ test('transfer writes a cold session through the persistence write handle', asyn
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     dispose()
+  }
+})
+
+/**
+ * A deployment without the session-title package must not receive its event.
+ *
+ * `session/title` is declared by `@deepseek-ai/dsh-session-title`, not by the
+ * core, and `SessionEventMap` members are required-on-read: a build that does
+ * not know the type refuses the WHOLE log. The transfer path therefore asks
+ * whether the type's owner is mounted before writing a title. Without this case
+ * the guard could be deleted and every test would still pass — on the one
+ * deployment where the answer is "no", the cost of that is a session that cannot
+ * be opened.
+ */
+test('a deployment without session-title support gets no session/title event', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-notitle-'))
+  try {
+    const { service, created } = fakePersistence()
+    const { ctx, routes, tools } = fakeContext({ persistence: service })
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+
+    const restore = (routes as Array<{ path: string; handler: Function }>).find(r => r.path === '/api/dsh-dschat/restore')!
+    const res = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '网页会话测试',
+      model: 'deepseek-chat',
+      messages: [{ id: 'm1', role: 'user', content: '问题', ts: 1 }],
+    }), res)
+
+    const transfer = (tools as Array<{ name: string; execute: Function }>).find(t => t.name === 'dschat_transfer')!
+    const result = await transfer.execute({ chatId: res.captured.body.chatId, cwd: dataDir, confirm: true })
+    assert.equal(result.error, undefined, `transfer must not fail: ${String(result.error)}`)
+
+    const [record] = created
+    const types = (record.events as Array<{ type: string }>).map(event => event.type)
+    assert.ok(types.includes('user/message'), 'the handoff itself is still written')
+    assert.ok(!types.includes('session/title'), 'no title event is written where its type is unknown')
+  } finally {
+    await dispose()
+    rmSync(dataDir, { recursive: true, force: true })
   }
 })
 

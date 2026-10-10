@@ -1,0 +1,38 @@
+{
+  // Typecheck configuration. This repository's first — until it existed, no
+  // command ever ran `tsc`, so several classes of defect that the source itself
+  // claims types catch (`transfer.ts`'s session-persistence seam, the client's
+  // slot props) were never actually checked.
+  //
+  // `include` covers `src` only: that is what ships (`lib/` is built from it),
+  // and it typechecks clean under `strict`. The test suite is ESM TypeScript run
+  // directly by `npm test` (node --test with type stripping) and is verified by
+  // EXECUTION, not by the compiler — its DOM/browser stubs are hand-built and
+  // would need a second, looser configuration to pass here. Extending coverage to
+  // `test` is a follow-up, not a prerequisite for shipping.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    // The harness packages ship large generated declarations (zod/schemastery
+    // schemas); checking them would report the harness's own types, not ours.
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    // Sources import each other WITH the `.ts` extension (what node's type
+    // stripping and esbuild both want at runtime).
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}

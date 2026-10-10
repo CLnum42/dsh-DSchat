@@ -29,15 +29,33 @@
  * Export discipline: the /client surface carries what cordis loading needs.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the locale plugin's Context merge (ctx.locale).
+// The Client half runs on the same Cordis context type the Host half does; the
+// services below are added to it by their own declaration merges. (This used to
+// import `ClientContext` from `@deepseek-ai/dsh-client-runtime/client` — a
+// package name that appears nowhere in the harness or its docs, so the import
+// resolved to nothing and no type checker could have run.)
+import type { Context } from '@deepseek-ai/cordis'
+// Type-only: pulls the locale plugin's Context merge (ctx.locale) — the service
+// and its namespace table arrive together, which is why the `/client` subpath is
+// the one that matters here.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the LocaleNamespaceMap merge table.
+// Type-only: the renderer's Context merge is what declares `ctx.slots` (and
+// `ctx.uiRenderer`). Registering slots without it only typechecks by accident.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: pulls the LocaleNamespaceMap merge table this plugin augments.
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only, and load-bearing: `SlotMap` is a compile-time registry, so the
+// keys this plugin registers into exist only if the package that DECLARES each
+// one is in the graph. `main` is declared by the layout package and
+// `sidebar.panellist` by the sidebar package, both from their `/client` face —
+// without these two imports the registrations below do not typecheck, which is
+// the compiler's way of saying "this slot might not exist where you are".
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { DSchatApi } from './api.ts'
 import { ChatIcon } from './icons.tsx'
 import { en, zh, type DSchatDict } from './locales.ts'
-import { DSchatPanel } from './panel/DSchatPanel.tsx'
+import { DSchatSlot } from './panel/slot.tsx'
 import { PANEL_CSS } from './panel/styles.ts'
 
 /** Locale + settings namespace this plugin owns. */
@@ -53,14 +71,24 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Required services (fiber inject waiting — the runtime must be up first). */
-export const inject = ['slots', 'locale', 'layout']
+/**
+ * Required services (fiber inject waiting — the runtime must be up first).
+ *
+ * Only what `apply` actually touches: `slots` to register the nav entry and the
+ * center panel, `locale` for the copy. `layout` used to be listed here and is
+ * read nowhere — a hard wait on a service this plugin never uses, which would
+ * have made the whole panel silently fail to mount in a deployment that did not
+ * provide it (`uiWorkspace` / `workspaces` / `sessions` are read through
+ * `ctx.get` at call time for exactly that reason). A service nobody reads is
+ * not a dependency.
+ */
+export const inject = ['slots', 'locale']
 
 /**
  * Mount the DSchat surfaces.
  * @param ctx - client root context (slots + locale services).
  */
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-dschat: dictionaries')
 
   // Styles live as a plugin-owned <style> element, registered as an effect so
@@ -182,6 +210,8 @@ export function apply(ctx: ClientContext): void {
     )))
 
     // The center-column panel, keyed by the same id the sidebar row dispatches.
+    // Registered through DSchatSlot rather than the panel itself, so a render
+    // error is contained to the panel and explained (see panel/slot.tsx).
     disposers.push(ctx.slots.inject('main', () => ctx.slots.register(
       {
         name: 'main',
@@ -189,7 +219,7 @@ export function apply(ctx: ClientContext): void {
         locale: NS,
         inject: () => ({ api, tt, openSession, pickDirectory, createWorkspace }),
       },
-      DSchatPanel as never,
+      DSchatSlot as never,
     )))
   } catch (error) {
     console.warn('[dsh-dschat] slot registration failed:', error)

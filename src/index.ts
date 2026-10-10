@@ -3,9 +3,9 @@
  *
  * Mounts the DeepSeek web engine (a real browser at chat.deepseek.com driven
  * through its own page, persistent login profile), the /api/dsh-dschat route
- * family, the agent tools (dschat_status / dschat_send / dschat_recover /
- * dschat_import / dschat_transfer) and the harness transfer (seed a new session
- * with a web transcript).
+ * family, the agent tools (dschat_status / dschat_send / dschat_stop /
+ * dschat_recover / dschat_import / dschat_transfer) and the harness transfer
+ * (seed a new session with a web transcript).
  *
  * It contributes NO system-prompt text by default. The tools describe
  * themselves, and every trigger a reader might use («网页端», «ChatGPT 模式»,
@@ -29,6 +29,8 @@
  */
 
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -84,8 +86,8 @@ export interface Config {
   announceToAgent?: boolean
   /** Master switch for the plugin (routes, tools, prompt section). */
   enabled?: boolean
-  /** Browser channel hint ('chrome' | 'msedge' | 'chromium' | 'auto'). */
-  browserChannel?: string
+  /** Browser channel hint; the schema rejects anything else at load time. */
+  browserChannel?: 'auto' | 'chrome' | 'msedge' | 'chromium'
   /** Explicit browser executable path. */
   browserExecutablePath?: string
   /** Proxy mode: 'direct' | 'system' | 'http://host:port'. */
@@ -123,26 +125,68 @@ export interface Config {
   transferChunkTokens?: number
 }
 
-export const Config: z<Config> = z.object({
+/**
+ * Config, validated by the same-named schemastery schema.
+ *
+ * The schema carries the CONSTRAINTS, not just the types: the settings used to
+ * be bare `z.string()`/`z.number()` fields whose doc comments claimed an enum or
+ * a duration, so `browserChannel: 'chrme'` was accepted at load time and only
+ * surfaced minutes later when the browser failed to launch, and a negative
+ * `replyTimeoutMs` was accepted and became an immediate timeout. Cordis
+ * validates this schema when the row loads, so a wrong value now fails loud at
+ * startup — which is where a typo in a YAML file should fail.
+ *
+ * Deliberately NOT annotated `: z<Config>`: a schemastery schema's output type
+ * admits `Volatile<T>` wrappers (see `CONFIG_DEFAULTS` below), so the annotation
+ * never matched and the repository's first typecheck reported it.
+ */
+export const Config = z.object({
   announceToAgent: z.boolean().default(false),
   enabled: z.boolean().default(true),
-  browserChannel: z.string().default('auto'),
+  browserChannel: z.union([
+    z.const('auto'),
+    z.const('chrome'),
+    z.const('msedge'),
+    z.const('chromium'),
+  ]).default('auto'),
   browserExecutablePath: z.string().default(''),
-  browserProxy: z.string().default('direct'),
+  // 'direct' | 'system' | an explicit proxy URL ('http://host:port').
+  browserProxy: z.string().pattern(/^(direct|system|https?:\/\/\S+)$/).default('direct'),
   browserHeadless: z.boolean().default(true),
-  replyTimeoutMs: z.number().default(180_000),
+  replyTimeoutMs: z.number().min(1_000).max(3_600_000).default(180_000),
   dataDir: z.string().default(''),
   profileDir: z.string().default(''),
   exportDir: z.string().default(''),
   transferDistill: z.boolean().default(true),
   transferProvider: z.string().default(''),
   transferModel: z.string().default(''),
-  transferMaxTokens: z.number().default(4096),
-  transferChunkTokens: z.number().default(1024),
+  transferMaxTokens: z.number().min(1).default(4096),
+  transferChunkTokens: z.number().min(1).default(1024),
 })
 
-/** Schema default, re-read for hand-built test contexts (the loader applies them normally). */
-const DEFAULT_ANNOUNCE = false
+/**
+ * The schema's own defaults, materialized once.
+ *
+ * Schemastery schemas are callable, and calling this one with an empty object
+ * returns exactly the validated defaults the loader would apply. Deriving them
+ * here instead of listing them a second time is not cosmetic: the old
+ * hand-copied table could drift from the schema, and a hand-built context in the
+ * tests then behaved differently from a loaded one.
+ *
+ * Asserted rather than inferred, because a schemastery field's OUTPUT type is
+ * `T | Volatile<T>`: `Volatile` is the loader's live-update wrapper for fields a
+ * settings form may rewrite, and it is deliberately not part of the `Config`
+ * interface this plugin code consumes (the loader unwraps it before `apply`).
+ *
+ * The `as Config` therefore states an intent the compiler cannot check —
+ * schemastery's `ObjectT` reports `keyof` as `string`, so no mapped-type guard
+ * over its keys is possible. What it buys is the single source of truth: one
+ * table of defaults, taken from the schema, instead of a second hand-written
+ * copy of it. The cost is that renaming a schema key without renaming the
+ * interface field shows up as an absent value at that field's use sites, which
+ * every reader of `resolve()` already guards with `??`.
+ */
+const CONFIG_DEFAULTS: Config = Config({}) as Config
 
 /** Order of the opt-in announcement section within the tool-guidance band. */
 const SECTION_ORDER = 155
@@ -159,18 +203,36 @@ const SECTION_ORDER = 155
  *
  * What is left is the one thing no schema says: that all of these arrive
  * together under one name. It renders ONLY for an agent that can see the tools
- * (see `sync`), so a restricted or preset-scoped agent pays nothing for it.
+ * (see the `text` callback in `apply`), so a restricted or preset-scoped agent
+ * pays nothing for it.
  */
 export const DSCHAT_GUIDANCE = '用户提到「网页端 / DSchat / ChatGPT 模式 / 转移到 harness」时，指的是 dschat_* 工具（各工具说明里有触发词与用法）。'
 
-/** Resolve `$DSH_HOME` (falling back to `$HOME`) without importing the host kit. */
-function dshHome(): string {
-  return process.env.DSH_HOME ?? process.env.HOME ?? '.'
+/**
+ * The harness home directory, without importing the host kit.
+ *
+ * `DSH_HOME` IS the `~/.dsh` directory, not the user's home: the official
+ * definition is "Harness home directory exposed as `DSH_HOME`; defaults to
+ * `$DSH_HOME` or `~/.dsh`", and the machine-level config layer that name refers
+ * to is `$DSH_HOME/cordis.patch.yml`.
+ *
+ * Treating it as a user home (appending another `.dsh`) was a real path bug:
+ * with `DSH_HOME` exported — the documented way to relocate or to launch a
+ * headless profile — the plugin wrote to `$DSH_HOME/.dsh/dsh-dschat` instead of
+ * `$DSH_HOME/dsh-dschat`, so the transcripts the user already had appeared to
+ * be gone, and `defaultProfileDirOf` could no longer find the browser profile
+ * carried over from dsh-webchat, which read as a lost login.
+ */
+function harnessHome(): string {
+  const configured = process.env.DSH_HOME?.trim()
+  if (configured !== undefined && configured !== '') return configured
+  const home = process.env.HOME?.trim()
+  return home !== undefined && home !== '' ? join(home, '.dsh') : join(homedir(), '.dsh')
 }
 
 /** Default plugin data dir (transcripts). */
 function defaultDataDirOf(): string {
-  return `${dshHome()}/.dsh/dsh-dschat`
+  return join(harnessHome(), 'dsh-dschat')
 }
 
 /**
@@ -179,14 +241,27 @@ function defaultDataDirOf(): string {
  * across the switch. Falls back to the plugin's own data dir when absent.
  */
 function defaultProfileDirOf(dataDir: string): string {
-  const legacy = `${dshHome()}/.dsh/dsh-webchat/browser-profile`
+  const legacy = join(harnessHome(), 'dsh-webchat', 'browser-profile')
   return existsSync(legacy) ? legacy : `${dataDir}/browser-profile`
+}
+
+/**
+ * The configured data dir, or the plugin default.
+ *
+ * `value.dataDir?.trim() !== '' && value.dataDir !== undefined ? value.dataDir.trim() : …`
+ * was the same decision spelled three times with two separate reads of a
+ * possibly-undefined field, which no type checker can narrow — and the third
+ * copy, calling `resolve()` twice, could not be narrowed at all.
+ */
+function dataDirOf(value: Config): string {
+  const configured = value.dataDir?.trim() ?? ''
+  return configured !== '' ? configured : defaultDataDirOf()
 }
 
 /** Convert resolved config to engine config. */
 function engineConfigOf(resolve: () => Config): ConstructorParameters<typeof DeepSeekWebEngine>[1] {
   const value = resolve()
-  const dataDir = value.dataDir?.trim() !== '' && value.dataDir !== undefined ? value.dataDir.trim() : defaultDataDirOf()
+  const dataDir = dataDirOf(value)
   const configuredProfile = value.profileDir?.trim() ?? ''
   return {
     dataDir,
@@ -205,36 +280,29 @@ function engineConfigOf(resolve: () => Config): ConstructorParameters<typeof Dee
  * @param config - resolved plugin config (schema defaults applied by the loader).
  */
 export function apply(ctx: Context, config?: Config): void {
-  const current = (): Config => config ?? {}
-  const resolve = (): Config => ({
-    announceToAgent: current().announceToAgent ?? DEFAULT_ANNOUNCE,
-    enabled: current().enabled ?? true,
-    browserChannel: current().browserChannel ?? 'auto',
-    browserExecutablePath: current().browserExecutablePath ?? '',
-    browserProxy: current().browserProxy ?? 'direct',
-    browserHeadless: current().browserHeadless ?? true,
-    replyTimeoutMs: current().replyTimeoutMs ?? 180_000,
-    dataDir: current().dataDir ?? '',
-    profileDir: current().profileDir ?? '',
-    exportDir: current().exportDir ?? '',
-    transferDistill: current().transferDistill ?? true,
-    transferProvider: current().transferProvider ?? '',
-    transferModel: current().transferModel ?? '',
-    transferMaxTokens: current().transferMaxTokens ?? 4_096,
-    transferChunkTokens: current().transferChunkTokens ?? 1_024,
-  })
+  /**
+   * The effective config: schema defaults, then whatever this row set.
+   *
+   * An explicit `undefined` must not erase a default — a hand-built context
+   * (`apply(ctx, { dataDir: '/tmp/x' })`) leaves every other key absent, and
+   * spreading it directly would overwrite each default with `undefined`.
+   */
+  const resolve = (): Config => {
+    const overrides = Object.fromEntries(
+      Object.entries(config ?? {}).filter(([, value]) => value !== undefined),
+    )
+    return { ...CONFIG_DEFAULTS, ...overrides } as Config
+  }
 
   const distillConfigOf = (value: Config): DistillConfig => ({
-    distill: value.transferDistill ?? true,
+    distill: value.transferDistill === true,
     provider: (value.transferProvider ?? '').trim(),
     model: (value.transferModel ?? '').trim(),
     maxTokens: value.transferMaxTokens ?? 4_096,
     chunkTokens: value.transferChunkTokens ?? 1_024,
   })
 
-  const dataDir = resolve().dataDir?.trim() !== '' && resolve().dataDir !== undefined
-    ? resolve().dataDir.trim()
-    : defaultDataDirOf()
+  const dataDir = dataDirOf(resolve())
   const store = new TranscriptStore({ dataDir })
   const engine = new DeepSeekWebEngine(store, engineConfigOf(resolve))
   ctx.effect(() => () => {
@@ -262,7 +330,7 @@ export function apply(ctx: Context, config?: Config): void {
    */
   const hostContext = (): HostContextView => {
     const value = resolve()
-    const dataDir = value.dataDir?.trim() !== '' && value.dataDir !== undefined ? value.dataDir.trim() : defaultDataDirOf()
+    const dataDir = dataDirOf(value)
     const settings = {
       browserChannel: value.browserChannel ?? 'auto',
       browserExecutablePath: value.browserExecutablePath ?? '',
@@ -278,10 +346,10 @@ export function apply(ctx: Context, config?: Config): void {
        * than in two places.
        */
       exportDir: resolveExportDir(value.exportDir),
-      transferDistill: value.transferDistill ?? true,
+      transferDistill: value.transferDistill === true,
       transferProvider: (value.transferProvider ?? '').trim(),
       transferModel: (value.transferModel ?? '').trim(),
-      announceToAgent: value.announceToAgent ?? DEFAULT_ANNOUNCE,
+      announceToAgent: value.announceToAgent === true,
     }
     const live = (ctx.get('sessions') as { list(): Array<{ header: { cwd?: string } }> } | undefined)
       ?.list() ?? []
@@ -313,53 +381,45 @@ export function apply(ctx: Context, config?: Config): void {
     dschatTransferTool(ctx, store, distillConfigOf(resolve())),
   ]
 
-  let disposeSection: (() => void) | undefined
-  let disposeRoutes: (() => void) | undefined
-  let disposeTools: (() => void) | undefined
-
-  // Register (or drop) every surface to match the current source. Each group
-  // is kept under one disposer: re-registering first tears the old one down
-  // so duplicate-name registrations never throw.
-  const sync = (): void => {
-    if (disposeSection !== undefined) { disposeSection(); disposeSection = undefined }
-    if (disposeRoutes !== undefined) { disposeRoutes(); disposeRoutes = undefined }
-    if (disposeTools !== undefined) { disposeTools(); disposeTools = undefined }
-    const value = resolve()
-    if (!value.enabled) return
-    if (value.announceToAgent) {
-      disposeSection = ctx.systemPrompt.section({
-        name: 'plugin:dsh-dschat',
-        order: SECTION_ORDER,
-        /*
-         * Derived, not static: this text exists to explain tools, so an agent
-         * that cannot see them gets an empty string — and the assembler drops
-         * empty sections outright, which makes it genuinely free rather than
-         * "free except for a blank line". It is the shape the harness documents
-         * for tool guidance (`text({ scope })` with `ctx.tools.get(name, scope)`),
-         * so a `tools.restrict()` that hides `dschat_status` also retires the
-         * sentence that talks about it.
-         */
-        text: ({ scope }) => (ctx.tools.get('dschat_status', scope) === undefined ? '' : DSCHAT_GUIDANCE),
-      })
-    }
-    disposeRoutes = ctx.effect(
-      () => {
-        const disposers = routes.map(route => ctx.webServer.register(route))
-        return () => { for (const dispose of disposers) dispose() }
-      },
-      'dsh-dschat: routes',
-    )
-    disposeTools = ctx.effect(
-      () => {
-        const disposers = tools.map(tool => ctx.tools.register(tool))
-        return () => { for (const dispose of disposers) dispose() }
-      },
-      'dsh-dschat: tools',
-    )
+  const value = resolve()
+  if (!value.enabled) return
+  /*
+   * Every surface is registered once, from the config this apply() call was
+   * given. There is deliberately no teardown-and-re-register path: a settings
+   * edit reaches the plugin as a RELOAD of its row (the loader re-runs apply()
+   * with the fresh config), which disposes this fiber and takes all three
+   * registrations with it. The previous version kept three disposers and a
+   * `sync()` that tore them down before re-registering — a capability nothing
+   * ever called, since `sync()` itself ran exactly once.
+   */
+  if (value.announceToAgent) {
+    ctx.systemPrompt.section({
+      name: 'plugin:dsh-dschat',
+      order: SECTION_ORDER,
+      /*
+       * Derived, not static: this text exists to explain tools, so an agent
+       * that cannot see them gets an empty string — and the assembler drops
+       * empty sections outright, which makes it genuinely free rather than
+       * "free except for a blank line". It is the shape the harness documents
+       * for tool guidance (`text({ scope })` with `ctx.tools.get(name, scope)`),
+       * so a `tools.restrict()` that hides `dschat_status` also retires the
+       * sentence that talks about it.
+       */
+      text: ({ scope }) => (ctx.tools.get('dschat_status', scope) === undefined ? '' : DSCHAT_GUIDANCE),
+    })
   }
-
-  // Register every surface from the composed config. The loader re-runs apply()
-  // with fresh config when the plugin row is reloaded, so a settings edit is
-  // picked up by re-entry rather than by a live source hook.
-  sync()
+  ctx.effect(
+    () => {
+      const disposers = routes.map(route => ctx.webServer.register(route))
+      return () => { for (const dispose of disposers) dispose() }
+    },
+    'dsh-dschat: routes',
+  )
+  ctx.effect(
+    () => {
+      const disposers = tools.map(tool => ctx.tools.register(tool))
+      return () => { for (const dispose of disposers) dispose() }
+    },
+    'dsh-dschat: tools',
+  )
 }

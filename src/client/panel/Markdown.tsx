@@ -709,7 +709,12 @@ export function Thinking({ source, label, options = {}, copy, thinkingMs, stream
             onClick: (event: { target: EventTarget | null }) => {
               if (collapseFromBodyClick(event.target)) setOpen(false)
             },
-            onKeyDown: (event: { key: string; target: EventTarget | null }) => {
+            // The event is declared as the minimum this handler reads: React
+            // passes a full KeyboardEvent (so `preventDefault` is present and
+            // the call is real — it stops Space from scrolling the panel), but
+            // the handler is written against these fields so it also works when
+            // the attribute is replayed over a hand-built event.
+            onKeyDown: (event: { key: string; target: EventTarget | null; preventDefault?: () => void }) => {
               if (event.key !== 'Enter' && event.key !== ' ') return
               // Keys pressed on a link inside the body belong to that link.
               if (collapseFromBodyClick(event.target) === false) return

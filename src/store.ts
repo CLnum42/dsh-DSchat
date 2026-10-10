@@ -22,10 +22,20 @@ import type { DSchatMessage, DSchatTranscript } from './protocol.ts'
  */
 export const STORE_VERSION = 1
 
-/** Default plugin data directory (tests inject a sandbox root). */
+/**
+ * Default plugin data directory (tests inject a sandbox root).
+ *
+ * `DSH_HOME` already IS the `~/.dsh` directory (it defaults to `~/.dsh`, and
+ * the machine-level config layer is `$DSH_HOME/cordis.patch.yml`), so it must
+ * not be treated as the user's home: doing that produced
+ * `$DSH_HOME/.dsh/dsh-dschat` and split the store in two whenever the variable
+ * was exported. This mirrors `harnessHome()` in index.ts.
+ */
 export function defaultDataDir(): string {
-  const home = process.env.DSH_HOME ?? process.env.HOME ?? '.'
-  return join(home, '.dsh', 'dsh-dschat')
+  const configured = process.env.DSH_HOME?.trim()
+  if (configured !== undefined && configured !== '') return join(configured, 'dsh-dschat')
+  const home = process.env.HOME?.trim()
+  return join(home !== undefined && home !== '' ? home : '.', '.dsh', 'dsh-dschat')
 }
 
 /**

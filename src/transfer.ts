@@ -28,7 +28,7 @@ import { randomUUID, createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { LlmRuntime, MessageId } from '@deepseek-ai/dsh-llm'
-import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { Workspace, WorkspaceId, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { answerBody } from './protocol.ts'
@@ -360,8 +360,35 @@ const CHUNK_SUMMARY_INSTRUCTION = [
   'Output compact markdown notes. Mark uncertainty explicitly. Do not mention this summarization request or the source. Output only the notes.',
 ].join('\n')
 
-/** Run one LLM distillation call and return the assembled text (undefined on failure). */
-async function runDistillCall(llm: LlmRuntime, target: { provider: string; model: string }, instruction: string, maxTokens: number): Promise<string | undefined> {
+/**
+ * Whether an abort signal has fired.
+ *
+ * A helper rather than an inline `signal?.aborted === true`, because TypeScript
+ * narrows an optional-chain discriminant: after the first such check in a
+ * function, the compiler believes the property can only be `false | undefined`
+ * and reports every LATER check as an impossible comparison. The flag is read
+ * across `await` boundaries here, so it genuinely can change; a call is opaque
+ * to that narrowing and says what it means.
+ *
+ * @param signal - the tool call's abort signal, or nothing.
+ */
+export function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted
+}
+
+/**
+ * Run one LLM distillation call and return the assembled text (undefined on
+ * failure or cancellation).
+ *
+ * `signal` is the tool call's own abort signal. A distillation of a long
+ * transcript is several sequential model calls, so this is the slowest thing
+ * the plugin does on a user's behalf and the first place a cancel has to land:
+ * an aborted call stops consuming the stream and reports failure, which makes
+ * the caller fall back to the raw transcript (a documented, non-lossy outcome)
+ * instead of holding the tool open for minutes after the user cancelled.
+ */
+async function runDistillCall(llm: LlmRuntime, target: { provider: string; model: string }, instruction: string, maxTokens: number, signal?: AbortSignal): Promise<string | undefined> {
+  if (isAborted(signal)) return undefined
   const assembler = new BlockAssembler()
   try {
     for await (const chunk of llm.stream({
@@ -376,11 +403,13 @@ async function runDistillCall(llm: LlmRuntime, target: { provider: string; model
       maxTokens,
       purpose: 'compaction',
     })) {
+      if (isAborted(signal)) return undefined
       assembler.push(chunk)
     }
   } catch {
     return undefined
   }
+  if (isAborted(signal)) return undefined
   const finish = assembler.finish
   if (finish.kind !== 'stop' && finish.kind !== 'max-tokens') return undefined
   const text = assembler.blocks()
@@ -397,13 +426,17 @@ async function runDistillCall(llm: LlmRuntime, target: { provider: string; model
  * (map, capped at `chunkTokens`), then the summaries are merged into the final
  * brief (reduce, capped at `maxTokens`). Short transcripts take a single shot.
  * Returns undefined (so callers fall back to the raw transcript) when the LLM
- * service, a provider/model, or a clean completion is unavailable.
+ * service, a provider/model, or a clean completion is unavailable — and when
+ * `signal` fires, which the caller reports as a cancellation rather than as a
+ * distillation failure.
  */
-export async function distillTranscriptToBrief(ctx: Context, transcript: DSchatTranscript, config: DistillConfig): Promise<DistillResult | undefined> {
+export async function distillTranscriptToBrief(ctx: Context, transcript: DSchatTranscript, config: DistillConfig, signal?: AbortSignal): Promise<DistillResult | undefined> {
   const llm = ctx.get('llm') as LlmRuntime | undefined
   if (llm === undefined) return undefined
+  if (isAborted(signal)) return undefined
   const target = await resolveDistillTarget(llm, config.provider, config.model).catch(() => undefined)
   if (target === undefined) return undefined
+  if (isAborted(signal)) return undefined
 
   const maxTokens = config.maxTokens !== undefined && config.maxTokens > 0 ? config.maxTokens : DEFAULT_TRANSFER_MAX_TOKENS
   const chunkTokens = config.chunkTokens !== undefined && config.chunkTokens > 0 ? config.chunkTokens : DEFAULT_TRANSFER_CHUNK_TOKENS
@@ -418,12 +451,16 @@ export async function distillTranscriptToBrief(ctx: Context, transcript: DSchatT
     // excerpt so no information is silently dropped.
     const summaries: string[] = []
     for (let i = 0; i < chunks.length; i++) {
+      // Between chunks is the cheap place to notice a cancel: without this the
+      // map phase would run to the end of a twenty-chunk transcript.
+      if (isAborted(signal)) return undefined
       const chunkMarkdown = renderMessagesMarkdown(chunks[i], { excludeThinking: true, sources: false })
       const summary = await runDistillCall(
         llm,
         target,
         `${CHUNK_SUMMARY_INSTRUCTION}\n\n--- 片段 ${i + 1} / ${chunks.length} ---\n\n${chunkMarkdown}`,
         chunkTokens,
+        signal,
       )
       summaries.push(summary ?? `（片段 ${i + 1} 摘要失败，截取原文）\n${chunkMarkdown.slice(0, CHUNK_CHAR_BUDGET)}`)
     }
@@ -435,11 +472,18 @@ export async function distillTranscriptToBrief(ctx: Context, transcript: DSchatT
   return { brief, provider: target.provider, model: target.model }
 }
 
-/** Build a user-message surface event carrying the handoff text at a given seq. */
+/**
+ * Build a user-message surface event carrying the handoff text at a given seq.
+ *
+ * `seq` arrives as a plain number (callers count from 0 or from the log's last
+ * seq) and is branded here: `SessionSeq` is opaque across the boundary, and the
+ * brand is the only thing that keeps an arbitrary integer from being passed
+ * where a session position is expected.
+ */
 export function transcriptUserMessageEvent(markdown: string, seq: number): SessionEvent<'user/message'> {
   return {
     type: 'user/message',
-    seq,
+    seq: SessionSeq(seq),
     time: Date.now(),
     // Surface events must declare how they entered the ordered surface; a
     // seeded user prompt appends to the tail.
@@ -479,15 +523,17 @@ function normalizeSessionTitleText(text: string): string {
 
 /**
  * Build the durable `session/title` event that pins the transferred session's
- * display name to the web chat's title. The `session/title` type is a
- * plugin-merged extension of `SessionEventMap` (from dsh-session-title), so it
- * is not in this package's compiled `SessionEvent` union — cast through
- * `unknown`. `source.kind: 'user'` pins the title against auto-regeneration.
+ * display name to the web chat's title. The `session/title` type is declared by
+ * ANOTHER package (`@deepseek-ai/dsh-session-title`, which owns the
+ * `sessionTitle` service and the `title` projection), so it is not in this
+ * package's compiled `SessionEvent` union — cast through `unknown`.
+ * `source.kind: 'user'` is the explicit-user form: it pins the title against
+ * automatic regeneration, exactly as that service's own `rename()` does.
  */
 function transcriptTitleEvent(title: string, seq: number, time: number): SessionEvent {
   return {
     type: 'session/title',
-    seq,
+    seq: SessionSeq(seq),
     time,
     data: {
       title: normalizeSessionTitleText(title),
@@ -495,6 +541,27 @@ function transcriptTitleEvent(title: string, seq: number, time: number): Session
       source: { kind: 'user' },
     },
   } as unknown as SessionEvent
+}
+
+/**
+ * Whether this deployment understands the `session/title` event at all.
+ *
+ * `SessionEventMap` members are required-on-read: a build that does not know an
+ * event type refuses the WHOLE log unless the envelope carries
+ * `ignorable: true`, and a plugin writing through the persistence handle cannot
+ * rely on that flag being accepted. `session/title` is declared by the
+ * `dsh-session-title` package — not by the core — so on a deployment that does
+ * not mount it, this event would turn a perfectly good transferred session into
+ * one that cannot be opened.
+ *
+ * The type and its folder are both owned by that package's service, so the
+ * presence of the service is exactly the question "does this build know this
+ * event?". The title is a convenience; the log is not — when the service is
+ * absent the session is written without a title event and the GUI falls back to
+ * its own naming, which is the pre-existing behaviour for an untitled session.
+ */
+function hasSessionTitleSupport(ctx: Context): boolean {
+  return (ctx as unknown as { get(name: string): unknown }).get('sessionTitle') !== undefined
 }
 
 /** Validate/normalize a workspace directory (must be absolute). */
@@ -516,6 +583,14 @@ export interface TransferWorkspaceTarget {
 export interface TransferToSessionInput {
   transcript: DSchatTranscript
   cwd?: string
+  /**
+   * The calling tool's abort signal, when it has one.
+   *
+   * Honouring it is part of the tool contract ("Honor `exec.signal`"), and on
+   * this path the work being cancelled is a map-reduce distillation over a whole
+   * conversation — the longest thing the plugin does.
+   */
+  signal?: AbortSignal
   /** Target workspace; when set, the session is grouped under it (attached). */
   workspace?: TransferWorkspaceTarget
   /**
@@ -787,8 +862,8 @@ async function appendThroughHandle(
   // Open a turn + step and enter the user message, leaving both open so the
   // resume path closes them (`turn/end` interrupted) and claims the message.
   const appended: SessionEvent[] = [
-    { type: 'turn/start', seq: nextSeq, time: now, data: { turn } },
-    { type: 'step/start', seq: nextSeq + 1, time: now, data: { turn, step: 1 } },
+    { type: 'turn/start', seq: SessionSeq(nextSeq), time: now, data: { turn } },
+    { type: 'step/start', seq: SessionSeq(nextSeq + 1), time: now, data: { turn, step: 1 } },
     transcriptUserMessageEvent(markdown, nextSeq + 2),
   ]
   await handle.append(appended)
@@ -805,7 +880,11 @@ function provenanceOf(markdown: string): string | undefined {
 function sessionContainsProvenance(events: readonly SessionEvent[], marker: string): boolean {
   for (const event of events) {
     if (event.type !== 'user/message') continue
-    const content = (event as { data?: { content?: Array<{ type?: string; text?: string }> } }).data?.content ?? []
+    // Through `unknown` on purpose: a `user/message` event's `content` is a
+    // discriminated union of blocks, and the narrowing this scan needs (a text
+    // block, at any shape) is wider than the union — a direct assertion is
+    // rejected as a mistake, correctly.
+    const content = (event as unknown as { data?: { content?: Array<{ type?: string; text?: string }> } }).data?.content ?? []
     for (const block of content) {
       if (block?.type === 'text' && typeof block.text === 'string' && block.text.includes(marker)) return true
     }
@@ -846,7 +925,7 @@ export interface HandoffDraft {
  * Extracted so the preview and the write cannot drift: the panel shows this
  * function's output and then hands the SAME string back to be written.
  */
-export async function buildHandoffDraft(ctx: Context, transcript: DSchatTranscript, config: DistillConfig, mode?: TransferMode): Promise<HandoffDraft> {
+export async function buildHandoffDraft(ctx: Context, transcript: DSchatTranscript, config: DistillConfig, mode?: TransferMode, signal?: AbortSignal): Promise<HandoffDraft> {
   const shouldDistill = mode === 'distill' ? true : mode === 'raw' ? false : config.distill
   const rawMarkdown = renderTranscriptMarkdown(transcript, { excludeThinking: true, sources: false })
   let body = rawMarkdown
@@ -854,10 +933,15 @@ export async function buildHandoffDraft(ctx: Context, transcript: DSchatTranscri
   let provider: string | undefined
   let model: string | undefined
   let fallbackReason: string | undefined
-  if (shouldDistill) {
-    const result = await distillTranscriptToBrief(ctx, transcript, config)
+  if (shouldDistill && !isAborted(signal)) {
+    const result = await distillTranscriptToBrief(ctx, transcript, config, signal)
     if (result === undefined) {
-      fallbackReason = '蒸馏不可用（LLM 服务、提供方或模型不可用，或调用未正常结束），本次改用原文迁移'
+      // A cancel is reported as a cancel. Without the distinction an abort read
+      // as "distillation unavailable", which is a different (and wrong) story
+      // for the human: it blames the deployment instead of their own stop.
+      fallbackReason = isAborted(signal)
+        ? '已取消（收到中止信号），本次改用原文迁移'
+        : '蒸馏不可用（LLM 服务、提供方或模型不可用，或调用未正常结束），本次改用原文迁移'
     } else {
       body = `${result.brief}\n\n> （已由 ${result.provider}/${result.model} 从网页对话蒸馏生成）`
       distilled = true
@@ -897,7 +981,7 @@ export async function previewHarnessTransfer(ctx: Context, input: TransferToSess
   const continueId = input.targetSessionId !== undefined && input.targetSessionId !== '' ? input.targetSessionId : undefined
   if (continueId === undefined) await resolveTransferTarget(ctx, input)
   else await assertAppendable(ctx, continueId)
-  return buildHandoffDraft(ctx, input.transcript, config, mode)
+  return buildHandoffDraft(ctx, input.transcript, config, mode, input.signal)
 }
 
 /**
@@ -945,7 +1029,7 @@ export async function transferToHarnessSession(ctx: Context, input: TransferToSe
     seedMarkdown = input.seedMarkdown
     distilled = input.seedDistilled === true
   } else {
-    const draft = await buildHandoffDraft(ctx, input.transcript, config, mode)
+    const draft = await buildHandoffDraft(ctx, input.transcript, config, mode, input.signal)
     seedMarkdown = draft.markdown
     distilled = draft.distilled
   }
@@ -974,10 +1058,14 @@ export async function transferToHarnessSession(ctx: Context, input: TransferToSe
   // Seed the handoff message, then pin the display name to the web chat's
   // title (seq 1, immediately after the seed) so the GUI list shows the chat
   // title instead of falling back to the cwd basename or the raw session id.
+  // The title event is written only where the deployment actually declares that
+  // event type — see hasSessionTitleSupport.
   const seedEvent = transcriptSeedEvent(seedMarkdown)
   const title = normalizeSessionTitleText(input.transcript.title)
   const events: SessionEvent[] = [seedEvent]
-  if (title !== '') events.push(transcriptTitleEvent(title, seedEvent.seq + 1, seedEvent.time))
+  if (title !== '' && hasSessionTitleSupport(ctx)) {
+    events.push(transcriptTitleEvent(title, seedEvent.seq + 1, seedEvent.time))
+  }
 
   const persistence = persistenceOf(ctx, false)
   const cold = persistence !== undefined

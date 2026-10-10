@@ -4,6 +4,14 @@
  * stored transcripts (dschat_status / dschat_import), and hand a web
  * conversation into a new harness session (dschat_transfer) — mirroring how
  * Codex's chatgpt mode lets the agent itself use the web subscription.
+ *
+ * Every `execute` honours the tool call's abort signal. Two of these tools can
+ * hold a call open for minutes (`dschat_send` waits up to `replyTimeoutMs` for
+ * the web model; `dschat_transfer` distils a whole conversation through several
+ * sequential model calls), and the harness contract is explicit about it:
+ * "Honor `exec.signal`. Cancel in-flight work when it fires." The helpers below
+ * are the two ways that lands — a cooperative stop for the engine, an
+ * early-return check for the phases that have no stop primitive.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -11,7 +19,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { DeepSeekWebEngine } from './engine/engine.ts'
 import type { TranscriptStore } from './store.ts'
-import { previewHarnessTransfer, renderTranscriptMarkdown, transferToHarnessSession } from './transfer.ts'
+import { isAborted, previewHarnessTransfer, renderTranscriptMarkdown, transferToHarnessSession } from './transfer.ts'
 import type { DistillConfig } from './transfer.ts'
 import type { DSchatErrorCode } from './protocol.ts'
 
@@ -33,6 +41,57 @@ function errorCodeHint(code: DSchatErrorCode | undefined): string {
 /** One text content block (the only render shape these tools emit). */
 function text(value: string): ContentBlock[] {
   return [{ type: 'text', text: value }]
+}
+
+/**
+ * The abort signal the registry passed to this `execute`.
+ *
+ * Read defensively: the contract guarantees `exec.signal`, but the test stubs
+ * and hand-built contexts in `test/` call `execute(args)` with no second
+ * argument, and a missing signal simply means "nothing can cancel this call".
+ */
+function abortSignalOf(exec: unknown): AbortSignal | undefined {
+  const signal = (exec as { signal?: unknown } | undefined)?.signal
+  return signal instanceof AbortSignal ? signal : undefined
+}
+
+/**
+ * Run a long engine operation under the caller's abort signal.
+ *
+ * The engine's streaming operations already stop cooperatively: `engine.stop()`
+ * ends a reply within about a second and KEEPS the partial text (that is what
+ * the 「停止」 button does). So an abort does the same thing and then lets the
+ * operation settle instead of walking away from it, which has two consequences
+ * worth the extra await:
+ *
+ *   · the caller still receives the content that had already arrived, so a
+ *     cancelled `dschat_send` reports the partial answer rather than an empty
+ *     string;
+ *   · the browser tab is not left generating into the void after the tool that
+ *     asked for it has gone.
+ *
+ * The listener is temporary — it lives exactly as long as this call — and is
+ * removed in `finally`, so nothing accumulates on the signal. (That is a local
+ * listener inside one tool call, not a plugin-lifetime registration; those all
+ * live in `ctx.effect`.)
+ */
+async function withSignal<T>(
+  signal: AbortSignal | undefined,
+  work: Promise<T>,
+  onAbort?: () => void | Promise<void>,
+): Promise<{ aborted: boolean; value: T }> {
+  if (signal === undefined) return { aborted: false, value: await work }
+  const abort = (): void => { void onAbort?.() }
+  if (signal.aborted) {
+    await onAbort?.()
+    return { aborted: true, value: await work }
+  }
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    return { aborted: signal.aborted, value: await work }
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
 }
 
 /** Minimal workspace projection surfaced to the agent (id/path/title only). */
@@ -70,8 +129,13 @@ export function dschatStatusTool(engine: DeepSeekWebEngine, store: TranscriptSto
       },
       render: (_args, value: { report?: string }) => text(value.report ?? ''),
     },
-    async execute(): Promise<{ report: string }> {
-      const status = await engine.status()
+    async execute(_args: Record<string, never>, exec: unknown): Promise<{ report: string }> {
+      const signal = abortSignalOf(exec)
+      if (isAborted(signal)) return { report: 'dschat_status: 已取消（收到中止信号）。' }
+      // Reading the status can touch the browser (it may launch it), so it is
+      // raised under the signal too; there is no stop primitive for a read, so
+      // the only check that can land mid-flight is the one after it settles.
+      const { aborted, value: status } = await withSignal(signal, engine.status())
       const active = store.activeChat()
       const lines = [
         `engine: ${status.engine}${status.engineError !== undefined ? ` (${status.engineError})` : ''}`,
@@ -83,6 +147,7 @@ export function dschatStatusTool(engine: DeepSeekWebEngine, store: TranscriptSto
         `activeChat: ${active === undefined ? '-' : `${active.id} (${active.title})`}`,
         `chats:\n${renderChats(store)}`,
       ]
+      if (aborted) lines.push('cancelled: 本次调用已按中止信号取消，以上为取消时的状态。')
       const web = await engine.listWebConversations().catch(() => [] as Array<{ title: string; sessionId?: string }>)
       if (web.length > 0) {
         // Missing is by session id, not title: recovered transcripts carry the
@@ -145,14 +210,31 @@ export function dschatSendTool(engine: DeepSeekWebEngine) {
         ].join('\n'))
       },
     },
-    async execute(args: { text?: string; images?: unknown }): Promise<{ reply: string; error?: string; code?: string; partial: boolean; stopped?: boolean }> {
+    async execute(args: { text?: string; images?: unknown }, exec: unknown): Promise<{ reply: string; error?: string; code?: string; partial: boolean; stopped?: boolean }> {
+      const signal = abortSignalOf(exec)
       const textValue = typeof args?.text === 'string' ? args.text.trim() : ''
       if (textValue === '') return { reply: '', error: '缺少 text 参数', partial: false }
+      // Cancelled before anything was typed into the page: do not send at all.
+      // Starting a web turn the caller has already given up on would burn the
+      // user's web-model quota for a reply nobody is waiting for.
+      if (isAborted(signal)) {
+        // No engine code: a cancel is not one of the engine's failure classes
+        // (`DSchatErrorCode` drives the panel's own localized sentences, and the
+        // panel cannot cancel a tool call), so the sentence travels in `error`.
+        return { reply: '', error: '已取消（收到中止信号），未发送', partial: false, stopped: true }
+      }
       const images = Array.isArray(args?.images)
         ? args.images.filter(value => typeof value === 'string').map(value => value as string)
         : undefined
       // wait=true so the tool returns the completed reply (the GUI path is fire-and-forget).
-      const result = await engine.send(textValue, true, images)
+      const { aborted, value: result } = await withSignal(
+        signal,
+        engine.send(textValue, true, images),
+        // Same cooperative stop the 「停止」 button performs: the reply ends
+        // within about a second and whatever streamed so far is kept.
+        () => engine.stop(),
+      )
+      const stopped = result.stopped === true || aborted
       return {
         reply: result.reply ?? '',
         partial: result.error !== undefined,
@@ -161,7 +243,8 @@ export function dschatSendTool(engine: DeepSeekWebEngine) {
         // SUCCESSFUL send with "value is not lossless JSON".
         ...(result.error === undefined ? {} : { error: result.error }),
         ...(result.code === undefined ? {} : { code: result.code }),
-        ...(result.stopped === true ? { stopped: true } : {}),
+        ...(aborted && result.error === undefined ? { error: '已按中止信号停止等待，下面是停止前已生成的内容' } : {}),
+        ...(stopped ? { stopped: true } : {}),
       }
     },
   })
@@ -188,15 +271,20 @@ export function dschatStopTool(engine: DeepSeekWebEngine) {
       },
       render: (_args, value: { report?: string }) => text(value.report ?? ''),
     },
-    async execute(): Promise<{ report: string }> {
+    async execute(_args: Record<string, never>, exec: unknown): Promise<{ report: string }> {
+      const signal = abortSignalOf(exec)
       // Sampled BEFORE the click: by the time `stop()` has run, `busy` is on its
       // way to false and the report would claim there was nothing to stop.
       const wasBusy = engine.getBusy()
-      await engine.stop()
+      // Deliberately runs even when the signal has already fired: stopping is
+      // the action a cancel is asking for, so refusing it here would be exactly
+      // backwards.
+      const { aborted } = await withSignal(signal, engine.stop())
+      const cancelled = aborted ? '（本次调用随后被取消，但停止请求已发出）' : ''
       return {
-        report: wasBusy
+        report: (wasBusy
           ? 'dschat_stop: 已请求停止生成。停止前已生成的内容保留在该会话中；需要完整回答可重新发送这条提问。'
-          : 'dschat_stop: 当前没有正在生成的回复（已向页面发送停止请求，以防面板状态落后）。',
+          : 'dschat_stop: 当前没有正在生成的回复（已向页面发送停止请求，以防面板状态落后）。') + cancelled,
       }
     },
   })
@@ -215,15 +303,23 @@ export function dschatRecoverTool(engine: DeepSeekWebEngine) {
       schema: { type: 'object', additionalProperties: false, properties: { report: { type: 'string', required: true } } },
       render: (_args, value: { report?: string }) => text(value.report ?? ''),
     },
-    async execute(args: { title?: string; sessionId?: string }): Promise<{ report: string }> {
+    async execute(args: { title?: string; sessionId?: string }, exec: unknown): Promise<{ report: string }> {
+      const signal = abortSignalOf(exec)
+      if (isAborted(signal)) return { report: 'dschat_recover: 已取消（收到中止信号）。' }
       const title = typeof args?.title === 'string' ? args.title.trim() : ''
       const sessionId = typeof args?.sessionId === 'string' ? args.sessionId.trim() : ''
       if (title !== '' || sessionId !== '') {
-        const result = await engine.recoverWebConversation({
+        // A history read has no cooperative stop to call, so the signal is
+        // observed before the request and reported after it settles: the result
+        // is still merged into the local store (throwing it away would lose real
+        // data) but the caller is told the answer arrived after a cancel.
+        const { aborted, value: result } = await withSignal(signal, engine.recoverWebConversation({
           ...(title === '' ? {} : { title }),
           ...(sessionId === '' ? {} : { sessionId }),
-        })
-        if (!result.ok) return { report: `dschat_recover: 同步失败 — ${result.error ?? ''}` }
+        }))
+        if (!result.ok) {
+          return { report: `dschat_recover: 同步失败 — ${result.error ?? ''}${aborted ? '（本次调用已按中止信号取消）' : ''}` }
+        }
         const action = result.created === true
           ? '已同步为新对话'
           : (result.updated === true ? '已增量更新' : '本地已是最新')
@@ -243,7 +339,8 @@ export function dschatRecoverTool(engine: DeepSeekWebEngine) {
             `dschat_recover: ${action}「${result.title ?? title}」为本地对话 ${result.chatId ?? ''}` +
             `，共 ${String(result.messageCount ?? 0)} 条消息（来源：${result.source ?? '-'}）` +
             `${detail.length === 0 ? '' : `，${detail.join('，')}`}` +
-            `${result.sessionId === undefined ? '' : `，sessionId ${result.sessionId}`}。可用 dschat_transfer 转移。`,
+            `${result.sessionId === undefined ? '' : `，sessionId ${result.sessionId}`}。可用 dschat_transfer 转移。` +
+            `${aborted ? '（本次调用已按中止信号取消，但同步本身已完成）' : ''}`,
         }
       }
       const web = await engine.listWebConversations().catch(() => [] as Array<{ title: string; sessionId?: string }>)
@@ -275,7 +372,10 @@ export function dschatImportTool(store: TranscriptStore) {
         return text(value.transcript ?? '')
       },
     },
-    async execute(args: { chatId?: string }): Promise<{ transcript: string; error?: string }> {
+    async execute(args: { chatId?: string }, exec: unknown): Promise<{ transcript: string; error?: string }> {
+      // Purely local and instant, but the contract is unconditional: a call that
+      // arrives already cancelled must not do the work.
+      if (abortSignalOf(exec)?.aborted === true) return { transcript: '', error: 'dschat_import: 已取消（收到中止信号）。' }
       const chat = typeof args?.chatId === 'string' ? store.getChat(args.chatId) : store.activeChat()
       if (chat === undefined) return { transcript: '', error: 'dschat_import: 找不到对话记录（用 dschat_status 查看列表）' }
       return { transcript: renderTranscriptMarkdown(chat) }
@@ -294,13 +394,38 @@ export function dschatImportTool(store: TranscriptStore) {
  */
 const PREVIEW_TTL_MS = 15 * 60 * 1000
 
+/**
+ * Hard cap on remembered previews.
+ *
+ * Each entry holds a whole distilled brief. The TTL is checked on read, so
+ * without an eviction step an unconfirmed preview lives until the plugin
+ * unloads — and a run of previews (the agent exploring several destinations, or
+ * a retry loop) grows the map without bound. A preview that falls out of the
+ * map is not an error: the confirm path simply distils again.
+ */
+const PREVIEW_CACHE_LIMIT = 8
+
 /** The transfer tool (closes over the host context so it can create sessions). */
 export function dschatTransferTool(hostCtx: Context, store: TranscriptStore, distill: DistillConfig) {
   /** Last preview per destination, so `confirm` reuses the text it showed. */
   const previews = new Map<string, { at: number; markdown: string; distilled: boolean }>()
+
+  /** Drop expired previews, then the oldest ones, so the map cannot grow without bound. */
+  const prunePreviews = (now: number): void => {
+    for (const [key, entry] of previews) {
+      if (now - entry.at >= PREVIEW_TTL_MS) previews.delete(key)
+    }
+    // Map iterates in insertion order, so the first key is the oldest write.
+    while (previews.size > PREVIEW_CACHE_LIMIT) {
+      const oldest = previews.keys().next()
+      if (oldest.done === true) break
+      previews.delete(oldest.value)
+    }
+  }
+
   return defineTool({
     name: 'dschat_transfer',
-    description: 'Transfer a stored DeepSeek 网页端 transcript into harness mode. By DEFAULT this only builds a PREVIEW: it distills (or replays) the conversation and returns the exact text that would become the new session\'s first message, writing nothing — show it to the user, then call again with confirm: true to write it (the preview is reused for 15 minutes, so the second call does not re-distill). With confirm: true it creates a NEW harness session seeded with that brief (not the raw chat log), OR appends it as a fresh user message to an EXISTING session via targetSessionId (continue the same task). Optionally target a workspace (workspaceId from dschat_status workspaces list) so the new session is grouped under it. Triggers: 转移到 harness, 转成开发会话, transfer webchat.',
+    description: 'Transfer a stored DeepSeek 网页端 transcript into harness mode. By DEFAULT this only builds a PREVIEW: it distills (or replays) the conversation and returns the exact text that would become the new session\'s first message, writing nothing — show it to the user, then call again with confirm: true to write it (the preview is reused for 15 minutes, so the second call does not re-distill). With confirm: true it creates a NEW harness session seeded with that brief (not the raw chat log), OR appends it as a fresh user message to an EXISTING session via targetSessionId (continue the same task). Optionally target a workspace (workspaceId from dschat_status workspaces list) so the session is grouped under it. Triggers: 转移到 harness, 转成开发会话, transfer webchat.',
     parameters: {
       chatId: { type: 'string', description: 'Transcript id (from dschat_status). Omit for the active chat.' },
       confirm: { type: 'boolean', description: 'Set true to actually write the hand-off. Omit (or false) to only preview it — nothing is created or appended either way in that case.' },
@@ -349,7 +474,9 @@ export function dschatTransferTool(hostCtx: Context, store: TranscriptStore, dis
         return text(`dschat_transfer: 已创建新 harness 会话 ${value.sessionId ?? ''}${note}（${where}）。请告知用户从侧边栏打开该会话继续开发。`)
       },
     },
-    async execute(args: { chatId?: string; confirm?: boolean; targetSessionId?: string; workspaceId?: string; cwd?: string }): Promise<{ sessionId?: string; distilled?: boolean; attached?: boolean; continued?: boolean; workspaceId?: string; preview?: string; fallback?: boolean; fallbackReason?: string; duplicate?: boolean; error?: string }> {
+    async execute(args: { chatId?: string; confirm?: boolean; targetSessionId?: string; workspaceId?: string; cwd?: string }, exec: unknown): Promise<{ sessionId?: string; distilled?: boolean; attached?: boolean; continued?: boolean; workspaceId?: string; preview?: string; fallback?: boolean; fallbackReason?: string; duplicate?: boolean; error?: string }> {
+      const signal = abortSignalOf(exec)
+      if (isAborted(signal)) return { error: 'dschat_transfer: 已取消（收到中止信号），未做任何写入。' }
       const chat = typeof args?.chatId === 'string' ? store.getChat(args.chatId) : store.activeChat()
       if (chat === undefined) return { error: 'dschat_transfer: 找不到对话记录（用 dschat_status 查看列表）' }
       const targetSessionId = typeof args?.targetSessionId === 'string' && args.targetSessionId !== '' ? args.targetSessionId : undefined
@@ -364,8 +491,14 @@ export function dschatTransferTool(hostCtx: Context, store: TranscriptStore, dis
        */
       if (args?.confirm !== true) {
         try {
-          const draft = await previewHarnessTransfer(hostCtx, { transcript: chat, cwd: args?.cwd, workspace, targetSessionId }, distill)
-          previews.set(key, { at: Date.now(), markdown: draft.markdown, distilled: draft.distilled })
+          const draft = await previewHarnessTransfer(hostCtx, { transcript: chat, cwd: args?.cwd, workspace, targetSessionId, ...(signal === undefined ? {} : { signal }) }, distill)
+          // Only remembered when the caller is still waiting for it: a brief
+          // built after a cancel must not occupy a cache slot the next confirm
+          // would otherwise reuse.
+          if (!isAborted(signal)) {
+            prunePreviews(Date.now())
+            previews.set(key, { at: Date.now(), markdown: draft.markdown, distilled: draft.distilled })
+          }
           return {
             distilled: draft.distilled,
             preview: draft.markdown,
@@ -385,6 +518,7 @@ export function dschatTransferTool(hostCtx: Context, store: TranscriptStore, dis
           cwd: args?.cwd,
           workspace,
           targetSessionId,
+          ...(signal === undefined ? {} : { signal }),
           // The confirmed text, when it is still fresh. Absent means no preview
           // was shown (or it expired), so the transfer builds its own.
           ...(reusable === undefined ? {} : { seedMarkdown: reusable.markdown, seedDistilled: reusable.distilled }),
