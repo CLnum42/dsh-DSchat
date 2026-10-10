@@ -96,6 +96,9 @@ curl -s http://127.0.0.1:57531/api/dsh-dschat/state | head -c 120
 4. 左侧「会话列表」是本机记录；左下「从网页同步」把网页端还没同步的会话收进来，某一条想单独补全就点它右侧的
    同步按钮；agent 侧同样可以 `dschat_recover`。其余工具：`dschat_status` / `dschat_send` / `dschat_stop` /
    `dschat_import` / `dschat_transfer`（默认也只返回预览，用户确认后带 `confirm: true` 再调用一次才写入）。
+5. 出问题时打开 `···` → 「运行状态」 → **复制诊断**：一次带上运行版本与构建时间、引擎与登录状态、最后的
+   错误（含错误码）、数据/配置目录，以及网页端的实时探测结果，直接贴进反馈即可。网页端没起来、没登录或
+   出错时，会话末尾也会出现对应的提示卡，每张卡带一个能真正解决问题的按钮（重试启动 / 打开登录窗口）。
 
 ### 配置
 
@@ -136,6 +139,11 @@ profile 的 `cordis.patch.yml` —— 在 `dschat` 那一行（`name: 'dsh-dscha
 - 附件只接受图片、文档与文本（有扩展名白名单），单个上限 24 MB、一次最多 10 个、单次总量 48 MB；
   `/send` 还要求路径落在插件自己的 `attachments/` 目录内（agent 的 `dschat_send` 不受目录限制，但同样
   受类型与大小规则约束）。
+- 同一份会话记录**同时只允许一个实例写入**：第一个 DSH 还开着时再开一个，第二个会转为只读并在「运行状态」
+  里说明原因与处置办法（否则两个实例会互相整份覆盖）。崩溃留下的锁会被自动接管，正常退出会交还。
+- 面板的 1.5 秒轮询只取会话**摘要**（标题/时间/条数），正文按需从 `GET /api/dsh-dschat/chat?id=` 取
+  —— 这是把轮询流量从 MiB 级降到 KB 级的原因。脚本要搜会话请用
+  `GET /api/dsh-dschat/search-conversations?q=`，它返回会话 id，不返回正文。
 
 ### 相关
 
@@ -256,6 +264,10 @@ Loading is declarative: a plugin that throws inside `apply()` can take the whole
    that are not here yet, and the sync button on a row completes that one alone. Agents can do the same through
    `dschat_recover`; the other tools are `dschat_status`, `dschat_send`, `dschat_stop`, `dschat_import` and
    `dschat_transfer` (which also previews by default and writes only on a second call with `confirm: true`).
+5. When something goes wrong, open `···` → Status → **Copy diagnostics**: one click carrying the running version and
+   build time, the engine and sign-in state, the last error with its code, the data and configuration paths, and a
+   live probe of the web page — ready to paste into a report. A web page that is down, signed out or broken also
+   names itself at the end of the conversation, with the button that fixes it (retry / open the sign-in window).
 
 ### Configuration
 
@@ -300,6 +312,12 @@ renders no form for it. Configuration lives in the profile's `cordis.patch.yml` 
 - Attachments are limited to images, documents and text (an extension allow-list): 24 MB each, 10 per message,
   48 MB per turn. `/send` additionally requires the path to be inside the plugin's own `attachments/` directory;
   the agent's `dschat_send` is not confined to that directory but obeys the same type and size rules.
+- Only ONE instance may write a transcript store at a time: start a second Harness while the first is running and it
+  turns read-only, saying why in the status card (two writers would each overwrite the other's whole history). A lock
+  left by a crash is taken over automatically, and a clean shutdown hands it back.
+- The 1.5 s poll carries conversation SUMMARIES only (title, times, counts); a body is fetched on demand from
+  `GET /api/dsh-dschat/chat?id=` — which is what took the poll from megabytes to kilobytes. Scripts that want to
+  search conversations should use `GET /api/dsh-dschat/search-conversations?q=`, which answers ids, not bodies.
 
 ### Related
 

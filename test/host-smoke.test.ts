@@ -966,9 +966,25 @@ test('the state route exposes every field the panel reads', async () => {
     for (const field of [
       'engine', 'loggedIn', 'deepThink', 'search',
       'busy', 'preparingNewChat', 'chats',
+      // Read by the status card since 0.6.0: "which build is running?" is a
+      // question package.json, the git tag and the newest tarball each answer
+      // differently, so the one answer that cannot be stale is the one the
+      // running bundle reports about itself.
+      'version', 'build',
+      // And the token the mutating routes require (see the fence tests).
+      'csrfToken',
     ]) {
       assert.ok(Object.hasOwn(res.captured.body, field), `/state exposes ${field}`)
     }
+    /*
+     * This harness bundles `src/index.ts` WITHOUT the build-time defines, so the
+     * values are empty here — which is itself the contract worth pinning: a raw
+     * bundle reports an empty version instead of failing to import (`typeof` on
+     * an undeclared identifier is the reason). The release build's values are
+     * checked where they are made, by scripts/build.mjs.
+     */
+    assert.equal(typeof res.captured.body.version, 'string', 'version is always a string')
+    assert.equal(typeof res.captured.body.build, 'string', 'and so is the build time')
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     dispose()
