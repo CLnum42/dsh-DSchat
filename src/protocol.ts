@@ -486,6 +486,15 @@ export const DSCHAT_API = {
   newChat: '/api/dsh-dschat/new-chat',
   restore: '/api/dsh-dschat/restore',
   attach: '/api/dsh-dschat/attach',
+  /**
+   * Read one stored attachment's bytes back, for the composer's thumbnails.
+   *
+   * A GET carrying the absolute path of a file `attach` already wrote. The host
+   * answers 404 when that path is outside the attachment directory, has been
+   * pruned, or is not a file — the composer then falls back to a name-only chip
+   * rather than showing a broken image.
+   */
+  attachment: '/api/dsh-dschat/attachment',
   send: '/api/dsh-dschat/send',
   stop: '/api/dsh-dschat/stop',
   deepThink: '/api/dsh-dschat/deep-think',

@@ -37,6 +37,9 @@ export interface DSchatDict {
   'settings.loading': string
   'settings.auto': string
 
+  'status.title': string
+  'status.description': string
+  'status.where': string
   'status.stopped': string
   'status.launching': string
   'status.needLogin': string
@@ -49,12 +52,33 @@ export interface DSchatDict {
   'action.closeBrowser': string
   'action.newChat': string
   'action.newChat.hint': string
+  /*
+   * The action row's VISIBLE labels. They are deliberately shorter than the
+   * titles beside them: 收起会话列表 is a sentence for a tooltip, 会话列表 is
+   * what fits on the button. The row's three buttons are named rather than
+   * glyph-only, so each needs its own noun.
+   */
+  'action.sessions': string
   'action.recover': string
   'action.recover.hint': string
   'action.stop': string
   'action.send': string
   'action.startTransfer': string
   'action.exportFile': string
+
+  'brand.title': string
+  'lamp.green': string
+  'lamp.red': string
+  'lamp.grey': string
+  'lamp.amber': string
+
+  'composer.actions': string
+  'more.hint': string
+  'attach.show': string
+  'attach.remove': string
+  'attach.remove.hint': string
+  'transfer.short': string
+  'transfer.short.hint': string
 
   'rail.search': string
   'rail.search.hint': string
@@ -84,12 +108,22 @@ export interface DSchatDict {
   'empty.title': string
   'empty.body': string
 
+  'engine.notice.title': string
+  'engine.notice.retry': string
+  'engine.notice.retrying': string
+  'engine.notice.unreachable': string
+  'engine.notice.staleHost': string
+  'engine.notice.needLogin': string
+  'engine.notice.queued': string
+
   'composer.placeholder': string
-  'composer.busy': string
   'composer.notLoggedIn': string
   'composer.offline': string
   'composer.connecting': string
   'composer.attach.drop': string
+  'composer.queue.note': string
+  'composer.queue.files': string
+  'composer.queue.cancel': string
   'composer.upload': string
   'composer.upload.hint': string
   'composer.upload.busy': string
@@ -154,6 +188,7 @@ export interface DSchatDict {
   'toast.send.failed': string
   'toast.wake.failed': string
   'toast.send.needLogin': string
+  'toast.send.queued': string
   'toast.attach.failed': string
   'toast.attach.tooBig': string
   'toast.attach.tooMany': string
@@ -218,6 +253,9 @@ export const zh: DSchatDict = {
   'settings.loading': '正在读取运行参数…',
   'settings.auto': '自动',
 
+  'status.title': '运行状态',
+  'status.description': 'DeepSeek 网页端引擎的实时状态与解析后的运行参数（只读）。',
+  'status.where': '以上参数在「设置 → 插件」的 dsh-DSchat 行里编辑，改完即时生效。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
   'status.stopped': '未启动',
   'status.launching': '正在启动浏览器',
   'status.needLogin': '未登录',
@@ -230,12 +268,42 @@ export const zh: DSchatDict = {
   'action.closeBrowser': '关闭浏览器',
   'action.newChat': '新对话',
   'action.newChat.hint': '新对话（⌘⇧O）',
+  'action.sessions': '会话列表',
   'action.recover': '从网页恢复',
   'action.recover.hint': '把网页端已有但本地未收录的会话拉回来；本地已收录但内容不全的会就地补全',
   'action.stop': '停止',
   'action.send': '发送',
   'action.startTransfer': '开始迁移',
   'action.exportFile': '导出 markdown',
+
+  /*
+   * Header: the product mark, and the status lamp that replaced the three
+   * window controls there (those moved above the composer).
+   *
+   * The lamp's four sentences are also its accessible names: colour is the
+   * whole signal on screen, so a reader who cannot see the difference still has
+   * to hear which of the four states the engine is in.
+   */
+  'brand.title': 'DeepSeek Chat',
+  'lamp.green': '正常运行',
+  'lamp.red': '故障',
+  'lamp.grey': '未启动',
+  'lamp.amber': '正在启动或未登录',
+
+  /* The action row above the input card. */
+  'composer.actions': '会话与迁移操作',
+  /*
+   * The 「···」 at the row's right end. It names WHAT the menu holds rather than
+   * saying "更多" — the four entries are exactly what a reader goes looking for
+   * by name (导出 markdown, 运行状态), so the tooltip and the accessible name
+   * carry those words instead of a shrug.
+   */
+  'more.hint': '更多：运行状态 / 导出 markdown / 登录窗口 / 关闭浏览器',
+  'attach.show': '查看附件',
+  'attach.remove': '移除附件',
+  'attach.remove.hint': '移除附件 {name}',
+  'transfer.short': 'DSH 迁移',
+  'transfer.short.hint': '在 Harness 中继续：把这次网页对话蒸馏成简报，或按原文迁移成 harness 会话',
 
   'rail.search': '搜索会话…',
   'rail.search.hint': '搜索会话内容（⌘K）',
@@ -262,15 +330,25 @@ export const zh: DSchatDict = {
   'settings.yes': '是',
   'settings.no': '否',
 
+  'engine.notice.title': '网页端没有就绪',
+  'engine.notice.retry': '重试启动网页端',
+  'engine.notice.retrying': '正在启动…',
+  'engine.notice.unreachable': '本机引擎没有响应启动请求（/wake 无应答），消息没有发出去。请检查网络后重试。',
+  'engine.notice.staleHost': '宿主半区还是旧版本（/wake 返回 404），已改为打开登录窗口。重启 Harness 后自动启动即可用。',
+  'engine.notice.needLogin': '网页端需要登录：请在弹出的浏览器窗口里完成登录，登录成功后这条提示会自动消失。',
+  'engine.notice.queued': '待发消息暂时发不出去（网页端没起来）。消息还在队列里，启动成功后会自动发出。',
+
   'empty.title': '在 DSH 里直接聊 DeepSeek 网页端',
   'empty.body': '复用你的网页登录会话，不消耗 API 额度。聊完可以一键蒸馏成任务简报，在 harness 里继续开发。',
 
   'composer.placeholder': '给 DeepSeek 网页端发消息…',
-  'composer.busy': '等待网页端回复…',
-  'composer.notLoggedIn': '请先完成 DeepSeek 网页登录',
-  'composer.offline': '网页端未启动 · 点这里启动',
-  'composer.connecting': '正在启动网页端…',
+  'composer.notLoggedIn': '网页端需要登录 · 直接输入，登录后即可发送',
+  'composer.offline': '网页端未启动 · 直接输入，会自动在后台启动',
+  'composer.connecting': '正在后台启动网页端…可以先输入',
   'composer.attach.drop': '松开即可添加文件',
+  'composer.queue.note': '上一条回复还在生成，以上消息会在它结束后依次发出',
+  'composer.queue.files': '附件 {count}',
+  'composer.queue.cancel': '取消这条待发消息',
   'composer.upload': '上传文件',
   'composer.upload.hint': '打开 Finder 选择文件，上传到 DeepSeek 网页端（图片、PDF、Word、Excel、PPT、txt 等）',
   'composer.upload.busy': '上传中…',
@@ -333,6 +411,7 @@ export const zh: DSchatDict = {
   'toast.send.failed': '发送失败：{error}',
   'toast.wake.failed': '启动网页端失败：{error}',
   'toast.send.needLogin': '还没有登录 DeepSeek 网页端：在弹出的窗口里完成登录后，消息就能发出去了（内容已保留）。',
+  'toast.send.queued': '已排队：上一条回复结束后自动发送',
   'toast.thinkingCopied': '已复制思考过程',
   'toast.codeCopied': '已复制代码块',
   'toast.attach.failed': '添加文件失败：{error}',
@@ -399,6 +478,9 @@ export const en: DSchatDict = {
   'settings.loading': 'Reading runtime settings…',
   'settings.auto': 'auto',
 
+  'status.title': 'Runtime status',
+  'status.description': 'Live state of the DeepSeek web engine plus the resolved runtime settings (read-only).',
+  'status.where': 'Edit these values on Settings → Plugins, in the dsh-DSchat row; they apply immediately. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
   'status.stopped': 'Not started',
   'status.launching': 'Starting browser',
   'status.needLogin': 'Not signed in',
@@ -411,12 +493,27 @@ export const en: DSchatDict = {
   'action.closeBrowser': 'Close browser',
   'action.newChat': 'New chat',
   'action.newChat.hint': 'New chat (⌘⇧O)',
+  'action.sessions': 'Chats',
   'action.recover': 'Recover from web',
   'action.recover.hint': 'Pull in conversations that exist on the web but not locally; short local copies are filled in place',
   'action.stop': 'Stop',
   'action.send': 'Send',
   'action.startTransfer': 'Start transfer',
   'action.exportFile': 'Export markdown',
+
+  'brand.title': 'DeepSeek Chat',
+  'lamp.green': 'Running normally',
+  'lamp.red': 'Failed',
+  'lamp.grey': 'Not started',
+  'lamp.amber': 'Starting or signed out',
+
+  'composer.actions': 'Conversation and transfer actions',
+  'more.hint': 'More: runtime status / export markdown / login window / close browser',
+  'attach.show': 'View attachment',
+  'attach.remove': 'Remove attachment',
+  'attach.remove.hint': 'Remove attachment {name}',
+  'transfer.short': 'Migrate to DSH',
+  'transfer.short.hint': 'Continue in Harness: distill this web conversation into a brief, or migrate it verbatim into a harness session',
 
   'rail.search': 'Search conversations…',
   'rail.search.hint': 'Search conversation text (⌘K)',
@@ -443,15 +540,25 @@ export const en: DSchatDict = {
   'settings.yes': 'yes',
   'settings.no': 'no',
 
+  'engine.notice.title': 'The web engine is not ready',
+  'engine.notice.retry': 'Retry starting the web engine',
+  'engine.notice.retrying': 'Starting…',
+  'engine.notice.unreachable': 'The local engine did not answer the start request (/wake), so the message was not sent. Check your connection and retry.',
+  'engine.notice.staleHost': 'The host half is an older build (/wake answered 404); the login window was opened instead. Restart Harness and automatic start will work.',
+  'engine.notice.needLogin': 'DeepSeek web needs a sign-in: finish it in the browser window that just opened — this notice disappears on its own once you are in.',
+  'engine.notice.queued': 'Queued messages cannot go out while the web engine is down. They stay in the queue and leave automatically once it starts.',
+
   'empty.title': 'Talk to DeepSeek web right inside DSH',
   'empty.body': 'Reuses your web sign-in instead of API billing. When you are done, distill the chat into a task brief and keep going in a harness session.',
 
   'composer.placeholder': 'Message DeepSeek web…',
-  'composer.busy': 'Waiting for the web reply…',
-  'composer.notLoggedIn': 'Sign in to DeepSeek web first',
-  'composer.offline': 'Web engine is off · click to start',
-  'composer.connecting': 'Starting the web engine…',
+  'composer.notLoggedIn': 'Web sign-in needed · type now, it sends once you are in',
+  'composer.offline': 'Web engine is off · just type, it starts in the background',
+  'composer.connecting': 'Starting the web engine in the background… type ahead',
   'composer.attach.drop': 'Drop to attach',
+  'composer.queue.note': 'The previous reply is still generating; these go out one by one when it ends',
+  'composer.queue.files': '{count} file(s)',
+  'composer.queue.cancel': 'Remove this queued message',
   'composer.upload': 'Upload file',
   'composer.upload.hint': 'Open Finder and upload a file to the DeepSeek web page (images, PDF, Word, Excel, PPT, txt …)',
   'composer.upload.busy': 'Uploading…',
@@ -514,6 +621,7 @@ export const en: DSchatDict = {
   'toast.send.failed': 'Could not send: {error}',
   'toast.wake.failed': 'Could not start the web engine: {error}',
   'toast.send.needLogin': 'Not signed in to DeepSeek web yet: finish signing in in the window that just opened and the message can go out (your text is kept).',
+  'toast.send.queued': 'Queued: it goes out as soon as the current reply finishes',
   'toast.thinkingCopied': 'Thinking process copied',
   'toast.codeCopied': 'Code copied',
   'toast.attach.failed': 'Could not attach the file: {error}',

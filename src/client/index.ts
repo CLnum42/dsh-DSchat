@@ -1,13 +1,19 @@
 /**
  * Browser-half entry for dsh-DSchat.
  *
- * Runs inside the harness Web page and registers THREE things, all through the
+ * Runs inside the harness Web page and registers TWO things, both through the
  * shell's own slot system — nothing is injected into the DOM:
  *
  *   sidebar.panellist  (id: dschat)  the sidebar nav entry; the shell owns the
  *                                    button and reads the label from metadata
  *   main               (key: dschat) the whole center-column panel
- *   settings.section   (id: dschat)  a native settings page for the plugin
+ *
+ * It deliberately registers NOTHING into `settings.section`. DSchat used to own
+ * a page there, and it was the wrong place for it twice over: nothing on that
+ * page could be edited (the plugin's knobs live in its Config, which the shell
+ * already renders on the Plugins page), and the reader who wants to know why the
+ * web page is not answering is looking at this panel, not at Settings. The
+ * status card it held is now 「运行状态」 in the panel's own 「···」 menu.
  *
  * Failure policy: a mount problem is logged, never thrown — the shell fails the
  * whole boot when a plugin apply throws, and an external plugin must not take
@@ -25,7 +31,6 @@ import { DSchatApi } from './api.ts'
 import { ChatIcon } from './icons.tsx'
 import { en, zh, type DSchatDict } from './locales.ts'
 import { DSchatPanel } from './panel/DSchatPanel.tsx'
-import { DSchatSettings } from './panel/DSchatSettings.tsx'
 import { PANEL_CSS } from './panel/styles.ts'
 
 /** Locale + settings namespace this plugin owns. */
@@ -178,23 +183,6 @@ export function apply(ctx: ClientContext): void {
         inject: () => ({ api, tt, openSession, pickDirectory, createWorkspace }),
       },
       DSchatPanel as never,
-    )))
-
-    // A native settings page. Registering into a slot declared by another
-    // subtree must go through slots.inject: a bare register() races the
-    // sidebar.settings entry and is silently dropped. `label` is a thunk, so
-    // the shell re-reads it on every projection and a locale switch needs no
-    // re-registration. The settings page needs only the API client and the locale.
-    disposers.push(ctx.slots.inject('settings.section', () => ctx.slots.register(
-      {
-        name: 'settings.section',
-        id: PANEL_ID,
-        order: 50,
-        label: () => tt('settings.title'),
-        locale: NS,
-        inject: () => ({ api, tt }),
-      },
-      DSchatSettings as never,
     )))
   } catch (error) {
     console.warn('[dsh-dschat] slot registration failed:', error)

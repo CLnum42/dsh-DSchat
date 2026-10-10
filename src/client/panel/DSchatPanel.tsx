@@ -20,6 +20,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react'
 import {
   mergeTail,
@@ -33,12 +34,13 @@ import {
 } from '../../protocol.ts'
 import type { DSchatApi } from '../api.ts'
 import {
-  CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, HistoryIcon, MoreIcon,
-  PencilIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
-  SendIcon, ThinkIcon, TrashIcon, WarnIcon, WebSearchIcon, WhaleMark,
+  CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, HistoryIcon,
+  MoreIcon, PencilIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
+  SendIcon, SwapIcon, ThinkIcon, TrashIcon, WarnIcon, WebSearchIcon, WhaleMark,
 } from '../icons.tsx'
 import { touchEngineStatus, useEngineStatus } from '../status.ts'
 import { Markdown, Thinking } from './Markdown.tsx'
+import { DSchatStatus } from './DSchatStatus.tsx'
 import { firstLine, replyBody, thinkingBody } from './reply.ts'
 
 /** Interpolate `{placeholder}`s in a localized template. */
@@ -74,6 +76,70 @@ const MAX_ATTACH_COUNT = 10
 
 /** Human-readable cap for the refusal toast. */
 const MAX_ATTACH_LABEL = '24 MB'
+
+/**
+ * One file the composer is holding for the next message.
+ *
+ * The engine only ever needs `path` — `engine.attachFiles` drives the page's
+ * file input with real paths — but the PANEL needs the other three fields to
+ * render the chip honestly, and they are the reason this is an object:
+ *
+ *   - `name` is the file's real name. The host stores attachments as
+ *     `${uuid}__${name}${ext}` and answers the bare `name` back, so showing
+ *     `path.split('/').pop()` showed the UUID — the one part of the path that
+ *     means nothing to a reader ("一串数字").
+ *   - `kind` decides between a THUMBNAIL and a file chip. It is taken from the
+ *     browser's own media type rather than re-derived from the extension,
+ *     because the host's extension table already made that judgement (a
+ *     nameless paste becomes `.png` only when the bytes are an image).
+ *   - a path recovered from an older transcript has no stored kind, and is
+ *     treated as a file — see {@link attachmentKind}.
+ */
+interface ComposerAttachment {
+  /** Absolute host path the engine uploads; the only field it is sent. */
+  path: string
+  /** The name to show: the reader's own, or the best reading of the path. */
+  name: string
+  /** The browser's media type for the bytes. */
+  mediaType: string
+  /** Which face the chip wears. See {@link attachmentKind}. */
+  kind: 'image' | 'file'
+}
+
+/** Extensions the panel will offer to preview as an image. */
+const IMAGE_EXTENSION = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|avif)$/i
+
+/**
+ * The name to show for an attachment that arrived as a bare path.
+ *
+ * Stored attachments are `${uuid}__${name}${ext}`, and this strips the UUID
+ * half. It is deliberately forgiving: the older, pre-label layout is a bare
+ * UUID with no `__` at all, and that has nothing better to offer than itself,
+ * so it is shown unchanged rather than mangled.
+ *
+ * @param path - the absolute path out of the transcript or the composer.
+ */
+function displayNameOf(path: string): string {
+  const file = path.split('/').pop() ?? path
+  const at = file.indexOf('__')
+  return at === -1 ? file : file.slice(at + 2)
+}
+
+/**
+ * Which face an attachment wears: the extension decides, not the stored type.
+ *
+ * This is the {@link displayNameOf} problem in reverse, and it has the same
+ * shape: a path recovered from disk carries no media type, and an older
+ * attachment carries a bare-UUID name whose extension is the only surviving
+ * clue. A transcript's attachment that LOOKS like an image therefore still gets
+ * a thumbnail, and one that does not gets a chip — the same rule the composer
+ * applies to a fresh paste, minus the type it has not got.
+ *
+ * @param path - the absolute path.
+ */
+function attachmentKind(path: string): 'image' | 'file' {
+  return IMAGE_EXTENSION.test(path) ? 'image' : 'file'
+}
 
 /** Best-effort file type for the host, which maps it to an on-disk extension. */
 function genericMediaType(file: File): string {
@@ -116,6 +182,32 @@ interface Toast {
   /** Auto-dismiss deadline in ms. */
   ttl: number
 }
+
+/**
+ * One message waiting for its turn in front of the web page.
+ *
+ * `id` is local and exists for React keys and for cancelling exactly one row —
+ * it is never sent anywhere. `images` holds the composer's OWN attachment
+ * records (see {@link ComposerAttachment}), not raw bytes: the files are
+ * already on disk, so a queued message can sit there for as long as the reader
+ * needs without holding megabytes of base64 in memory, and a message that is
+ * cancelled or fails can be handed back to the composer with its names and
+ * thumbnail faces intact.
+ */
+interface QueuedMessage {
+  id: string
+  text: string
+  images: ComposerAttachment[]
+}
+
+/**
+ * What one engine-start attempt produced.
+ *
+ * `'login'` is not a failure: the page came up on the sign-in screen and a
+ * visible window is waiting for the reader, so the panel must NOT dress it up
+ * as an error — it only has to keep the draft and let the reader sign in.
+ */
+type EnsureReadyResult = { ok: true } | { ok: false; reason: 'login' | 'failed' | 'cooldown' }
 
 /** How often the panel polls /state — the whole-store reconciliation snapshot. */
 const POLL_IDLE_MS = 1_500
@@ -296,6 +388,28 @@ export function thoughtLabel(
  */
 const TAIL_AFTER_SEND_MS = 8_000
 
+/**
+ * How long a FAILED engine start suppresses the next automatic one (ms).
+ *
+ * The composer starts the web page by itself — a click in it, a keystroke in it,
+ * a send from it. Without this, a start that fails (no network, a browser that
+ * will not launch) would be retried by every one of those, and each attempt is
+ * a 45 s `page.goto` against a page that is not coming up. The reader is not
+ * left waiting on it either: the failure is on screen with a 「重试启动」 button,
+ * and that button ignores this cooldown because it IS the explicit request.
+ */
+const WAKE_RETRY_COOLDOWN_MS = 10_000
+
+/**
+ * How long a SUCCESSFUL start suppresses another one (ms).
+ *
+ * One click in the composer is two gestures in two separate tasks — focus, then
+ * click — and a wake can answer in between, so the click asked a second time.
+ * The engine answers both cheaply (it reuses the live page), but "one gesture,
+ * one start" is the property this path exists to keep.
+ */
+const WAKE_FRESH_MS = 2_000
+
 /** One row of the shell's session list (`main`'s `useSessions` snapshot). */
 interface HarnessSessionRow {
   sessionId: string
@@ -391,7 +505,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const [state, setState] = useState<DSchatState | null>(null)
   const [viewChatId, setViewChatId] = useState<string | undefined>(undefined)
   const [draft, setDraft] = useState('')
-  const [images, setImages] = useState<string[]>([])
+  const [images, setImages] = useState<ComposerAttachment[]>([])
   const [attachBusy, setAttachBusy] = useState(false)
   /**
    * True while `ensureReady` is bringing the web page up.
@@ -401,6 +515,28 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * 「正在启动网页端…」 on the same frame as the click that asked for it.
    */
   const [waking, setWaking] = useState(false)
+  /**
+   * Why the web page is not usable, when starting it failed.
+   *
+   * Rendered as a notice IN THE CONVERSATION with a retry button, not as a
+   * toast: a launch is a 45 s `page.goto` (and, on a fresh profile, a browser
+   * window), so its failure is not a passing remark — it is the reason the
+   * message the reader just wrote did not go anywhere, and the thing to fix is
+   * one click away. A toast also disappears before a reader who glanced at the
+   * browser window gets back.
+   */
+  const [launchError, setLaunchError] = useState<string | undefined>(undefined)
+  /**
+   * Messages typed while the previous turn was still generating.
+   *
+   * The web page answers one question at a time, so a second send cannot be
+   * forwarded the moment it is written — but the composer must not refuse it
+   * either (that is the "输入框不能用" complaint in its other form). It is held
+   * here and leaves the moment the running turn ends.
+   */
+  const [outbox, setOutbox] = useState<QueuedMessage[]>([])
+  /** The 「运行状态」 card, opened from the 「···」 menu. */
+  const [statusOpen, setStatusOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [railWidth, setRailWidth] = useState<number>(() => storedRailWidth())
   const [railDragging, setRailDragging] = useState(false)
@@ -428,7 +564,21 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const [now, setNow] = useState(() => Date.now())
 
   // transfer popover
-  const [popOpen, setPopOpen] = useState(false)
+  const [transferOpen, setTransferOpen] = useState(false)
+  /**
+   * The status sentence, opened from the header's state lamp.
+   *
+   * It used to hold four entries as well — the old header 「···」 menu, which
+   * moved here because they describe and control the ENGINE and the lamp is the
+   * header's one engine-shaped control. They have since moved back out, to the
+   * 「···」 on the action row (see `moreMenu`): 运行状态 reads a transcript,
+   * 导出 markdown writes one out, 打开登录窗口 and 关闭浏览器 drive the page, so
+   * they belong on the row that acts on the conversation — and the lamp, whose
+   * whole job is to be legible from the corner of the eye, keeps only the
+   * sentence that says what its colour means.
+   */
+  const [lampOpen, setLampOpen] = useState(false)
+  /** The engine menu, opened from the action row's 「···」 (see `moreMenu`). */
   const [moreOpen, setMoreOpen] = useState(false)
   const [transferMode, setTransferMode] = useState<TransferMode>('distill')
   const [transferTarget, setTransferTarget] = useState<'new' | 'continue'>('new')
@@ -445,12 +595,17 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const uploadRef = useRef<HTMLInputElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
   /**
-   * The two popover wrappers (在 Harness 中继续, 「···」).
+   * The popover wrappers, one per floating menu (DSH 迁移, the engine 「···」,
+   * and the lamp's status sentence).
    *
    * Their containing boxes, so the outside-click rule can tell "a click inside
-   * the menu" from "a click anywhere else" — see the dismiss effect.
+   * the menu" from "a click anywhere else" — see the dismiss effect. The
+   * transfer one moved into the composer's action row with its trigger; the
+   * lamp one is the header's own, and the engine one rides the action row's
+   * right end.
    */
   const transferPopRef = useRef<HTMLDivElement | null>(null)
+  const lampPopRef = useRef<HTMLDivElement | null>(null)
   const morePopRef = useRef<HTMLDivElement | null>(null)
   const pinnedRef = useRef(true)
   const prevChatRef = useRef<string | undefined>(undefined)
@@ -463,8 +618,36 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * be rebuilt per attachment (a rebuilt handler mid-batch loses the count it
    * checked), and the cap has to be read at drop time, not at render time.
    */
-  const imagesRef = useRef<string[]>([])
+  const imagesRef = useRef<ComposerAttachment[]>([])
   useEffect(() => { imagesRef.current = images }, [images])
+
+  /**
+   * The queue as the flush loop must read it.
+   *
+   * `drainOutbox` runs from an effect AND from a click, and both need the head
+   * of the queue as it is right now — reading the state variable would capture
+   * whichever array the callback was built with.
+   */
+  const outboxRef = useRef<QueuedMessage[]>([])
+  useEffect(() => { outboxRef.current = outbox }, [outbox])
+  /** Local ids for queued rows; never sent anywhere. */
+  const queueSeq = useRef(0)
+  /** True while one queued message is on its way out (one at a time). */
+  const flushingRef = useRef(false)
+  /**
+   * When the last start attempt failed (epoch ms), for WAKE_RETRY_COOLDOWN_MS.
+   * 0 = nothing to suppress.
+   */
+  const wakeFailedAtRef = useRef(0)
+  /**
+   * The engine's login state as the callbacks need it right now.
+   *
+   * `deliver`/`drainOutbox` are `useCallback`s that must not be rebuilt on
+   * every snapshot (the flush effect keys on them), so they read the live value
+   * through a ref instead of closing over a stale one.
+   */
+  const loggedInRef = useRef<boolean | null>(null)
+  useEffect(() => { loggedInRef.current = state?.loggedIn ?? null }, [state?.loggedIn])
 
   /**
    * The rail width as the drag handler last set it.
@@ -790,13 +973,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     setSearchFocus(false)
   }, [searchFocus, railOpen])
 
-  /**
-   * True while a search is worth showing as "active" in the header: the box has
-   * a query in it, so the control lights up for the same reason the web app's
-   * does — the panel is in a mode the reader turned on.
-   */
-  const searchOpen = query !== '' || searchFocus
-
   /* ------------------------------------------------------------ composer size */
 
   /**
@@ -849,7 +1025,15 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    */
   const engineLive = phase === 'ready' || phase === 'thinking' || phase === 'streaming' || phase === 'launching'
   const streaming = viewChat?.streaming ?? false
-  const canSend = loggedIn === true && !busy
+  /*
+   * Whether the send control is armed.
+   *
+   * NOT gated on the engine or on a running turn any more: the composer starts
+   * the page itself when it is down, and a turn in flight takes the message into
+   * the outbox instead of refusing it. The only thing that makes "send" wrong is
+   * an empty box.
+   */
+  const canSend = draft.trim() !== '' || images.length > 0
 
   const filtered = useMemo(() => {
     if (query.trim() === '') return chats
@@ -914,7 +1098,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const switched = prevChatRef.current !== viewChatId
     prevChatRef.current = viewChatId
     if (switched || pinnedRef.current) list.scrollTop = list.scrollHeight
-  }, [state, viewChatId, jumpId])
+    /*
+     * `launchError` is a dependency because the notice it renders lands at the
+     * BOTTOM of the transcript: a failure that appears below the fold is a
+     * failure the reader never sees, which is the whole complaint this notice
+     * answers. Arriving here also means the reader was already pinned to the
+     * end — a reader who scrolled up to read is not yanked away by it.
+     */
+  }, [state, viewChatId, jumpId, launchError])
 
   const onThreadScroll = useCallback((): void => {
     const list = listRef.current
@@ -955,15 +1146,47 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * the profile deserves) → escalate to the login window only on a sign-in page.
    * The engine coalesces concurrent launches; this ref coalesces the panel's own
    * requests, so clicking around the card cannot queue a wake per click.
+   *
+   * It is called from the ordinary gestures of a composer that is ALWAYS
+   * editable — a click in it, a keystroke in it, Enter in it — so it is also the
+   * place that has to be honest when starting fails: the reason goes on screen
+   * (in the conversation, next to the message that could not be sent) instead of
+   * into a toast that is gone before the reader looks back from the browser
+   * window. See `launchError`.
+   *
+   * @param options.force - true for the explicit 「重试启动」 button, which must
+   *   not be swallowed by the cooldown a previous failure armed.
    */
-  const wakeRef = useRef<Promise<boolean> | null>(null)
-  const ensureReady = useCallback(async (): Promise<boolean> => {
+  const wakeRef = useRef<Promise<EnsureReadyResult> | null>(null)
+  /**
+   * When a start last SUCCEEDED (epoch ms).
+   *
+   * `wakeRef` coalesces calls that overlap, but one click in the box is two
+   * gestures in two tasks — focus, then click — and the first wake can answer in
+   * between, so the click asked again. Both are answered cheaply (the engine
+   * reuses the live page), but the point of this panel's wake path is that one
+   * gesture costs one start, so a start that just worked is not repeated for
+   * this long.
+   */
+  const wakeOkAtRef = useRef(0)
+  const ensureReady = useCallback(async (options?: { force?: boolean }): Promise<EnsureReadyResult> => {
     if (wakeRef.current !== null) return await wakeRef.current
-    const task = (async (): Promise<boolean> => {
+    /*
+     * A start that just failed is not retried by the next keystroke. The reader
+     * is not stuck on it: the notice on screen carries the reason and a button.
+     */
+    if (options?.force !== true && Date.now() < wakeFailedAtRef.current) return { ok: false, reason: 'cooldown' }
+    if (options?.force !== true && Date.now() - wakeOkAtRef.current < WAKE_FRESH_MS) return { ok: true }
+    const task = (async (): Promise<EnsureReadyResult> => {
       setWaking(true)
       try {
         const woken = await api.wake().catch(() => undefined)
-        if (woken === undefined) return false
+        if (woken === undefined) {
+          const message = tr('engine.notice.unreachable')
+          wakeFailedAtRef.current = Date.now() + WAKE_RETRY_COOLDOWN_MS
+          setLaunchError(message)
+          return { ok: false, reason: 'failed' }
+        }
         if (woken.ok !== true) {
           /*
            * A host that predates `/wake` answers 404 — and that pairing is REAL,
@@ -971,17 +1194,26 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
            * independently (the browser half is fetched from disk, the host half
            * is a module generation that only a Harness restart replaces), so a
            * page refresh after an upgrade meets exactly this. Falling back to
-           * the login route keeps the composer working; on a matching host the
-           * wake answers and this branch never runs.
+           * the login route keeps the composer working, and the notice says why
+           * the automatic start did not answer; on a matching host the wake
+           * answers and this branch never runs.
            */
           if (/HTTP 404/.test(woken.error ?? '')) {
             await api.openLogin().catch(() => undefined)
-            return false
+            wakeFailedAtRef.current = Date.now() + WAKE_RETRY_COOLDOWN_MS
+            setLaunchError(tr('engine.notice.staleHost'))
+            return { ok: false, reason: 'failed' }
           }
-          toast(woken.error ?? tr('toast.wake.failed'), { error: true })
-          return false
+          wakeFailedAtRef.current = Date.now() + WAKE_RETRY_COOLDOWN_MS
+          setLaunchError(woken.error ?? tr('toast.wake.failed'))
+          return { ok: false, reason: 'failed' }
         }
-        if (woken.loggedIn === true) return true
+        if (woken.loggedIn === true) {
+          wakeFailedAtRef.current = 0
+          wakeOkAtRef.current = Date.now()
+          setLaunchError(undefined)
+          return { ok: true }
+        }
         /*
          * Up, but on the sign-in screen. `loginWindow` already true means the
          * wake itself opened the visible window (a profile with no history at
@@ -991,11 +1223,19 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         if (woken.loginWindow !== true) {
           const opened = await api.openLogin().catch(() => undefined)
           if (opened !== undefined && opened.ok !== true && opened.error !== undefined) {
-            toast(opened.error, { error: true })
-            return false
+            wakeFailedAtRef.current = Date.now() + WAKE_RETRY_COOLDOWN_MS
+            setLaunchError(opened.error)
+            return { ok: false, reason: 'failed' }
           }
         }
-        return false
+        /*
+         * A window is waiting for the reader, so this is not an error — but it
+         * is also not silence: without a word, a message typed before signing in
+         * looks like it vanished. The notice carries the actionable half (a
+         * 「打开登录窗口」 button), so it is shown here too.
+         */
+        setLaunchError(tr('engine.notice.needLogin'))
+        return { ok: false, reason: 'login' }
       } finally {
         setWaking(false)
         // Flip the composer to editable NOW. The 1.5 s snapshot poll would get
@@ -1010,7 +1250,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     } finally {
       wakeRef.current = null
     }
-  }, [api, toast, tr, refreshState])
+  }, [api, tr, refreshState])
 
   /**
    * Retry a failed exchange: resend the last user message the web session
@@ -1032,71 +1272,190 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     else void refreshState()
   }, [chats, viewChatId, busy, api, toast, refreshState])
 
-  const send = useCallback(async (): Promise<void> => {
-    const text = draft.trim()
-    if (text === '' && images.length === 0) return
-    if (busy) return
-    /*
-     * Enter on a composer whose engine is down used to be a silent no-op: the
-     * message stayed in the box and nothing explained why. The reader's intent
-     * is unambiguous (they wrote a message and pressed Enter), so wake the
-     * engine first and only refuse if there is genuinely nobody logged in — the
-     * draft is left in place either way.
-     */
-    if (loggedIn !== true && !await ensureReady()) {
-      toast(tr('toast.send.needLogin'), { error: true })
-      return
+  /**
+   * Push a message back where the reader can see it after a failed send.
+   *
+   * The composer is cleared the moment a message is accepted (a message on its
+   * way must not still be editable in the box), so every failure has to put it
+   * back: a logged-out engine, a browser that would not start or a rejected
+   * attach used to silently cost the reader a paragraph they had just written.
+   * Nothing is overwritten if they have already started typing something else.
+   */
+  const restoreComposer = useCallback((text: string, sentImages: ComposerAttachment[]): void => {
+    setDraft(current => (current === '' ? text : current))
+    if (sentImages.length > 0) setImages(current => (current.length === 0 ? sentImages : current))
+  }, [])
+
+  /** Hold one message until the running turn ends. See QueuedMessage. */
+  const enqueue = useCallback((text: string, queuedImages: ComposerAttachment[]): void => {
+    queueSeq.current += 1
+    setOutbox(list => [...list, { id: `q-${queueSeq.current}`, text, images: queuedImages }])
+    toast(tr('toast.send.queued'))
+  }, [toast, tr])
+
+  const dropQueued = useCallback((id: string): void => {
+    setOutbox(list => list.filter(item => item.id !== id))
+  }, [])
+
+  /**
+   * Put one message on the wire, starting the page first when it is down.
+   *
+   * The return value is what the caller needs to know, and it is deliberately
+   * four-way rather than ok/not-ok:
+   *
+   *   - `sent`   the page took it; the reply streams into the transcript;
+   *   - `stored` the page took it into the TRANSCRIPT but the reply never
+   *              started — the message must not be sent twice, so the toast
+   *              offers 「重试」 instead of the composer getting its text back;
+   *   - `busy`   the previous turn was still running (the panel's snapshot lags
+   *              the engine by up to a poll), which the queue answers;
+   *   - `failed` nothing reached the page; the CALLER decides whether the text
+   *              goes back into the composer or stays in the queue.
+   *
+   * @param text - the message.
+   * @param sentImages - attachments already persisted by `/attach`.
+   */
+  const deliver = useCallback(async (
+    text: string,
+    sentImages: ComposerAttachment[],
+  ): Promise<'sent' | 'stored' | 'busy' | 'failed'> => {
+    if (loggedInRef.current !== true) {
+      // The reader's intent is unambiguous (they wrote a message and submitted
+      // it), so start the page rather than refusing. A failure here has already
+      // put its reason on screen — see ensureReady.
+      const ready = await ensureReady()
+      if (ready.ok !== true) return 'failed'
     }
-    setDraft('')
-    const sentImages = images
-    setImages([])
     pinnedRef.current = true
     // Start tailing now rather than when /state next reports busy: the gap
     // between Enter and the first token is exactly when a stalled panel looks
     // broken. The deadline expires on its own, so a send that fails cannot
     // leave the loop polling.
     tailUntilRef.current = Date.now() + TAIL_AFTER_SEND_MS
+    // Only the PATHS cross the wire: the name, type and kind are the panel's
+    // own presentation, and the host/engine address files by path.
+    const paths = sentImages.map(item => item.path)
+    let result: Awaited<ReturnType<DSchatApi['send']>>
     try {
-      const result = await api.send(text, sentImages.length > 0 ? sentImages : undefined)
-      if (result.ok !== true) {
-        /*
-         * A send that failed must not eat the message.
-         *
-         * The composer is cleared BEFORE the request (a message that is already
-         * on its way must not still be editable in the box), so every failure
-         * has to put the text back — otherwise a logged-out engine, a browser
-         * that would not start or a rejected attach silently costs the reader a
-         * paragraph they just wrote.
-         *
-         * `stored` decides WHICH repair is right. When the engine already
-         * appended the user message (it is in the transcript, only the reply
-         * never started) putting the text back would duplicate it on the next
-         * send, so the toast offers 「重试」 instead — the same action the
-         * message row would carry. Nothing is overwritten if the reader has
-         * already started typing something else.
-         */
-        if (result.stored === true) {
-          toast(result.error ?? tr('toast.send.failed'), {
-            error: true,
-            action: { label: tr('msg.retry'), run: () => { void retry() } },
-          })
-        } else {
-          setDraft(current => (current === '' ? text : current))
-          if (sentImages.length > 0) setImages(current => (current.length === 0 ? sentImages : current))
-          toast(result.error ?? tr('toast.send.failed'), { error: true })
-        }
-      } else if (result.chatId !== undefined) {
-        setViewChatId(result.chatId)
-      }
+      result = await api.send(text, paths.length > 0 ? paths : undefined)
+    } catch (error) {
+      toast(String(error), { error: true })
+      return 'failed'
+    }
+    if (result.ok === true) {
+      if (result.chatId !== undefined) setViewChatId(result.chatId)
       // The first exchange pins the chat's title and the user message is already
       // stored, so pull the snapshot now instead of waiting out the slow poll.
       void refreshState()
-    } catch (error) {
-      setDraft(current => (current === '' ? text : current))
-      if (sentImages.length > 0) setImages(current => (current.length === 0 ? sentImages : current))
-      toast(String(error), { error: true })
+      return 'sent'
     }
-  }, [draft, images, busy, loggedIn, api, toast, tr, refreshState, retry, ensureReady])
+    if (result.code === 'BUSY') return 'busy'
+    if (result.stored === true) {
+      toast(result.error ?? tr('toast.send.failed'), {
+        error: true,
+        action: { label: tr('msg.retry'), run: () => { void retry() } },
+      })
+      return 'stored'
+    }
+    /*
+     * A send-level failure gets a toast: the notice covers "the page would not
+     * come up", which is a different sentence and is already on screen.
+     */
+    toast(result.error ?? tr('toast.send.failed'), { error: true })
+    return 'failed'
+  }, [api, ensureReady, refreshState, retry, toast, tr])
+
+  /**
+   * Send the oldest queued message, if the page is free.
+   *
+   * One at a time, and only while the engine is signed in and no failure is on
+   * screen: a queue that kept retrying against a dead engine would spin once per
+   * snapshot forever. A failure therefore leaves its message in the queue and
+   * re-arms the notice, whose 「重试启动」 button is what resumes the drain.
+   */
+  const drainOutbox = useCallback(async (): Promise<void> => {
+    if (flushingRef.current) return
+    const next = outboxRef.current[0]
+    if (next === undefined) return
+    flushingRef.current = true
+    try {
+      const outcome = await deliver(next.text, next.images)
+      if (outcome === 'sent' || outcome === 'stored') {
+        setOutbox(list => list.filter(item => item.id !== next.id))
+        return
+      }
+      if (outcome === 'busy') return
+      setLaunchError(previous => previous ?? tr('engine.notice.queued'))
+    } finally {
+      flushingRef.current = false
+    }
+  }, [deliver, tr])
+
+  /**
+   * The queue's own clock: drain whenever a turn ends.
+   *
+   * `busy`/`streaming` both have to be clear — the panel's snapshot can still
+   * say idle for a moment after the engine has started the next turn, and the
+   * `streaming` flag on the transcript is the earlier of the two signals.
+   */
+  useEffect(() => {
+    if (outbox.length === 0) return
+    if (busy || streaming) return
+    if (launchError !== undefined) return
+    void drainOutbox()
+  }, [outbox, busy, streaming, launchError, drainOutbox])
+
+  /**
+   * The engine came up: whatever the notice was about is over.
+   *
+   * A sign-in the reader completed in the browser window lands here within one
+   * poll, which is what clears the 「请登录」 notice without them having to
+   * dismiss it.
+   */
+  useEffect(() => {
+    if (launchError === undefined) return
+    if (loggedIn === true && engineLive) {
+      wakeFailedAtRef.current = 0
+      setLaunchError(undefined)
+    }
+  }, [launchError, loggedIn, engineLive])
+
+  /**
+   * The 「重试启动」 button: try again, ignoring the failure cooldown.
+   *
+   * Clearing the notice first is what lets the queue drain effect fire again —
+   * the queued messages go out on the same click when the start succeeds.
+   */
+  const retryEngine = useCallback(async (): Promise<void> => {
+    setLaunchError(undefined)
+    await ensureReady({ force: true })
+  }, [ensureReady])
+
+  const send = useCallback(async (): Promise<void> => {
+    const text = draft.trim()
+    const sentImages = images
+    if (text === '' && sentImages.length === 0) return
+    // Cleared before the request: a message that has been accepted (on its way,
+    // or queued) must not still be sitting in the editor.
+    setDraft('')
+    setImages([])
+    /*
+     * A turn is already running.
+     *
+     * The web page answers one question at a time, so this cannot go out now —
+     * but it is NOT refused either: the composer the reader is typing into is an
+     * ordinary one, and the honest answer to "send this" is "it will go next",
+     * not an error. The message waits in the panel's own queue and leaves the
+     * moment the current reply finishes.
+     */
+    if (busy || streaming) {
+      enqueue(text, sentImages)
+      return
+    }
+    const outcome = await deliver(text, sentImages)
+    if (outcome === 'busy') enqueue(text, sentImages)
+    else if (outcome === 'failed') restoreComposer(text, sentImages)
+  }, [draft, images, busy, streaming, deliver, enqueue, restoreComposer])
 
   const stop = useCallback(async (): Promise<void> => {
     await api.stop().catch(() => undefined)
@@ -1333,7 +1692,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         const opened = await Promise.resolve(openSession(sessionId)).catch(() => false)
         if (opened === false) toast(tr('toast.open.failed'), { error: true })
       })()
-      window.setTimeout(() => { setPopOpen(false); setStage(0) }, 600)
+      window.setTimeout(() => { setTransferOpen(false); setStage(0) }, 600)
     } catch (error) {
       setStage(0)
       toast(tr('toast.transfer.failed', { error: String(error) }), { error: true })
@@ -1368,20 +1727,32 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * `pointerdown` in the CAPTURE phase, so the menu is already gone before the
    * click it started lands on whatever is underneath — a click on a conversation
    * row both dismisses the menu and does what it looks like it does. A
-   * pointerdown inside either wrapper is left alone; the trigger's own onClick
+   * pointerdown inside any wrapper is left alone; the trigger's own onClick
    * still toggles it, so pressing the trigger twice does not double-toggle.
+   *
+   * The three surfaces are one TABLE rather than three copies of the same two
+   * lines: the panel has grown a menu per row (the header's lamp sentence, the
+   * composer row's 迁移 and 「···」), and a hand-written branch per menu is how
+   * one of them ends up missing its dismiss path — which is the exact bug this
+   * effect was written for. A new menu is a row here and nothing else.
    */
+  const popovers: Array<[boolean, React.RefObject<HTMLDivElement | null>, (open: boolean) => void]> = [
+    [transferOpen, transferPopRef, setTransferOpen],
+    [lampOpen, lampPopRef, setLampOpen],
+    [moreOpen, morePopRef, setMoreOpen],
+  ]
+  const anyPopoverOpen = popovers.some(([open]) => open)
   useEffect(() => {
-    if (!popOpen && !moreOpen) return
+    if (!anyPopoverOpen) return
     const onDown = (event: Event): void => {
       const target = event.target as Node | null
-      if (popOpen && transferPopRef.current?.contains(target) !== true) setPopOpen(false)
-      if (moreOpen && morePopRef.current?.contains(target) !== true) setMoreOpen(false)
+      for (const [open, ref, close] of popovers) {
+        if (open && ref.current?.contains(target) !== true) close(false)
+      }
     }
     const onEscape = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      if (popOpen) setPopOpen(false)
-      if (moreOpen) setMoreOpen(false)
+      for (const [open, , close] of popovers) if (open) close(false)
     }
     window.addEventListener('pointerdown', onDown, true)
     window.addEventListener('keydown', onEscape)
@@ -1389,7 +1760,15 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       window.removeEventListener('pointerdown', onDown, true)
       window.removeEventListener('keydown', onEscape)
     }
-  }, [popOpen, moreOpen])
+  }, [anyPopoverOpen, transferOpen, lampOpen, moreOpen])
+
+  /** Escape closes 「运行状态」, like every other dismissible surface here. */
+  useEffect(() => {
+    if (!statusOpen) return
+    const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') setStatusOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [statusOpen])
 
   /* ------------------------------------------------------------ shortcuts */
 
@@ -1398,7 +1777,19 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       const meta = event.metaKey || event.ctrlKey
       if (meta && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        searchRef.current?.focus()
+        /*
+         * Through `openSearch()`, NOT `searchRef.current?.focus()`.
+         *
+         * The ref is null whenever the rail is collapsed — the box is not in the
+         * DOM then — so the direct call made ⌘K silently do nothing in exactly
+         * the state where a keyboard shortcut is worth the most. `openSearch()`
+         * expands the rail first and lets the follow-up effect own the focus.
+         *
+         * This is also what lets the action row drop its 搜索 button without
+         * losing the way in: the shortcut covers the hidden-rail case (where the
+         * box does not exist), and the box itself covers every other one.
+         */
+        openSearch()
         return
       }
       if (meta && event.key === '/') {
@@ -1410,7 +1801,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [state?.busy, stop])
+  }, [state?.busy, stop, openSearch])
 
   /**
    * Attach dropped/pasted files. The host persists the bytes and returns a real
@@ -1441,8 +1832,9 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           continue
         }
         const payload = await fileToBase64(file)
+        const sentName = file.name === '' ? 'pasted-file' : file.name
         const result = await api.attach({
-          name: file.name === '' ? 'pasted-file' : file.name,
+          name: sentName,
           mediaType: payload.mediaType,
           data: payload.data,
         })
@@ -1450,8 +1842,20 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           toast(tr('toast.attach.failed', { error: result.error ?? '' }), { error: true })
           continue
         }
+        /*
+         * The chip is built from the NAME the reader chose, never from the
+         * stored path.
+         *
+         * The host answers both: `path` is the opaque `${uuid}__${name}${ext}`
+         * it wrote (what the engine is handed), and `name` is the original.
+         * Showing the path's last segment is what printed a UUID in the
+         * composer, so the label comes from `name`, and the media type — not
+         * the path — decides whether this renders as a thumbnail.
+         */
         const path = result.path
-        setImages(list => [...list, path])
+        const name = result.name === undefined || result.name === '' ? displayNameOf(path) : result.name
+        const kind: ComposerAttachment['kind'] = payload.mediaType.startsWith('image/') ? 'image' : 'file'
+        setImages(list => [...list, { path, name, mediaType: payload.mediaType, kind }])
       }
     } catch (error) {
       toast(tr('toast.attach.failed', { error: String(error) }), { error: true })
@@ -1474,6 +1878,37 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * transient send failure the chip used to surface in place of the phase.
    */
   const whaleTitle = state?.lastError ?? (engine.detail === '' ? tr('status.stopped') : engine.detail)
+
+  /**
+   * The status lamp's four colours, in the order the reader was promised them.
+   *
+   * The phase model has five states and the lamp has four lamps, so the mapping
+   * is a deliberate many-to-one — and the pair that shares a colour is the pair
+   * that MEANS the same thing to a reader deciding whether to wait:
+   *
+   *   - `launching` and `need-login` are both amber. Neither is a failure (the
+   *     engine is coming up, or it is up and waiting for a sign-in), and both
+   *     ask for the same thing — "wait, or click the lamp" — so giving them
+   *     separate colours would invent a distinction the reader cannot act on.
+   *     Amber was chosen over grey for them: grey is the one colour that means
+   *     NOTHING is happening, which is exactly the wrong reading for a browser
+   *     that is starting.
+   *   - `thinking` and `streaming` keep the running green and breathe instead
+   *     of changing hue (see the stylesheet). "Working" is motion, not a
+   *     different condition, and a second green — or a blue — would be
+   *     indistinguishable from `ready` at 7px.
+   *
+   * Colour is never the only channel: the lamp's `title` and `aria-label` carry
+   * {@link whaleTitle}, which is the whole sentence.
+   */
+  const lampTone: 'green' | 'red' | 'grey' | 'amber' =
+    engine.phase === 'ready' || engine.phase === 'thinking' || engine.phase === 'streaming'
+      ? 'green'
+      : engine.phase === 'error'
+        ? 'red'
+        : engine.phase === 'launching' || engine.phase === 'need-login'
+          ? 'amber'
+          : 'grey'
 
   const elapsed = busy && state?.busySince !== undefined
     ? `${Math.max(0, (now - state.busySince) / 1000).toFixed(1)}s`
@@ -1512,101 +1947,106 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       'header',
       { className: 'dsh-dschat-header', 'data-window-drag': true },
       /*
-       * The whale leads the header: identity first, controls after — the order
-       * the web app itself uses, where the mark sits at the top of its sidebar
-       * and the window controls follow.
+       * The header is the PRODUCT MARK and the STATE LAMP, and nothing else.
        *
-       * It replaced two things that stood here and both earned their removal:
-       * the panel's NAME (`DSchat`, already the sidebar row and the document
-       * title — the one place it was redundant) and a status chip that rendered
-       * 「● 已就绪 · deepseek-reasoner」 at the window controls' own height, in
-       * their own radius, so it read as a fourth button that did nothing when
-       * clicked.
+       * The three window controls that used to sit here (会话列表 / 搜索 /
+       * 新建对话) moved into the action row directly above the composer, and the
+       * 「在 Harness 中继续」 button went with them under its short label
+       * 「DSH 迁移」。 Two reasons, and they point the same way: those four
+       * actions are about the CONVERSATION — they read a list, search it,
+       * replace it, or hand it off — so they belong beside the transcript and
+       * the box that feeds it, not in a title bar that also carries the window's
+       * drag region and its product identity. The header has no width to spare
+       * for them at a narrow column, and it was the one strip whose emptiness
+       * the window needed for dragging.
        *
-       * The colour is the whole point: the mark IS the state lamp, so the
-       * engine's condition is legible from the corner of the eye without a row
-       * of text. The sentence did not disappear — it became this control's
-       * tooltip, where it costs the header no width (see `whaleTitle`). Colour
-       * is never the ONLY channel: the button's accessible name carries the
-       * phase, so a reader who cannot see the difference still hears it.
+       * The whale is now a plain mark rather than a button: it names the
+       * product, and clicking a logo to "start the engine" was an affordance
+       * nobody could guess. Everything that mark used to do lives on the lamp
+       * beside it, whose tooltip says which state it is reporting.
+       *
+       * The 「···」 menu that once sat at the header's right end is back — at the
+       * ACTION ROW's right end, next to the migration button (see `actions()`).
+       * What it holds (运行状态 / 导出 markdown / 打开登录窗口 / 关闭浏览器) is
+       * not header material either: it reads a transcript, writes one out, or
+       * drives the page, and each of those is something the row beside the
+       * conversation is already about.
        */
       createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'dsh-dschat-whale',
-          'data-phase': engine.phase,
-          title: whaleTitle,
-          'aria-label': whaleTitle,
-          /*
-           * The mark is also the panel's "bring it up" button, and it means the
-           * same thing here as a click in the composer: start the web engine.
-           * It used to call `openLogin` — a headed relaunch — which is wrong for
-           * the common case it actually faces, a page that is merely down while
-           * the persisted session is perfectly good. The explicit
-           * 「打开登录窗口」 entries (the banner, the ··· menu, the settings page)
-           * are where a visible window is asked for by name.
-           */
-          onClick: () => { if (loggedIn !== true || !engineLive) void ensureReady() },
-        },
+        'span',
+        { className: 'dsh-dschat-brand' },
         createElement(WhaleMark, { size: 19 }),
+        createElement('span', { className: 'dsh-dschat-brand-name' }, tr('brand.title')),
       ),
       /*
-       * The three window controls: reopen the conversation list, search it,
-       * start a new chat. They are the only affordances for the three things
-       * this panel can do before a message exists, so they sit next to the mark
-       * that names the product they act on.
+       * The lamp and its menu in ONE positioned box.
+       *
+       * The wrapper is not decoration: the menu panel is absolutely positioned,
+       * and its containing block is the nearest positioned ancestor. Standing
+       * the wrapper next to the lamp instead of around it made that ancestor a
+       * zero-width sibling which the header's flex spacer had already pushed to
+       * the far edge — so the 230px panel opened at the panel's right edge,
+       * hundreds of pixels from the dot that opened it (measured: dot at x=148,
+       * menu at x=1266, overflowing the window). Around the lamp, the wrapper is
+       * exactly the trigger's own box, which is what "anchored to the lamp"
+       * means.
+       *
+       * The state lamp: a 7px dot in one of four colours, and the header's only
+       * remaining control.
+       *
+       * The colour is the whole point — the engine's condition is legible from
+       * the corner of the eye without a row of text — and the sentence did not
+       * disappear: it is this button's tooltip and accessible name (see
+       * `whaleTitle`). Colour is never the only channel.
+       *
+       * Its second job is to answer "what does this colour mean" on demand:
+       * pressing the lamp opens a panel whose whole content is the same status
+       * sentence in full, which a tooltip cannot give until the reader already
+       * hovers the thing they have not understood. The engine's COMMANDS are
+       * not here — see {@link moreMenu}.
        */
       createElement(
         'div',
-        { className: 'dsh-dschat-hbtns' },
+        { className: 'dsh-dschat-lamp-wrap' },
         createElement(
           'button',
           {
             type: 'button',
-            className: railOpen ? 'dsh-dschat-hbtn dsh-dschat-hbtn-on' : 'dsh-dschat-hbtn',
-            title: railOpen ? tr('rail.hide') : tr('rail.show'),
-            'aria-label': railOpen ? tr('rail.hide') : tr('rail.show'),
-            'aria-pressed': railOpen,
-            onClick: () => { toggleRail() },
+            className: 'dsh-dschat-lamp',
+            'data-tone': lampTone,
+            'data-phase': engine.phase,
+            title: whaleTitle,
+            'aria-label': whaleTitle,
+            'aria-haspopup': 'menu',
+            'aria-expanded': lampOpen,
+            onClick: () => setLampOpen(open => !open),
           },
-          createElement(HistoryIcon, { size: 16 }),
+          createElement('i', { 'aria-hidden': 'true' }),
         ),
-        createElement(
-          'button',
-          {
-            type: 'button',
-            className: searchOpen ? 'dsh-dschat-hbtn dsh-dschat-hbtn-on' : 'dsh-dschat-hbtn',
-            title: tr('rail.search.hint'),
-            'aria-label': tr('rail.search.hint'),
-            'aria-pressed': searchOpen,
-            onClick: () => { openSearch() },
-          },
-          createElement(SearchIcon, { size: 16 }),
-        ),
-        createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsh-dschat-hbtn',
-            title: tr('action.newChat.hint'),
-            'aria-label': tr('action.newChat'),
-            disabled: preparingNewChat,
-            onClick: () => { void newChat() },
-          },
-          createElement(PlusIcon, { size: 16 }),
-        ),
+        lampMenu(),
       ),
       /*
-       * The header's run of empty space — still a drag region, now the only
-       * one. `aria-hidden` because it carries nothing: it exists so the window
-       * can be moved by the title bar's blank strip, which is where a reader
-       * reaches for it.
+       * The header's run of empty space — the window's drag region, and the
+       * only one. `aria-hidden` because it carries nothing: it exists so the
+       * window can be moved by the title bar's blank strip, which is where a
+       * reader reaches for it.
        */
       createElement('div', { className: 'dsh-dschat-spacer', 'data-window-drag': true, 'aria-hidden': 'true' }),
-
-      transferPopover(),
-
+      /*
+       * …and the engine menu at the far end of that run of space.
+       *
+       * 「···」 belongs to the TITLE BAR, not to the conversation: it holds
+       * 运行状态 / 导出 markdown / 打开登录窗口 / 关闭浏览器, which are facts
+       * about and controls over the PANEL and its browser — the same class of
+       * thing as the window's own controls in that strip — while everything on
+       * the action row below (list / search / new / hand-off) is about the
+       * CONVERSATION. Putting it here also keeps it out of the way of the
+       * reader who is writing a message, and gives the title bar's right end
+       * the one control a reader checks for "what else can this thing do".
+       *
+       * It opens DOWNWARD for the same reason the lamp does: this is the top
+       * strip, so there is no room above it (see the stylesheet's header rule).
+       */
       moreMenu(),
     ),
 
@@ -1643,6 +2083,41 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           item.action.label,
         ),
       )),
+    ),
+
+    /*
+     * 「运行状态」, opened from the ··· menu.
+     *
+     * A modal of the panel's own rather than a page in the shell's Settings: it
+     * is a diagnostic about THIS panel (see DSchatStatus), it is read while
+     * looking at the conversation it describes, and the shell's Settings is
+     * where the plugin's actual configuration lives — on the Plugins page, in
+     * the form the shell renders from its Config schema.
+     */
+    statusOpen && createElement(
+      'div',
+      {
+        className: 'dsh-dschat-modal',
+        role: 'dialog',
+        'aria-modal': true,
+        'aria-label': tr('status.title'),
+        // A click on the backdrop closes it; a click inside the card does not.
+        onClick: (event: { target: unknown; currentTarget: unknown }) => {
+          if (event.target === event.currentTarget) setStatusOpen(false)
+        },
+      },
+      createElement(
+        'div',
+        { className: 'dsh-dschat-modal-card' },
+        createElement('button', {
+          type: 'button',
+          className: 'dsh-dschat-modal-close',
+          title: tr('item.rename.cancel'),
+          'aria-label': tr('item.rename.cancel'),
+          onClick: () => setStatusOpen(false),
+        }, createElement(CloseIcon, { size: 12 })),
+        createElement(DSchatStatus, { api, tt, t }),
+      ),
     ),
   )
 
@@ -1697,6 +2172,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           value: query,
           placeholder: tr('rail.search'),
           'aria-label': tr('rail.search'),
+          /*
+           * The ⌘K advertisement lives HERE now.
+           *
+           * It used to be the action row's 搜索 button, whose tooltip carried
+           * 「搜索会话内容（⌘K）」. That button is gone (it duplicated this box),
+           * and a shortcut nobody advertises is a shortcut nobody uses — so the
+           * sentence moved onto the box itself, which is where the feature
+           * lives and where a reader who is about to type in it will hover.
+           */
+          title: tr('rail.search.hint'),
           onChange: (event: { target: { value: string } }) => setQuery(event.target.value),
           onKeyDown: (event: { key: string; preventDefault: () => void }) => {
             // Escape empties the box, so one key undoes the search without also
@@ -1844,6 +2329,53 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     )
   }
 
+  /**
+   * Why the page is not usable, in the conversation, with a retry.
+   *
+   * This is the panel's answer to "启动失败要有反馈" — and the reason it is HERE
+   * rather than in a toast: it is about the message the reader was writing when
+   * the start failed, it stays until the thing it reports is over, and the one
+   * action that can fix it is on the card. Toasts are for events; this is a
+   * state.
+   *
+   * It is rendered at the END of the thread (both in an empty conversation and
+   * under the last message), which is where the next thing is about to happen.
+   */
+  function engineNotice(): ReactNode {
+    if (launchError === undefined) return null
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-notice', key: 'engine-notice', role: 'status' },
+      createElement('span', { className: 'dsh-dschat-notice-mark' }, createElement(WarnIcon, {})),
+      createElement(
+        'div',
+        { className: 'dsh-dschat-notice-body' },
+        createElement('strong', null, tr('engine.notice.title')),
+        createElement('p', null, launchError),
+        /*
+         * The actions sit UNDER the sentence, in a row: the sentence is what the
+         * reader has to read before choosing, and at panel widths a column of
+         * buttons beside it squeezes both.
+         */
+        createElement(
+          'div',
+          { className: 'dsh-dschat-notice-actions' },
+          createElement('button', {
+            type: 'button',
+            className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+            disabled: waking,
+            onClick: () => { void retryEngine() },
+          }, waking ? tr('engine.notice.retrying') : tr('engine.notice.retry')),
+          createElement('button', {
+            type: 'button',
+            className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+            onClick: () => { void openLogin() },
+          }, tr('action.openLogin')),
+        ),
+      ),
+    )
+  }
+
   function thread(): ReactNode {
     /*
      * The two branches carry DIFFERENT keys on purpose.
@@ -1863,24 +2395,29 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      */
     if (viewChat === undefined || viewChat.messages.length === 0) {
       return createElement(
-        'div',
-        { className: 'dsh-dschat-empty', key: 'empty' },
-        createElement('div', { className: 'dsh-dschat-empty-mark' }, createElement(ChatIcon, { size: 22 })),
-        createElement('h3', null, tr('empty.title')),
-        createElement('p', null, tr('empty.body')),
+        Fragment,
+        { key: 'empty' },
         createElement(
-          'p',
-          { style: { marginTop: '8px', display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'center' } },
-          createElement('span', { className: 'dsh-dschat-kbd' }, 'Enter'),
-          createElement('span', null, tr('action.send')),
-          createElement('span', { className: 'dsh-dschat-kbd' }, '⌘/'),
-          createElement('span', null, tr('composer.hint.focus')),
+          'div',
+          { className: 'dsh-dschat-empty' },
+          createElement('div', { className: 'dsh-dschat-empty-mark' }, createElement(ChatIcon, { size: 22 })),
+          createElement('h3', null, tr('empty.title')),
+          createElement('p', null, tr('empty.body')),
+          createElement(
+            'p',
+            { style: { marginTop: '8px', display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'center' } },
+            createElement('span', { className: 'dsh-dschat-kbd' }, 'Enter'),
+            createElement('span', null, tr('action.send')),
+            createElement('span', { className: 'dsh-dschat-kbd' }, '⌘/'),
+            createElement('span', null, tr('composer.hint.focus')),
+          ),
+          loggedIn !== true && createElement(
+            'button',
+            { type: 'button', className: 'dsh-dschat-btn dsh-dschat-btn-primary', onClick: () => { void openLogin() } },
+            tr('action.openLogin'),
+          ),
         ),
-        loggedIn !== true && createElement(
-          'button',
-          { type: 'button', className: 'dsh-dschat-btn dsh-dschat-btn-primary', onClick: () => { void openLogin() } },
-          tr('action.openLogin'),
-        ),
+        engineNotice(),
       )
     }
     const keys = threadKeys(viewChat.messages)
@@ -1893,6 +2430,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         new Date(viewChat.messages[0]?.ts ?? Date.now()).toLocaleDateString(),
       ),
       ...viewChat.messages.map((message, index) => messageNode(message, keys[index] ?? message.id, index)),
+      engineNotice(),
     )
   }
 
@@ -1959,11 +2497,28 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const body = createElement(
       'div',
       { className: 'dsh-dschat-msg-body' },
+      /*
+       * What was attached to this message, as chips.
+       *
+       * The transcript stores PATHS only, so these are read back rather than
+       * remembered: the `uuid__` prefix is stripped for the label, and the
+       * extension decides whether the chip offers to show the image. Old
+       * transcripts — whose files were written before the readable label
+       * existed — show their bare UUID, which is all they have.
+       */
       message.attachments !== undefined && message.attachments.length > 0 && createElement(
         'div',
         { className: 'dsh-dschat-imgs' },
-        message.attachments.map(path => createElement('div', { key: path, className: 'dsh-dschat-chip', title: path },
-          createElement(ClipIcon, { size: 12 }), createElement('span', null, path.split('/').pop() ?? path))),
+        message.attachments.map(path => createElement('div', { key: path, className: 'dsh-dschat-chip', title: displayNameOf(path) },
+          createElement(ClipIcon, { size: 12 }), createElement('span', null, displayNameOf(path)),
+          attachmentKind(path) === 'image' && createElement('a', {
+            className: 'dsh-dschat-chip-view',
+            href: api.attachmentUrl(path),
+            target: '_blank',
+            rel: 'noreferrer',
+            title: tr('attach.show'),
+            'aria-label': tr('attach.show'),
+          }, '↗'))),
       ),
       isUser
         ? createElement('p', null, message.content)
@@ -2096,22 +2651,39 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       createElement(
         'div',
         { className: 'dsh-dschat-composer-inner' },
+        /*
+         * The action row sits ABOVE the card and outside it: the card is the
+         * message, and these four controls act on the conversation the card
+         * belongs to. Keeping it out also means the card keeps its own shadow
+         * and radius — a toolbar inside it would read as part of the message
+         * the reader is still writing.
+         */
+        actions(),
         createElement(
           'div',
           {
             className: dragging ? 'dsh-dschat-card dsh-dschat-dragging' : 'dsh-dschat-card',
             /*
-             * The whole card is the "start me" affordance the offline
-             * placeholder advertises — it wears the accent wash and the pointer
-             * cursor — but only the textarea inside it took focus, so a click on
-             * the padding did nothing. Guarded on `target === currentTarget` so
-             * this never steals a click from a chip, a pill or the attach
-             * button: only a click on the card itself is forwarded to the input.
+             * Whether the page behind this field is up. The stylesheet keys the
+             * accent placeholder (and a faint wash) off it — the textarea itself
+             * has no read-only state any more to carry that meaning, because it
+             * is genuinely editable in every engine state.
+             */
+            'data-engine': loggedIn === true && engineLive ? 'on' : 'off',
+            /*
+             * The card is a shortcut to the textarea, nothing more. It is not a
+             * "start me" button any more: the composer is an ordinary, always
+             * editable field, and the page starts by itself when the reader
+             * clicks or types in it (see the textarea's own handlers).
+             *
+             * Guarded on `target === currentTarget` so this never steals a click
+             * from a chip, a pill or the attach button: only a click on the card
+             * itself is forwarded to the input.
              */
             onClick: (event: { target: unknown; currentTarget: unknown }) => {
               if (event.target !== event.currentTarget) return
               inputRef.current?.focus()
-              if (loggedIn !== true && !busy) void ensureReady()
+              void ensureReady()
             },
             // Paste and drop both end at the same place: bytes to the host,
             // path back, chip in the composer. `isAttachableFile` only rules out
@@ -2154,14 +2726,35 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           images.length > 0 && createElement(
             'div',
             { className: 'dsh-dschat-attachments' },
-            images.map((path, index) => createElement(
+            /*
+             * Two faces, decided by the file's own type.
+             *
+             * An IMAGE is shown as itself: a 56px thumbnail, which is the whole
+             * point of attaching a picture — the reader checks they grabbed the
+             * right screenshot without opening it. Anything else keeps the
+             * paperclip chip, now carrying the reader's own file name instead
+             * of the stored UUID (see {@link ComposerAttachment}).
+             *
+             * The thumbnail's `src` is the host's read-back route, so the bytes
+             * are never held in the panel's state — and an old attachment whose
+             * file has since been pruned fails that request, which is what the
+             * chip fallback below is for.
+             */
+            images.map((item, index) => createElement(
               'span',
-              { key: `${path}-${index}`, className: 'dsh-dschat-chip', title: path },
-              createElement(ClipIcon, { size: 12 }),
-              createElement('span', null, path.split('/').pop() ?? path),
+              {
+                key: `${item.path}-${index}`,
+                className: item.kind === 'image' ? 'dsh-dschat-thumb' : 'dsh-dschat-chip',
+                title: item.name,
+              },
+              item.kind === 'image'
+                ? createElement('img', { src: api.attachmentUrl(item.path), alt: item.name, loading: 'lazy' })
+                : createElement(ClipIcon, { size: 12 }),
+              item.kind !== 'image' && createElement('span', null, item.name),
               createElement('button', {
                 type: 'button',
-                title: tr('item.rename.cancel'),
+                title: tr('attach.remove.hint', { name: item.name }),
+                'aria-label': tr('attach.remove.hint', { name: item.name }),
                 onClick: () => setImages(list => list.filter((_, i) => i !== index)),
               }, '✕'),
             )),
@@ -2172,38 +2765,36 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
             rows: 1,
             value: draft,
             /*
-             * readOnly, NOT disabled, while the engine is down.
+             * An ordinary, ALWAYS editable field.
              *
-             * `disabled` removes the element from the tab order and drops every
-             * pointer event, so clicking the composer did nothing at all — no
-             * cursor, no focus, no feedback — which is exactly the reported
-             * "点击输入框无反应". readOnly keeps it focusable and hovering, and
-             * the focus/click handler below turns "I want to type" into "start
-             * the engine", which is the action the click was asking for.
+             * Neither `disabled` nor `readOnly` — the two ways this box used to
+             * refuse the reader. `disabled` dropped every pointer event ("点击
+             * 输入框无反应"); `readOnly` was better but still meant that with the
+             * page down, or while a reply was streaming, the one control on
+             * screen that looks like a text field could not hold text. Typing,
+             * pasting a file and pressing Enter all work in every engine state
+             * now, and what each of those *means* is decided by the handlers
+             * below: the page starts in the background, and a message written
+             * during a turn waits its turn in the outbox.
              */
-            readOnly: busy || loggedIn !== true,
-            placeholder: busy
-              ? tr('composer.busy')
-              : (waking || state?.engine === 'launching')
-                ? tr('composer.connecting')
-                : loggedIn !== true
-                  ? (engineLive ? tr('composer.notLoggedIn') : tr('composer.offline'))
-                  : tr('composer.placeholder'),
-            onFocus: () => {
-              if (busy) return
-              /*
-               * Already up and signed in: nothing to do. Every other case —
-               * stopped, launching, or a live page that is not signed in — goes
-               * through `ensureReady`, which is idempotent:
-               *   - a wake that is already in flight is joined, not repeated;
-               *   - the engine reuses a live page instead of relaunching one;
-               *   - the visible login window is opened only for a sign-in page.
-               * The old handler called `openLogin` here, which forced a headed
-               * relaunch even for a profile that was still authenticated.
-               */
-              if (loggedIn === true && !waking) return
-              void ensureReady()
-            },
+            placeholder: (waking || state?.engine === 'launching')
+              ? tr('composer.connecting')
+              : loggedIn !== true
+                ? (engineLive ? tr('composer.notLoggedIn') : tr('composer.offline'))
+                : tr('composer.placeholder'),
+            /*
+             * A click in the box is a request to type, and typing needs the page:
+             * start it, in the background, once — `ensureReady` reuses a live
+             * page, joins a launch already in flight, and asks for the visible
+             * login window only when the profile is genuinely signed out. The
+             * field itself never waits for any of that.
+             *
+             * `onClick` as well as `onFocus`: clicking a box that is ALREADY
+             * focused (the common second attempt after a failed start) fires no
+             * focus event at all.
+             */
+            onFocus: () => { void ensureReady() },
+            onClick: () => { void ensureReady() },
             onChange: (event: { target: { value: string } }) => setDraft(event.target.value),
             onKeyDown: (event: {
               key: string
@@ -2219,6 +2810,36 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               void send()
             },
           }),
+          /*
+           * What is waiting for the running turn to end.
+           *
+           * Between the box and the tool row, because it is about the messages
+           * above it — and because a queue the reader cannot see is a queue they
+           * will re-type. Each row can be cancelled individually: the message
+           * goes back to being theirs, not the panel's.
+           */
+          outbox.length > 0 && createElement(
+            'div',
+            { className: 'dsh-dschat-queue' },
+            outbox.map(item => createElement(
+              'div',
+              { key: item.id, className: 'dsh-dschat-queue-item' },
+              createElement('span', { className: 'dsh-dschat-queue-mark', 'aria-hidden': 'true' }, '⏳'),
+              createElement('span', { className: 'dsh-dschat-queue-text', title: item.text }, item.text),
+              item.images.length > 0 && createElement(
+                'span',
+                { className: 'dsh-dschat-queue-files' },
+                fmt(tr('composer.queue.files'), { count: String(item.images.length) }),
+              ),
+              createElement('button', {
+                type: 'button',
+                title: tr('composer.queue.cancel'),
+                'aria-label': tr('composer.queue.cancel'),
+                onClick: () => dropQueued(item.id),
+              }, '✕'),
+            )),
+            createElement('div', { className: 'dsh-dschat-queue-note' }, tr('composer.queue.note')),
+          ),
           dragging && createElement('div', { className: 'dsh-dschat-dropline' }, tr('composer.attach.drop')),
           createElement(
             'div',
@@ -2340,7 +2961,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
                  */
                 title: attachBusy ? tr('composer.upload.busy') : tr('composer.upload.hint'),
                 'aria-label': attachBusy ? tr('composer.upload.busy') : tr('composer.upload'),
-                disabled: busy || loggedIn !== true || attachBusy,
+                /*
+                 * Attaching needs no engine: the bytes go to the host route,
+                 * which writes them to disk and answers a path the page can be
+                 * handed later. Disabling it while the page was down (or while a
+                 * reply streamed) meant the reader could not prepare the message
+                 * they were about to send with it.
+                 */
+                disabled: attachBusy,
                 onClick: () => uploadRef.current?.click(),
               },
               attachBusy
@@ -2357,25 +2985,33 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
              * search box); it is the advertisement that was redundant, because
              * the thing it advertises is on screen in the header.
              */
-            streaming
-              ? createElement(
-                  'button',
-                  { type: 'button', className: 'dsh-dschat-stop', onClick: () => { void stop() } },
-                  createElement('i', null),
-                  tr('action.stop'),
-                )
-              : createElement(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'dsh-dschat-send',
-                    title: tr('action.send'),
-                    'aria-label': tr('action.send'),
-                    disabled: !canSend || (draft.trim() === '' && images.length === 0),
-                    onClick: () => { void send() },
-                  },
-                  createElement(SendIcon, {}),
-                ),
+            /*
+             * 停止 and 发送 are BOTH here while a reply streams.
+             *
+             * They used to be the same slot (the send circle became 停止), which
+             * is what the web page itself does — and it is why a second message
+             * had nowhere to go: the control that sends had turned into the
+             * control that stops. The reader can now do either, and the message
+             * they send waits in the queue above (see composer.queue.note).
+             */
+            streaming && createElement(
+              'button',
+              { type: 'button', className: 'dsh-dschat-stop', onClick: () => { void stop() } },
+              createElement('i', null),
+              tr('action.stop'),
+            ),
+            createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-dschat-send',
+                title: tr('action.send'),
+                'aria-label': tr('action.send'),
+                disabled: !canSend,
+                onClick: () => { void send() },
+              },
+              createElement(SendIcon, {}),
+            ),
           ),
         ),
       ),
@@ -2402,6 +3038,174 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     )
   }
 
+  /**
+   * The action row: the conversation's four verbs, directly above the input
+   * card — 会话列表 / 搜索 / 新对话 on the left, 「⇄ DSH 迁移」 at the right
+   * end.
+   *
+   * All four are now the same thing to look at: a 28px quiet pill with a glyph
+   * and a 13px label (`.dsh-dschat-tbtn`), which is the shape the input card's
+   * own tool row speaks one line below. The three left buttons used to be
+   * 34px glyph-only squares — the web app's own header controls, moved down
+   * with their shape intact — and that shape was the problem: a square with a
+   * glyph in it is a control you have to already know, and this row is the
+   * ONE place a reader looks for "a new chat" or "the list of chats". Naming
+   * them costs ~180px of a row that has the space, and it means the four verbs
+   * of this panel are readable without hovering anything.
+   *
+   * The wording is deliberately two characters where the tooltip is a sentence:
+   * 收起会话列表 is what the button DOES (and stays the `title`/`aria-label`),
+   * 会话列表 is what the button IS.
+   *
+   * Grouping is unchanged: browsing on the left, handing the conversation off
+   * at the right end, so the row still finishes on its terminal action. The
+   * engine menu is NOT here — it lives at the title bar's right end now (see
+   * {@link moreMenu}), because those four entries are about the panel and its
+   * browser rather than about this conversation.
+   */
+  function actions(): ReactNode {
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-actions', role: 'toolbar', 'aria-label': tr('composer.actions') },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: railOpen ? 'dsh-dschat-tbtn dsh-dschat-tbtn-on' : 'dsh-dschat-tbtn',
+          title: railOpen ? tr('rail.hide') : tr('rail.show'),
+          'aria-label': railOpen ? tr('rail.hide') : tr('rail.show'),
+          'aria-pressed': railOpen,
+          onClick: () => { toggleRail() },
+        },
+        createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(HistoryIcon, { size: 16 })),
+        createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('action.sessions')),
+      ),
+      /*
+       * 搜索 is NOT a button here any more.
+       *
+       * It was one, and it only ever did two things: bring the rail back if it
+       * was collapsed, and put the cursor in the rail's search box. With the
+       * rail open — the default — the box is already on screen a few pixels to
+       * the left, so the button was a second, wordier copy of an input the
+       * reader can simply click. That is why it did not earn its place: this row
+       * is the conversation's verbs, and "search this conversation" is not a
+       * mode the way 会话列表 / 新对话 / 迁移 are.
+       *
+       * What it uniquely provided — reaching search while the rail is HIDDEN —
+       * is ⌘K's job, and ⌘K now routes through `openSearch()` so it expands the
+       * rail first. Before that fix the shortcut wrote into a null ref whenever
+       * the rail was collapsed and did nothing at all, which is exactly why the
+       * button could not simply be deleted on its own.
+       */
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-dschat-tbtn',
+          title: tr('action.newChat.hint'),
+          'aria-label': tr('action.newChat'),
+          disabled: preparingNewChat,
+          onClick: () => { void newChat() },
+        },
+        createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(PlusIcon, { size: 16 })),
+        createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('action.newChat')),
+      ),
+      createElement('div', { className: 'dsh-dschat-spacer' }),
+      transferPopover(),
+    )
+  }
+
+  /**
+   * The engine menu: 运行状态 / 导出 markdown / 打开登录窗口 / 关闭浏览器.
+   *
+   * It has moved twice, and the two moves were about two different things.
+   * v0.4 took it off the title bar and hung it on the state lamp, reasoning that
+   * these entries describe the engine and the lamp is what reports the engine.
+   * v0.4.1 put it back on the action row, because a 7px dot reads as a readout
+   * rather than as a button and the menu therefore had no VISIBLE home — 导出
+   * markdown is something a reader goes looking for.
+   *
+   * It now sits at the title bar's right end, which is where it started and
+   * where it belongs: 运行状态 reads and 导出 markdown writes the PANEL's own
+   * state, 打开登录窗口 and 关闭浏览器 drive its browser — none of the four is
+   * about the conversation, and every one of them is the kind of thing a title
+   * bar's 「···」 holds. The action row keeps the conversation's verbs, and the
+   * reader who is writing a message never has to aim past them.
+   *
+   * The lamp keeps its own panel, now just the status sentence (see
+   * {@link lampMenu}), and it opens downward from the same strip.
+   */
+  function moreMenu(): ReactNode {
+    const open = moreOpen
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-pop-wrap', ref: morePopRef },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: open ? 'dsh-dschat-tbtn dsh-dschat-tbtn-on' : 'dsh-dschat-tbtn',
+          title: tr('more.hint'),
+          'aria-label': tr('more.hint'),
+          'aria-haspopup': 'menu',
+          'aria-expanded': open,
+          onClick: () => setMoreOpen(value => !value),
+        },
+        createElement(MoreIcon, { size: 16 }),
+      ),
+      open && createElement(
+        'div',
+        { className: 'dsh-dschat-pop dsh-dschat-pop-menu' },
+        moreItem('status', tr('status.title'), () => setStatusOpen(true)),
+        moreItem('export', tr('action.exportFile'), () => { void exportFile() }),
+        moreItem('login', tr('action.openLogin'), () => { void openLogin() }, loggedIn === true),
+        moreItem('close', tr('action.closeBrowser'), () => { void api.closeBrowser().catch(() => undefined) }, (state?.engine ?? 'stopped') === 'stopped'),
+      ),
+    )
+
+    function moreItem(key: string, label: string, run: () => void, hidden = false): ReactNode {
+      if (hidden) return null
+      return createElement(
+        'button',
+        {
+          key,
+          type: 'button',
+          className: 'dsh-dschat-menu-item',
+          onClick: () => { run(); setMoreOpen(false) },
+        },
+        label,
+      )
+    }
+  }
+
+  /**
+   * The lamp's panel: the status sentence, and nothing else.
+   *
+   * It is also the lamp's tooltip, but a tooltip needs a hover to exist and this
+   * is the one place the reader has explicitly ASKED what the colour means. The
+   * engine's commands used to be listed under it; they are on the action row's
+   * 「···」 now, so this panel is one line — which is the right size for the
+   * question it answers.
+   */
+  function lampMenu(): ReactNode {
+    /*
+     * The wrapper this panel used to carry is gone: the caller renders it
+     * AROUND the lamp, because the absolutely positioned panel needs the lamp's
+     * own box as its containing block (see the header's note).
+     */
+    if (!lampOpen) return null
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-pop dsh-dschat-pop-status', ref: lampPopRef },
+      createElement(
+        'div',
+        { className: 'dsh-dschat-lamp-status' },
+        createElement('i', { className: 'dsh-dschat-lamp-dot', 'data-tone': lampTone, 'aria-hidden': 'true' }),
+        createElement('span', null, whaleTitle),
+      ),
+    )
+  }
+
   function transferPopover(): ReactNode {
     const note = transferTarget === 'continue' ? tr('transfer.note.continue') : tr('transfer.note.new')
     return createElement(
@@ -2411,8 +3215,21 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         'button',
         {
           type: 'button',
-          className: 'dsh-dschat-btn dsh-dschat-btn-primary',
-          disabled: viewChat === undefined || viewChat.messages.length === 0,
+          /*
+           * `dsh-dschat-tbtn-transfer` is a MARKER, not a style: the two
+           * labelled buttons on this row wear the identical treatment (that is
+           * the point of the change), so nothing in the stylesheet keys off
+           * this class. It exists so the verification script and future tests
+           * can name the migration button without reaching for its text.
+           */
+          className: transferOpen
+            ? 'dsh-dschat-tbtn dsh-dschat-tbtn-on dsh-dschat-tbtn-transfer'
+            : 'dsh-dschat-tbtn dsh-dschat-tbtn-transfer',
+          title: tr('transfer.short.hint'),
+          'aria-label': tr('transfer.short.hint'),
+          'aria-haspopup': 'menu',
+          'aria-expanded': transferOpen,
+          disabled: transferring || viewChat === undefined || viewChat.messages.length === 0,
           onClick: () => {
             /*
              * Every open starts from 新建会话.
@@ -2425,19 +3242,27 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
              * one. Re-picking 「追加到已有会话」 is one click; discovering that a
              * new session was never created is not.
              */
-            if (!popOpen) {
+            if (!transferOpen) {
               setTransferTarget('new')
               setTargetSessionId(undefined)
             }
-            setPopOpen(open => !open)
+            setTransferOpen(open => !open)
           },
         },
-        tr('transfer.title'),
-        createElement(CaretIcon, {}),
+        /*
+         * The swap glyph makes the button findable at the row's right end
+         * without the words: it reads as "hand this over", which is what both
+         * migration modes do. The two labels are separate spans so the row's
+         * own `gap` spaces them evenly — a bare text node beside an icon has no
+         * box to be spaced by.
+         */
+        createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(SwapIcon, { size: 14 })),
+        createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('transfer.short')),
+        createElement('span', { className: 'dsh-dschat-tbtn-caret' }, createElement(CaretIcon, {})),
       ),
-      popOpen && createElement(
+      transferOpen && createElement(
         'div',
-        { className: 'dsh-dschat-pop' },
+        { className: 'dsh-dschat-pop dsh-dschat-pop-up' },
         createElement('h4', null, tr('transfer.title')),
         createElement('p', { className: 'dsh-dschat-sub' }, tr('transfer.sub')),
 
@@ -2535,46 +3360,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         ),
       ),
     )
-  }
-
-  function moreMenu(): ReactNode {
-    return createElement(
-      'div',
-      { className: 'dsh-dschat-pop-wrap', ref: morePopRef },
-      createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'dsh-dschat-btn dsh-dschat-btn-icon',
-          title: '···',
-          'aria-label': '···',
-          onClick: () => setMoreOpen(value => !value),
-        },
-        createElement(MoreIcon, {}),
-      ),
-      moreOpen && createElement(
-        'div',
-        { className: 'dsh-dschat-pop', style: { width: '230px' } },
-        moreItem('export', tr('action.exportFile'), () => { void exportFile() }),
-        moreItem('login', tr('action.openLogin'), () => { void openLogin() }, loggedIn === true),
-        moreItem('close', tr('action.closeBrowser'), () => { void api.closeBrowser().catch(() => undefined) }, (state?.engine ?? 'stopped') === 'stopped'),
-      ),
-    )
-
-    function moreItem(key: string, label: string, run: () => void, hidden = false): ReactNode {
-      if (hidden) return null
-      return createElement(
-        'button',
-        {
-          key,
-          type: 'button',
-          className: 'dsh-dschat-btn',
-          style: { width: '100%', justifyContent: 'flex-start' },
-          onClick: () => { run(); setMoreOpen(false) },
-        },
-        label,
-      )
-    }
   }
 }
 

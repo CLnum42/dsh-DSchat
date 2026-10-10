@@ -280,8 +280,15 @@ test('switching to a new chat leaves no message node behind (real browser)', asy
     }))
     assert.deepEqual(before, { messages: 3, empty: 0 }, 'the old chat renders its three messages')
 
-    // Start a new chat — the action that exposed the leak.
-    await view.locator('.dsh-dschat-hbtns button').nth(2).click()
+    /*
+     * Start a new chat — the action that exposed the leak.
+     *
+     * The button lives in the composer's ACTION ROW now (it used to be in the
+     * header): 会话列表, 搜索, 新建对话. Selected by its accessible name rather
+     * than by position, so a future reordering cannot silently click the wrong
+     * control.
+     */
+    await view.locator('.dsh-dschat-actions button[title*="新对话"]').click()
     await view.waitForTimeout(1500)
     await view.screenshot({ path: join(dir, 'after.png') })
 

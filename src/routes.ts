@@ -8,8 +8,8 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { basename, extname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -122,6 +122,130 @@ function attachmentExtension(mediaType: string, name: string): string {
   if (mapped !== undefined) return mapped
   const fromName = extname(name).toLowerCase()
   return SAFE_EXTENSION.test(fromName) ? fromName : '.bin'
+}
+
+/**
+ * Cap on the readable half of a stored attachment's file name, in BYTES.
+ *
+ * The label is a convenience (see {@link fileLabel}), not an identity, so it is
+ * bounded: a 200-character title pasted out of a chat client would push the
+ * real extension past what some tools still open by. Measured in bytes because
+ * the cut must not split a multi-byte character.
+ */
+const ATTACHMENT_LABEL_MAX_BYTES = 60
+
+/**
+ * The reader-facing name of an attachment, safe for a file system.
+ *
+ * Attachments used to be stored as a bare `${randomUUID}${ext}`, so the panel's
+ * chip showed `8f3c1e2b-4d7a-4f1e-….png` — the UUID, which is the one part of
+ * that path which means nothing to a human. The stored name is now
+ * `${uuid}__${label}${ext}`: the UUID still guarantees uniqueness and still
+ * leads, so the path remains an opaque, unguessable token, while this label
+ * carries the name the reader actually chose.
+ *
+ * Everything unsafe is REPLACED rather than escaped: separators and control
+ * characters could not be written anyway, and `:`/`*`/`?`/`"`/`<`/`>`/`|`
+ * break Windows or read as markup. This runs on private data (the route is
+ * loopback-only), so the goal is a well-formed name, not a security boundary —
+ * the boundary is that the EXTENSION is still chosen by
+ * {@link attachmentExtension}, never by this label.
+ *
+ * @param name - the caller-supplied file name (may be empty, or a whole path).
+ * @returns a non-empty, single-segment label bounded to
+ *   {@link ATTACHMENT_LABEL_MAX_BYTES} UTF-8 bytes.
+ */
+export function fileLabel(name: string): string {
+  // `basename` first: a browser sends the bare name, but a path-shaped caller
+  // must not be able to inject a separator into the stored file name.
+  const flat = basename(name).replace(/[\u0000-\u001f\u007f]/g, '')
+  const cleaned = flat.replace(/[/\\:*?"<>|]/g, '_').replace(/^\.+/, '').trim()
+  if (cleaned === '') return 'file'
+  const bytes = Buffer.from(cleaned, 'utf8')
+  if (bytes.length <= ATTACHMENT_LABEL_MAX_BYTES) return cleaned
+  /*
+   * Cut on a byte boundary, then step back over any continuation byte so the
+   * result is still valid UTF-8 — decoding a split character would turn it into
+   * U+FFFD and put a replacement glyph in the reader's file name.
+   */
+  let end = ATTACHMENT_LABEL_MAX_BYTES
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--
+  const truncated = bytes.subarray(0, end).toString('utf8').trim()
+  return truncated === '' ? 'file' : truncated
+}
+
+/**
+ * The on-disk name for one uploaded attachment: unique ID first, readable label
+ * second, safe extension last.
+ *
+ * The label drops the name's OWN extension when it is the one we are about to
+ * append: `screenshot.png` used to land as `…__screenshot.png.png`, which is not
+ * wrong so much as ugly, and it makes the extension read as part of the name in
+ * every listing. When the two disagree — a `.jpeg` reported as `image/jpeg` and
+ * re-appended as `.jpg` — the name keeps its own spelling and the storage
+ * extension stays authoritative, because that is the one the page reads.
+ *
+ * @param name - the caller's file name.
+ * @param mediaType - the browser's media type for the bytes.
+ */
+export function attachmentFileName(name: string, mediaType: string): string {
+  const extension = attachmentExtension(mediaType, name)
+  const label = fileLabel(name)
+  const trimmed = label.toLowerCase().endsWith(extension.toLowerCase()) && label.length > extension.length
+    ? label.slice(0, -extension.length)
+    : label
+  return `${randomUUID()}__${trimmed}${extension}`
+}
+
+/**
+ * Extension → media type, for serving an attachment back to the panel.
+ *
+ * The inverse of {@link MEDIA_EXTENSION} plus the text formats the allow-list
+ * admits but the upload table never needs to name, because the browser always
+ * reports a type for those. Anything unrecognized is served as an opaque
+ * download rather than guessed at: a wrong `image/*` on a PDF would make the
+ * panel render a broken thumbnail where a file chip belongs.
+ */
+const EXTENSION_MEDIA: Record<string, string> = (() => {
+  const table: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+    '.tiff': 'image/tiff',
+    '.heic': 'image/heic',
+    '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain; charset=utf-8',
+    '.md': 'text/markdown; charset=utf-8',
+    '.markdown': 'text/markdown; charset=utf-8',
+    '.csv': 'text/csv; charset=utf-8',
+    '.tsv': 'text/tab-separated-values; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.jsonl': 'application/x-ndjson; charset=utf-8',
+    '.log': 'text/plain; charset=utf-8',
+    '.xml': 'application/xml; charset=utf-8',
+    '.yaml': 'application/yaml; charset=utf-8',
+    '.yml': 'application/yaml; charset=utf-8',
+    '.htm': 'text/html; charset=utf-8',
+    '.html': 'text/html; charset=utf-8',
+    '.tex': 'text/plain; charset=utf-8',
+    '.rtf': 'application/rtf',
+    '.srt': 'text/plain; charset=utf-8',
+    '.vtt': 'text/vtt; charset=utf-8',
+  }
+  for (const [mediaType, extension] of Object.entries(MEDIA_EXTENSION)) {
+    if (table[extension] === undefined) table[extension] = mediaType
+  }
+  return table
+})()
+
+/** The name stored after the `uuid__` prefix, for the download header. */
+function labelOf(file: string): string {
+  const at = file.indexOf('__')
+  return at === -1 ? file : file.slice(at + 2)
 }
 
 /**
@@ -551,12 +675,83 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           mkdirSync(dir, { recursive: true })
           pruneAttachments(dir, referencedAttachments(store))
           const name = stringField(body, 'name') ?? 'pasted-file'
-          const path = join(dir, `${randomUUID()}${attachmentExtension(stringField(body, 'mediaType') ?? '', name)}`)
+          const path = join(dir, attachmentFileName(name, stringField(body, 'mediaType') ?? ''))
           writeFileSync(path, bytes, { mode: 0o600 })
           writeJson(res, 200, { ok: true, path, bytes: bytes.length, name })
         } catch (error) {
           writeJson(res, 500, { ok: false, error: `写入附件失败：${String(error)}` })
         }
+      },
+    },
+    {
+      /*
+       * Read one stored attachment back, so the composer can show a real
+       * THUMBNAIL for an image instead of a paperclip.
+       *
+       * The bytes travel over this route rather than a data URL carried in the
+       * panel's state: a 24 MiB photo would otherwise sit base64-encoded (~33%
+       * larger) in the composer, in every snapshot of it, and in the bundle's
+       * own cached module. Going through the host also means a transcript
+       * recovered from disk — which holds only the old, bare-UUID paths —
+       * renders thumbnails exactly like a freshly pasted file.
+       *
+       * Trust fence: this serves a file from the plugin's own data directory,
+       * so it carries the same loopback check as every other route, and the
+       * path is CONTAINED to that directory before a byte is read — a
+       * `../`-shaped path is answered 404 rather than followed.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/attachment',
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        const requested = new URL(req.url ?? '/', 'http://x').searchParams.get('path') ?? ''
+        if (requested === '') {
+          writeJson(res, 400, { ok: false, error: '缺少 path 参数' })
+          return
+        }
+        const dir = resolve(join(store.dataDir, ATTACHMENT_DIR))
+        const absolute = resolve(requested)
+        // Compare against `dir/` so a sibling directory sharing the prefix
+        // cannot be reached — and `readFileSync` below is then enough to tell a
+        // file from a directory, a pruned path, or anything else that is not
+        // there, because it fails for all three.
+        if (!absolute.startsWith(`${dir}/`)) {
+          writeJson(res, 404, { ok: false, error: '附件不在附件目录内' })
+          return
+        }
+        const file = basename(absolute)
+        const mediaType = EXTENSION_MEDIA[extname(file).toLowerCase()] ?? 'application/octet-stream'
+        /*
+         * Read whole, then answer — rather than piping a stream.
+         *
+         * The file is capped at the upload limit (24 MiB), the panel asks for a
+         * 56px thumbnail, and the bytes are read into the same buffer either
+         * way; piping would only add a second response shape to this route
+         * family, where every other route answers `writeHead` + `end`. It also
+         * makes the failure mode uniform: a file that vanished between the
+         * `statSync` and the read is answered like the pruned one above.
+         */
+        let bytes: Buffer
+        try {
+          bytes = readFileSync(absolute)
+        } catch {
+          writeJson(res, 404, { ok: false, error: '附件不存在' })
+          return
+        }
+        /*
+         * `inline` with an explicit filename: the panel renders this in an
+         * `<img>`, and a reader who opens the URL directly gets the original
+         * name back instead of the stored `uuid__` one.
+         */
+        res.writeHead(200, {
+          'content-type': mediaType,
+          'content-length': String(bytes.length),
+          'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(labelOf(file))}`,
+          'cache-control': 'private, max-age=300',
+          'referrer-policy': 'no-referrer',
+          'x-content-type-options': 'nosniff',
+        })
+        res.end(bytes)
       },
     },
     {

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-DSchat v0.4 界面设计稿</title>
+<style>
+  :root{
+    --bg:#fff; --bg2:#f7f8fa; --bg3:#eef0f4; --bd1:rgba(0,0,0,.06); --bd2:rgba(0,0,0,.10);
+    --tx:#14171c; --tx2:#4a5260; --tx3:#78808f; --hover:rgba(38,49,72,.06);
+    --blue:#4176e6; --blue-wash:rgba(65,118,230,.13); --green:#22a95f; --amber:#e09515; --red:#e0483c; --idle:#b9bdc6;
+    --bubble:#f2f6ff; --card:#fff;
+  }
+  [data-theme="dark"]{
+    --bg:#1b1d21; --bg2:#23262b; --bg3:#2b2f36; --bd1:rgba(255,255,255,.07); --bd2:rgba(255,255,255,.13);
+    --tx:#eef1f5; --tx2:#b7bfcc; --tx3:#8b93a1; --hover:rgba(255,255,255,.08);
+    --blue:#679efe; --blue-wash:rgba(103,158,254,.18); --green:#3ec97a; --amber:#e8a63a; --red:#f2635a; --idle:#5d6470;
+    --bubble:#283142; --card:#212429;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#eceef1;font:14px/1.6 -apple-system,"PingFang SC","Segoe UI",system-ui,sans-serif;color:#14171c}
+  .page{display:flex;gap:18px;padding:22px;align-items:flex-start;flex-wrap:wrap}
+  .col{flex:1 1 620px;min-width:520px;display:flex;flex-direction:column;gap:8px}
+  .col > h2{font-size:13px;margin:0;color:#4a5260;letter-spacing:.06em;text-transform:uppercase;font-weight:600}
+  .shell{background:var(--bg);color:var(--tx);border-radius:14px;overflow:hidden;height:660px;
+    display:flex;flex-direction:column;box-shadow:0 1px 2px rgba(0,0,0,.08),0 12px 30px rgba(0,0,0,.10);border:1px solid var(--bd1)}
+
+  /* ---------- header ---------- */
+  header{flex:none;height:52px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--bd1);position:relative}
+  .brand{display:flex;align-items:center;gap:8px;color:var(--tx)}
+  .brand svg{color:var(--blue);display:block}
+  .brand-name{font-size:13.5px;font-weight:500;white-space:nowrap}
+  .lamp{width:14px;height:14px;display:grid;place-items:center;border:none;background:none;padding:0;cursor:pointer;border-radius:50%}
+  .lamp i{width:7px;height:7px;border-radius:50%;background:var(--idle);display:block;transition:background .2s}
+  .lamp[data-phase="ready"] i{background:var(--green)}
+  .lamp[data-phase="launching"] i,.lamp[data-phase="need-login"] i{background:var(--amber)}
+  .lamp[data-phase="error"] i{background:var(--red)}
+  .lamp[data-phase="thinking"] i,.lamp[data-phase="streaming"] i{background:var(--green);animation:breathe 1.6s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:1}50%{opacity:.4}}
+  .spacer{flex:1;min-width:8px}
+  .lampmenu{position:absolute;top:44px;left:14px;width:260px;background:var(--card);border:1px solid var(--bd2);
+    border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.16);padding:6px;z-index:5}
+  .lampmenu .st{display:flex;align-items:center;gap:7px;padding:6px 8px 8px;font-size:12.5px;color:var(--tx2);border-bottom:1px solid var(--bd1);margin-bottom:4px}
+  .lampmenu .st i{width:7px;height:7px;border-radius:50%;flex:none}
+  .lampmenu button{display:block;width:100%;text-align:left;padding:7px 8px;border:none;background:none;color:var(--tx);
+    font:inherit;font-size:13px;border-radius:7px;cursor:pointer}
+  .lampmenu button:hover{background:var(--hover)}
+
+  /* ---------- body ---------- */
+  .body{flex:1;min-height:0;display:flex}
+  .rail{width:200px;flex:none;border-right:1px solid var(--bd1);background:var(--bg2);padding:10px 8px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+  .rail .srow{display:flex;align-items:center;gap:6px;padding:7px 8px;border-radius:8px;font-size:13px;color:var(--tx)}
+  .rail .srow[data-on]{background:var(--blue-wash);color:var(--blue)}
+  .rail .srow .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .rail .srow .tm{font-size:11px;color:var(--tx3);flex:none}
+  .chat{flex:1;min-width:0;display:flex;flex-direction:column}
+  .thread{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px}
+  .m{max-width:92%}
+  .m.user{align-self:flex-end;background:var(--bubble);border-radius:12px;padding:10px 13px}
+  .m .think{border:1px solid var(--bd2);border-radius:9px;background:var(--bg2);margin-bottom:8px;max-width:520px}
+  .m .thinkhead{display:flex;align-items:center;gap:7px;padding:8px 10px;font-size:12.5px;color:var(--tx2);cursor:pointer}
+  .m .thinkhead .caret{margin-left:auto;color:var(--tx3);font-size:10px}
+  .m .thinkhead .live{color:var(--blue)}
+  .m .thinkhead .live em{font-style:normal;opacity:.55}
+  .m p{margin:0 0 6px}
+
+  /* ---------- NEW actions row ---------- */
+  .composer{flex:none;padding:0 16px 10px}
+  .actions{display:flex;align-items:center;gap:4px;padding:8px 2px 8px;border-top:1px solid var(--bd1)}
+  .abtn{width:30px;height:30px;flex:none;display:grid;place-items:center;border:none;border-radius:8px;
+    background:none;color:var(--tx2);cursor:pointer}
+  .abtn:hover{background:var(--hover);color:var(--tx)}
+  .abtn[data-on]{background:var(--blue-wash);color:var(--blue)}
+  .abtn:disabled{opacity:.5;cursor:not-allowed;background:none}
+  .migrate{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;font:inherit;font-size:13px;
+    border:1px solid transparent;background:var(--blue-wash);color:var(--blue);cursor:pointer}
+  .migrate:hover{background:rgba(65,118,230,.2)}
+  .migrate .caret{font-size:10px}
+  .card{border:1px solid var(--bd2);border-radius:13px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  .card.off{border-color:color-mix(in srgb,var(--amber) 45%,transparent)}
+  .atts{display:flex;gap:8px;flex-wrap:wrap;padding:12px 12px 0}
+  .thumb{position:relative;width:56px;height:56px;border-radius:8px;overflow:hidden;border:1px solid var(--bd2);flex:none;
+    background:linear-gradient(135deg,#dbe6ff,#f0f4ff)}
+  [data-theme="dark"] .thumb{background:linear-gradient(135deg,#33405c,#232a38)}
+  .thumb .ph{position:absolute;inset:0;display:grid;place-items:center;color:var(--blue);font-size:19px}
+  .thumb .x{position:absolute;top:1px;right:1px;width:16px;height:16px;border-radius:50%;border:none;background:rgba(0,0,0,.55);
+    color:#fff;font-size:10px;line-height:1;display:grid;place-items:center;cursor:pointer}
+  .chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 4px 0 8px;border-radius:8px;font-size:12px;
+    background:var(--bg2);border:1px solid var(--bd1);max-width:260px}
+  .chip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip .x{width:18px;height:18px;display:grid;place-items:center;border:none;background:none;border-radius:4px;color:var(--tx3);cursor:pointer}
+  textarea{display:block;width:100%;border:none;outline:none;background:none;resize:none;font:inherit;font-size:14px;
+    line-height:1.6;color:var(--tx);padding:12px 14px 4px;height:56px}
+  textarea::placeholder{color:var(--tx3)}
+  .tools{display:flex;align-items:center;gap:4px;padding:10px 12px}
+  .pill{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 10px;border-radius:15px;border:1px solid var(--bd2);
+    background:none;color:var(--tx2);font:inherit;font-size:12.5px;cursor:pointer}
+  .pill[data-on]{background:var(--blue-wash);border-color:color-mix(in srgb,var(--blue) 45%,transparent);color:var(--blue)}
+  .round{width:32px;height:32px;border:none;border-radius:50%;display:grid;place-items:center;background:none;color:var(--tx2);cursor:pointer}
+  .round:hover{background:var(--hover)}
+  .send{width:32px;height:32px;border:none;border-radius:50%;display:grid;place-items:center;background:var(--blue);color:#fff;cursor:pointer}
+  .phase{flex:none;display:flex;gap:8px;padding:4px 20px 9px;font-size:11.5px;color:var(--tx3)}
+  .phase .sep{opacity:.5}
+
+  /* ---------- annotations ---------- */
+  .note{background:#fff;border-left:3px solid var(--blue);border-radius:6px;padding:8px 12px;font-size:12.5px;color:#4a5260;line-height:1.65}
+  .note b{color:#14171c}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#4a5260;align-items:center}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .switcher{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 4px}
+  .switcher button{border:1px solid #cfd4dc;background:#fff;border-radius:7px;padding:4px 9px;font:inherit;font-size:12px;cursor:pointer;color:#4a5260}
+  .switcher button[data-on]{background:#14171c;color:#fff;border-color:#14171c}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ============================ 改后 ============================ -->
+  <div class="col">
+    <h2>改后（新设计）</h2>
+    <div class="switcher">
+      <button data-theme-btn="light" data-on>浅色</button>
+      <button data-theme-btn="dark">深色</button>
+      <span style="width:10px"></span>
+      <button data-phase-btn="ready" data-on>● 就绪</button>
+      <button data-phase-btn="thinking">● 思考中</button>
+      <button data-phase-btn="error">● 故障</button>
+      <button data-phase-btn="stopped">● 未启动</button>
+    </div>
+
+    <div class="shell" id="shell" data-theme="light">
+      <!-- header: 品牌 + 状态灯 -->
+      <header>
+        <span class="brand">
+          <svg width="19" height="14" viewBox="0 0 23.16 17.04" aria-hidden="true"><path fill="currentColor" d="M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z"/></svg>
+          <span class="brand-name">DeepSeek Chat</span>
+        </span>
+        <button class="lamp" id="lamp" data-phase="ready" title="已就绪 · deepseek-reasoner" aria-label="已就绪 · deepseek-reasoner"><i></i></button>
+        <div class="spacer"></div>
+
+        <!-- 点圆点：菜单 -->
+        <div class="lampmenu" id="lampmenu">
+          <div class="st"><i style="background:var(--green)"></i>已就绪 · deepseek-reasoner</div>
+          <button>运行状态</button>
+          <button>导出 Markdown</button>
+          <button>打开登录窗口</button>
+        </div>
+      </header>
+
+      <div class="body">
+        <aside class="rail">
+          <div class="srow" data-on><span class="t">季度经营分析会材料</span><span class="tm">3m</span></div>
+          <div class="srow"><span class="t">开封自驾游路线</span><span class="tm">2h</span></div>
+          <div class="srow"><span class="t">Python 异步爬虫笔记</span><span class="tm">1d</span></div>
+          <div class="srow"><span class="t">合同条款比对</span><span class="tm">3d</span></div>
+        </aside>
+
+        <div class="chat">
+          <div class="thread">
+            <!-- 用户消息：附件 chip 显示真名 -->
+            <div class="m user">
+              <div class="atts" style="padding:0 0 8px">
+                <span class="chip"><span>📎</span><span class="nm">季度经营分析.pptx</span><button class="x">✕</button></span>
+              </div>
+              帮我看看这份材料的第三章，数据口径有没有问题？
+            </div>
+
+            <!-- 助手消息：思考默认折叠（一行） -->
+            <div class="m">
+              <div class="think">
+                <div class="thinkhead">
+                  <span>🧠</span>
+                  <span class="live">思考中：<em>先确认第三章标题是「收入结构」…</em></span>
+                  <span class="caret">▾</span>
+                </div>
+              </div>
+              <p>第三章的「收入结构」用了两套口径：正文按<b>含税</b>，表格按<b>不含税</b>，差额约 6.3%。建议统一为不含税，并在表注中写明。</p>
+              <p style="color:var(--tx3);font-size:12.5px">— 折叠后仍保留「思考中 + 首行预览」，信息不丢</p>
+            </div>
+          </div>
+
+          <!-- ===== 输入区：动作行在输入框正上方 ===== -->
+          <div class="composer">
+            <div class="actions">
+              <button class="abtn" title="显示/隐藏会话列表"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.1" y="3.1" width="11.8" height="9.8" rx="2.6"/><path d="M6.2 3.1v9.8"/></svg></button>
+              <button class="abtn" data-on title="搜索会话内容（⌘K）"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5"/></svg></button>
+              <button class="abtn" title="新建对话"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg></button>
+              <div class="spacer"></div>
+              <button class="migrate" title="在 Harness 中继续">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 5.2h9.4l-2.6-2.6M13.5 10.8H4.1l2.6 2.6"/></svg>
+                DSH 迁移 <span class="caret">▾</span>
+              </button>
+            </div>
+
+            <div class="card">
+              <div class="atts">
+                <!-- 图片：缩略图 -->
+                <div class="thumb"><span class="ph">🖼</span><button class="x" title="移除">✕</button></div>
+                <div class="thumb"><span class="ph">🖼</span><button class="x" title="移除">✕</button></div>
+                <!-- 非图片：真名 chip -->
+                <span class="chip"><span>📎</span><span class="nm">季度经营分析.pptx</span><button class="x">✕</button></span>
+              </div>
+              <textarea placeholder="给 DeepSeek 发送消息…"></textarea>
+              <div class="tools">
+                <button class="pill" data-on>🧠 深度思考</button>
+                <button class="pill">🌐 智能搜索</button>
+                <div class="spacer"></div>
+                <button class="round" title="上传文件"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M9.6 3.4 4.9 8.1a2.6 2.6 0 0 0 3.7 3.7l4.7-4.7a4 4 0 0 0-5.6-5.6L2.9 6.3"/></svg></button>
+                <button class="send" title="发送"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 13V3.4M3.6 7.6 8 3.2l4.4 4.4"/></svg></button>
+              </div>
+            </div>
+          </div>
+          <div class="phase"><span>空闲</span><span class="sep">|</span><span>已登录</span><span>·</span><span>8 轮对话</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>金色区域 = 本次唯一的布局新增：动作行</b>。它在输入卡片<b>上方、卡片之外</b>，与卡片共用左右 16px 内边距；
+      左边三个方形图标（历史 开/关、搜索 开/关、新对话），最右是 <code>⇄ DSH 迁移 ▾</code>（原「在 Harness 中继续」，点开的迁移面板内容完全不变）。
+      顶部 header 只剩「🐳 DeepSeek Chat ●」——圆点是状态灯，点它弹出「运行状态 / 导出 / 打开登录窗口 / 关闭浏览器」
+      （原本挂在被删掉的 <code>···</code> 上）。
+    </div>
+
+    <div class="legend">
+      <span><i class="dot" style="background:var(--green)"></i>绿 = 正常运行（思考/输出时呼吸）</span>
+      <span><i class="dot" style="background:var(--red)"></i>红 = 故障</span>
+      <span><i class="dot" style="background:var(--idle)"></i>灰 = 未启动</span>
+      <span><i class="dot" style="background:var(--amber)"></i>黄 = 启动中 / 未登录（建议新增，见设计文档 Q2）</span>
+    </div>
+  </div>
+
+  <!-- ============================ 改前 ============================ -->
+  <div class="col">
+    <h2>改前（现状，对照用）</h2>
+    <div class="shell" data-theme="light" style="height:auto">
+      <header>
+        <span class="brand">
+          <svg width="19" height="14" viewBox="0 0 23.16 17.04" aria-hidden="true"><path fill="currentColor" d="M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z"/></svg>
+        </span>
+        <button class="abtn" style="width:34px;height:34px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.1" y="3.1" width="11.8" height="9.8" rx="2.6"/><path d="M6.2 3.1v9.8"/></svg></button>
+        <button class="abtn" style="width:34px;height:34px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L13.5 13.5"/></svg></button>
+        <button class="abtn" style="width:34px;height:34px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg></button>
+        <div class="spacer"></div>
+        <button class="migrate">在 Harness 中继续 <span class="caret">▾</span></button>
+        <button class="abtn" style="width:28px;height:28px">···</button>
+      </header>
+      <div style="padding:18px 20px">
+        <div class="m user" style="margin-left:auto">
+          <div class="atts" style="padding:0 0 8px">
+            <span class="chip"><span>📎</span><span class="nm">8f3c1e2b-4d7a-4f1e-9b2c-0a1b2c3d4e5f.png</span><button class="x">✕</button></span>
+          </div>
+          帮我看看这份材料的第三章…
+        </div>
+        <div class="think" style="margin-top:14px;max-width:520px">
+          <div class="thinkhead"><span>🧠</span><span>已思考（用时 12 秒）</span><span class="caret">▴</span></div>
+          <div style="border-top:1px solid var(--bd1);padding:10px;font-size:12.5px;color:var(--tx2);height:120px;overflow:hidden">
+            先确认第三章标题是「收入结构」…（原来流式过程中会整段铺开，答完才折回）<br>接着核对表格…
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note" style="border-left-color:#c8ccd4">
+      现状三个问题：<b>①</b> 顶部挤了 3 个图标 + 长文案迁移按钮 + <code>···</code>；
+      <b>②</b> 附件显示 <code>8f3c1e2b-….png</code> 这类 UUID 名，且图片也只是个纸夹图标；
+      <b>③</b> 思考在流式期间自动铺开。
+    </div>
+  </div>
+</div>
+
+<script>
+  const shell = document.getElementById('shell');
+  document.querySelectorAll('[data-theme-btn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-theme-btn]').forEach(b => b.removeAttribute('data-on'));
+      btn.setAttribute('data-on', '');
+      shell.dataset.theme = btn.dataset.themeBtn;
+    });
+  });
+  const lamp = document.getElementById('lamp');
+  const menu = document.getElementById('lampmenu');
+  menu.style.display = 'none';
+  lamp.addEventListener('click', () => {
+    menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  });
+  const TIP = {
+    ready: '已就绪 · deepseek-reasoner',
+    thinking: '正在思考',
+    error: '引擎错误：页面连接超时',
+    stopped: '未启动',
+  };
+  document.querySelectorAll('[data-phase-btn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-phase-btn]').forEach(b => b.removeAttribute('data-on'));
+      btn.setAttribute('data-on', '');
+      const p = btn.dataset.phaseBtn;
+      lamp.dataset.phase = p;
+      lamp.title = TIP[p];
+      menu.querySelector('.st').innerHTML = '<i style="background:var(--' +
+        (p === 'error' ? 'red' : p === 'stopped' ? 'idle' : 'green') + ')"></i>' + TIP[p];
+    });
+  });
+</script>
+</body>
+</html>

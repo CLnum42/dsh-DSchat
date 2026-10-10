@@ -1,6 +1,6 @@
 {
   "name": "dsh-dschat",
-  "version": "0.3.10",
+  "version": "0.4.2",
   "private": true,
   "description": "Chat with DeepSeek's web端 (chat.deepseek.com) inside DeepSeek Harness as a native panel, then distill or replay the conversation into a new harness session.",
   "keywords": [

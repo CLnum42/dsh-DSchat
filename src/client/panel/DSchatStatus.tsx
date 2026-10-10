@@ -1,13 +1,17 @@
 /**
- * The DSchat settings page — registered into the shell's `settings.section`
- * slot, so it is a first-class page beside General / Models / Plugins rather
- * than a modal of our own.
+ * 「运行状态」 — the engine's live state, the resolved runtime settings, and the
+ * two actions that get a stuck engine unstuck.
  *
- * The page is read-only by design: the plugin's tunables live in its `Config`
- * (validated, patched by the profile layer), and the shell already renders that
- * form on the Plugins page. What a user actually needs here is the resolved
- * value of each knob plus the two actions that get them unstuck — sign in, and
- * shut the browser down.
+ * This used to be a page of its own in the shell's Settings, registered into
+ * `settings.section`. It is not a setting: nothing on it can be edited (the
+ * plugin's knobs live in its Config and are rendered by the shell on the
+ * Plugins page), and a reader who wants to know why the web page is not
+ * answering is looking at the DSchat panel, not in Settings. So it moved here —
+ * one card, opened from the panel's own 「···」 menu, next to the two actions it
+ * shares with that menu.
+ *
+ * Read-only by design, and it polls while it is open: the phase is the thing
+ * that changes under the reader's eyes (a launch finishing, a login landing).
  */
 
 import { createElement, useCallback, useEffect, useState, type ReactNode } from 'react'
@@ -32,17 +36,15 @@ interface SettingsView {
   announceToAgent: boolean
 }
 
-export interface DSchatSettingsProps {
+export interface DSchatStatusProps {
   api: DSchatApi
   /** Locale accessor bound to this plugin's namespace. */
   tt: (key: string) => string
   /** Locale accessor the slot system provides when `locale` is declared. */
   t?: (key: string) => string
-  /** Shell affordance: close the settings panel. */
-  close?: () => void
 }
 
-export function DSchatSettings(props: DSchatSettingsProps): ReactNode {
+export function DSchatStatus(props: DSchatStatusProps): ReactNode {
   const { api, tt, t } = props
   const tr = useCallback((key: string): string => (t ?? tt)(key), [t, tt])
 
@@ -68,8 +70,8 @@ export function DSchatSettings(props: DSchatSettingsProps): ReactNode {
       await refresh()
     }
     void tick()
-    // Slow poll: the page shows engine status, and a settings page is not a
-    // live view — 3s is enough to notice a login finishing.
+    // Slow poll: this card is a diagnostic, and 3 s is enough to notice a launch
+    // finishing or a login landing without competing with the panel's own feed.
     const timer = window.setInterval(() => { void tick() }, 3_000)
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [refresh])
@@ -107,7 +109,7 @@ export function DSchatSettings(props: DSchatSettingsProps): ReactNode {
   /**
    * A boolean setting, in the reader's language.
    *
-   * These were hard-coded 「是」/「否」, so the English dictionary shipped a page
+   * These were hard-coded 「是」/「否」, so the English dictionary shipped a card
    * that answered in Chinese. The glyphs stay: a tick/cross reads faster than a
    * word in either language.
    */
@@ -117,10 +119,10 @@ export function DSchatSettings(props: DSchatSettingsProps): ReactNode {
 
   return createElement(
     'div',
-    { className: 'dsh-dschat dsh-dschat-settings' },
+    { className: 'dsh-dschat dsh-dschat-status' },
     createElement('header', { className: 'dsh-dschat-sethead' },
-      createElement('h1', null, tr('settings.title')),
-      createElement('p', null, tr('settings.description')),
+      createElement('h1', null, tr('status.title')),
+      createElement('p', null, tr('status.description')),
     ),
 
     createElement('section', { className: 'dsh-dschat-setcard' },
@@ -167,7 +169,7 @@ export function DSchatSettings(props: DSchatSettingsProps): ReactNode {
           onClick: closeBrowser,
         }, tr('action.closeBrowser')),
       ),
-      createElement('p', { className: 'dsh-dschat-sethint' }, tr('settings.where')),
+      createElement('p', { className: 'dsh-dschat-sethint' }, tr('status.where')),
     ),
   )
 }

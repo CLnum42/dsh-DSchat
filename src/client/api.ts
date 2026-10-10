@@ -4,7 +4,7 @@
  * fenced on the host.
  */
 
-import { DSCHAT_API, type TransferMode, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
+import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
 
 /** Shape every /api/dsh-dschat response carries: ok plus optional error. */
 interface ApiResult {
@@ -195,9 +195,29 @@ export class DSchatApi {
     }>(DSCHAT_API.context, undefined, TIMEOUT.poll)
   }
 
-  /** Persist pasted/dropped image bytes and get back a real path for the engine. */
-  attach(input: { name: string; mediaType: string; data: string }): Promise<EndpointResult<{ ok: boolean; path?: string; bytes?: number }>> {
-    return request<{ ok: boolean; path?: string; bytes?: number }>(DSCHAT_API.attach, input, TIMEOUT.attach)
+  /**
+   * Persist pasted/dropped bytes and get back a real path for the engine.
+   *
+   * `name` comes back as well, and that is not redundant: `path` is the stored
+   * `${uuid}__${name}${ext}`, whose last segment is what the composer used to
+   * print as the label. The bare name is what the chip shows.
+   */
+  attach(input: { name: string; mediaType: string; data: string }): Promise<EndpointResult<{ ok: boolean; path?: string; bytes?: number; name?: string }>> {
+    return request<{ ok: boolean; path?: string; bytes?: number; name?: string }>(DSCHAT_API.attach, input, TIMEOUT.attach)
+  }
+
+  /**
+   * The URL an attachment's bytes are served from.
+   *
+   * A plain string rather than a fetch, because it is the `src` of an `<img>`:
+   * the browser's own image cache then does the work (the same thumbnail is not
+   * re-read on every poll), and a missing file simply fails to load, which is
+   * what `onError` would answer anyway.
+   *
+   * @param path - the absolute path `/attach` answered with.
+   */
+  attachmentUrl(path: string): string {
+    return `${DSCHAT_API.attachment}?path=${encodeURIComponent(path)}`
   }
 
   /**
@@ -214,9 +234,14 @@ export class DSchatApi {
   /**
    * Submit one message. `stored` on a failure means the user message DID reach
    * the transcript and only the reply never started — see SendResult.stored.
+   *
+   * `code` is carried through because `BUSY` is not an error the reader should
+   * see: it means the previous turn was still running when this one arrived
+   * (the panel's own snapshot lags the engine by up to a poll), and the panel
+   * answers it by queueing the message instead of refusing it.
    */
-  send(text: string, images?: string[]): Promise<EndpointResult<{ ok: boolean; chatId?: string; stored?: boolean }>> {
-    return request<{ ok: boolean; chatId?: string; stored?: boolean }>(DSCHAT_API.send, { text, images }, TIMEOUT.send)
+  send(text: string, images?: string[]): Promise<EndpointResult<{ ok: boolean; chatId?: string; stored?: boolean; code?: DSchatErrorCode }>> {
+    return request<{ ok: boolean; chatId?: string; stored?: boolean; code?: DSchatErrorCode }>(DSCHAT_API.send, { text, images }, TIMEOUT.send)
   }
 
   stop(): Promise<EndpointResult<{ ok: boolean }>> {

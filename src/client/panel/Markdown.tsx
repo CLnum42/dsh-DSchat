@@ -565,8 +565,11 @@ function collapseFromBodyClick(target: EventTarget | null): boolean {
  * also the one moment both faces were on screen at once: a 「思考中…」 row with
  * the whole thought under it (reported, with a screenshot).
  *
- * While the model IS reasoning the expanded face is the {@link ThinkingLive}
- * row, so "still thinking" stays visible on one line as the text streams past.
+ * While the model IS reasoning, the COLLAPSED face is the one that shows it:
+ * it renders the {@link ThinkingLive} row, so a running thought keeps its
+ * 「思考中：…」 lead-in and a streaming one-line tail. The old behaviour opened
+ * the body for the whole thought instead, which unfolded a screenful of text
+ * and then folded it back — twice per turn, under the reader's cursor.
  *
  * Collapsing from the expanded face: a click anywhere in the body. That is the
  * only affordance the reader asked for, and it is guarded so it cannot fire on
@@ -585,8 +588,12 @@ function collapseFromBodyClick(target: EventTarget | null): boolean {
  * @param props.thinkingMs - measured duration, absent while still thinking.
  * @param props.streaming - true while this reply is still arriving.
  * @param props.liveLabel - localized 「思考中：」 lead-in for the live line.
+ * @param props.defaultOpen - render the open face on the FIRST paint. Only a
+ *   test seam: the panel never passes it, because the whole point of the
+ *   collapse is that nothing opens without the reader's click, and a static
+ *   render cannot click.
  */
-export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, streaming, liveLabel }: {
+export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, streaming, liveLabel, defaultOpen = false }: {
   source: string
   label: string
   options?: MarkdownOptions
@@ -594,24 +601,43 @@ export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, s
   thinkingMs?: number
   streaming?: boolean
   liveLabel?: string
+  defaultOpen?: boolean
 }): ReactNode {
   const live = thinkingIsLive(thinkingMs, streaming)
-  const [open, setOpen] = useState(live)
+  /*
+   * COLLAPSED, always, from the first render.
+   *
+   * This used to start open while the model was still reasoning, and an effect
+   * re-opened it on every live tick — so a reasoner unfolded a screenful of
+   * text on every turn and folded it away once the answer arrived, moving the
+   * answer under the reader's cursor twice per turn. The default is now the
+   * summary line, in every state: streaming, finished, and recovered from disk.
+   *
+   * What keeps 「思考中」 visible is the collapsed face itself, not the open
+   * body — it renders the {@link ThinkingLive} row, so a running thought still
+   * shows its lead-in and a one-line tail (see the render below). Nothing is
+   * hidden that the reader needs; expanding is one click, and the click is the
+   * only thing that opens it.
+   */
+  const [open, setOpen] = useState(defaultOpen)
   const bodyRef = useRef<HTMLDivElement | null>(null)
-  /** True once this row has been seen in its live state (see the effect). */
-  const wasLive = useRef(live)
 
+  /*
+   * Fold away when the thought FINISHES, but only for a row the reader opened
+   * while it was running.
+   *
+   * A row mounted on an already-finished message never triggers this: it is
+   * born collapsed, so there is nothing to close. The effect exists for the one
+   * case the new default cannot cover — a reader who expanded the live row to
+   * watch it think expects it to close with the turn, exactly as the old
+   * auto-collapse did.
+   */
+  const openedWhileLive = useRef(false)
   useEffect(() => {
-    if (live) {
-      wasLive.current = true
-      setOpen(true)
-      return
-    }
-    // Finished: fold away, but only for a thought the reader watched run.
-    if (wasLive.current) {
-      wasLive.current = false
-      setOpen(false)
-    }
+    if (live) return
+    if (!openedWhileLive.current) return
+    openedWhileLive.current = false
+    setOpen(false)
   }, [live])
 
   /*
@@ -668,7 +694,15 @@ export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, s
             type: 'button',
             className: 'dsh-dschat-think-head',
             'aria-expanded': false,
-            onClick: () => setOpen(true),
+            onClick: () => {
+              /*
+               * Remember that this row was opened DURING the thought, so the
+               * effect above can close it when the thought ends. A row opened
+               * after the fact is the reader's own doing and stays open.
+               */
+              if (live) openedWhileLive.current = true
+              setOpen(true)
+            },
           },
           createElement(ThinkIcon, { size: 13 }),
           live && liveLabel !== undefined

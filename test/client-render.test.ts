@@ -37,7 +37,7 @@ async function loadComponents() {
   const { writeFileSync } = await import('node:fs')
   writeFileSync(entry, `
     export { DSchatPanel, thoughtLabel, openExternalLink } from ${JSON.stringify(join(root, 'src/client/panel/DSchatPanel.tsx'))}
-    export { DSchatSettings } from ${JSON.stringify(join(root, 'src/client/panel/DSchatSettings.tsx'))}
+    export { DSchatStatus } from ${JSON.stringify(join(root, 'src/client/panel/DSchatStatus.tsx'))}
     export { Markdown, Thinking, SourceList, sourceRows } from ${JSON.stringify(join(root, 'src/client/panel/Markdown.tsx'))}
   `, 'utf8')
   await build({
@@ -141,7 +141,14 @@ test('the composer groups 深度思考 + 智能搜索 on the left, 附件 + 发�
 
     const think = composer.indexOf('toggle.deepThink')
     const search = composer.indexOf('toggle.search')
-    const spacer = composer.indexOf('dsh-dschat-spacer')
+    /*
+     * The LAST spacer, not the first.
+     *
+     * The action row above the card (会话列表 / 搜索 / 新对话 … DSH 迁移) has one
+     * of its own, and it comes first in the markup. The grouping this test
+     * guards is the TOOL row's, one spacer further down.
+     */
+    const spacer = composer.lastIndexOf('dsh-dschat-spacer')
     const upload = composer.indexOf('composer.upload')
     const send = composer.indexOf('dsh-dschat-send')
     assert.ok(think > -1 && search > -1 && upload > -1, 'all three controls are in the tool row')
@@ -210,60 +217,171 @@ test('the composer wakes the engine instead of forcing a login window', async ()
   // waits for a Harness restart, so the 404 pairing is a real state.
   assert.ok(/HTTP 404/.test(ready), 'a host without /wake falls back instead of breaking the composer')
 
-  // Enter on a composer whose engine is down wakes it rather than dropping the
-  // message: the reader pressed Enter, which is an unambiguous intent.
-  const send = panel.slice(panel.indexOf('const send = useCallback'), panel.indexOf('const stop = useCallback'))
-  assert.ok(/await ensureReady\(\)/.test(send), 'send wakes a down engine first')
-  assert.ok(send.includes('toast.send.needLogin'), 'and says so when nobody is signed in')
+  /*
+   * Enter on a composer whose engine is down wakes it rather than dropping the
+   * message: the reader pressed Enter, which is an unambiguous intent. The wake
+   * lives in `deliver` — the one path every send takes, whether it was typed or
+   * drained from the queue — so there is exactly one place that can forget it.
+   */
+  const deliver = panel.slice(panel.indexOf('const deliver = useCallback'), panel.indexOf('const drainOutbox'))
+  assert.ok(/await ensureReady\(\)/.test(deliver), 'sending wakes a down engine first')
+  /*
+   * ...and a start that ends on the sign-in screen reports itself in the
+   * conversation (with 「打开登录窗口」 on the same card) instead of as a toast.
+   */
+  assert.ok(deliver.includes("return 'failed'"), 'a failed start hands the message back to the caller')
+  assert.ok(panel.includes('engine.notice.needLogin'), 'being signed out is reported as a notice')
 })
 
 /**
- * The header's three window controls.
+ * The header's two halves, and the three window controls that moved OUT of it.
  *
- * They exist because the conversation list, the search box and 新对话 had no
- * visible entry point: the list was permanent (with no way to give the
+ * The controls exist because the conversation list, the search box and 新对话
+ * had no visible entry point: the list was permanent (with no way to give the
  * conversation the full width), the search box was a bare input nobody was told
- * about, and the only 新对话 button sat above that list. All three now live in
- * the header, next to the brand, in the web app's own order: 会话列表, 搜索,
- * 新建对话.
+ * about, and the only 新对话 button sat above that list. They used to live in
+ * the header; they now sit in the action row directly above the composer, next
+ * to the conversation they act on.
  *
- * The rail is rendered by DEFAULT (a reader who has never touched the toggle
- * gets the list), so this asserts the initial screen: three buttons, the
- * history one pressed, the list on screen.
+ * The header keeps identity (the whale + the product name) and the engine's
+ * state lamp, which is also the entry to the engine menu. The rail is rendered
+ * by DEFAULT (a reader who has never touched the toggle gets the list), so this
+ * asserts the initial screen: the brand, one lamp, three buttons in the action
+ * row, the history one pressed, the list on screen.
  */
-test('the header carries the whale mark, then 会话列表 / 搜索 / 新建对话', async () => {
+test('the header carries the whale mark and the lamp, and the controls moved to the action row', async () => {
   const { DSchatPanel, renderToStaticMarkup, createElement, dir } = await loadComponents()
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+  const panelSource = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
   try {
     const html = renderToStaticMarkup(createElement(DSchatPanel, deps as never))
     const header = html.slice(html.indexOf('dsh-dschat-header'), html.indexOf('dsh-dschat-body'))
+    const composer = html.slice(html.indexOf('dsh-dschat-composer'), html.indexOf('dsh-dschat-phase'))
 
     /*
-     * The whale is the product mark AND the engine's state lamp, so it leads:
-     * identity first, the controls that act on it after. It replaced both the
-     * panel-name text and the status chip, so its presence is what has to be
-     * asserted here — and both removals have to be asserted as ABSENT, or a
-     * later edit could quietly reintroduce a fourth pseudo-button in this row.
+     * Identity first, status after: the whale names the product, the lamp
+     * reports whether its engine is up. Both removals have to be asserted as
+     * ABSENT, or a later edit could quietly reintroduce a pseudo-button here.
      */
-    const whale = header.indexOf('dsh-dschat-whale')
-    const controls = header.indexOf('dsh-dschat-hbtns')
-    assert.ok(whale > -1, 'the whale mark is in the header')
-    assert.ok(controls > -1, 'the controls are their own group')
-    assert.ok(whale < controls, 'and the mark leads them, as the web app does')
+    const brand = header.indexOf('dsh-dschat-brand')
+    const lamp = header.indexOf('dsh-dschat-lamp')
+    assert.ok(brand > -1, 'the product mark is in the header')
+    assert.ok(lamp > -1, 'and the state lamp beside it')
+    assert.ok(brand < lamp, 'identity leads, status follows')
+    assert.match(header, /brand\.title/, 'the header names the product it is talking to')
 
     // The mark renders the house artwork at its own ratio, not on the icon grid.
     assert.match(header, /viewBox="0 0 23\.16 17\.04"/, 'the official fish geometry')
     assert.match(header, /data-phase="stopped"/, 'with no snapshot yet it claims nothing')
 
+    /*
+     * The conversation's three verbs are the ACTION ROW's: 会话列表 / 新对话 on
+     * the left, 迁移 at the right end. All are labelled (dsh-dschat-tbtn) — the
+     * row is where a reader looks for "a new chat", so a glyph-only square there
+     * was a control they had to already know.
+     *
+     * 搜索 is deliberately NOT one of them: it duplicated the rail's own search
+     * box, which is on screen whenever the rail is (the default). What it
+     * uniquely did — reach search with the rail collapsed — belongs to ⌘K, and
+     * the assertion below makes sure ⌘K still does it.
+     */
     assert.equal(
-      (header.match(/dsh-dschat-hbtn[" ]/g) ?? []).length, 3,
-      'exactly three header buttons',
+      (composer.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 3,
+      'three labelled buttons on the action row',
     )
-    const history = header.indexOf('rail.hide')
-    const search = header.indexOf('rail.search.hint')
-    const fresh = header.indexOf('action.newChat.hint')
-    assert.ok(history > -1 && search > -1 && fresh > -1, 'each button carries its own label')
-    assert.ok(history < search && search < fresh, 'in the order 会话列表, 搜索, 新建对话')
-    assert.match(header, /aria-pressed="true"/, 'the history toggle reads as pressed while the list is shown')
+    const history = composer.indexOf('rail.hide')
+    const fresh = composer.indexOf('action.newChat.hint')
+    assert.ok(history > -1 && fresh > -1, 'each button carries its own label')
+    assert.ok(history < fresh, 'in the order 会话列表, 新对话')
+    assert.equal(
+      composer.includes('rail.search.hint'), false,
+      'and the row no longer carries a search button',
+    )
+    assert.match(composer, /aria-pressed="true"/, 'the history toggle reads as pressed while the list is shown')
+    for (const key of ['action.sessions', 'action.newChat']) {
+      assert.ok(composer.includes(key), `the button carries the visible word for ${key}`)
+    }
+
+    /*
+     * The search it dropped is still reachable, and by the path that has to work
+     * in every state: the shortcut goes through `openSearch()`, which brings a
+     * collapsed rail back before focusing. The direct `searchRef.current?.focus()`
+     * this replaced was a no-op whenever the rail was hidden — the box is not in
+     * the DOM then — so the old code silently lost the shortcut in exactly the
+     * state where a keyboard path matters most.
+     *
+     * Comments are stripped before matching: the fix's own comment names the
+     * call it warns against, and prose must not trip a code-level guard.
+     */
+    const code = panelSource.replace(/\/\*[\s\S]*?\*\//g, '')
+    const shortcut = code.slice(
+      code.indexOf("event.key.toLowerCase() === 'k'"),
+      code.indexOf("event.key === '/'"),
+    )
+    assert.ok(shortcut.includes('openSearch()'), '⌘K opens the search through the same path the button used')
+    assert.equal(
+      /searchRef\.current\?\.focus\(\)/.test(shortcut), false,
+      'and never focuses the ref directly: it is null while the rail is collapsed',
+    )
+    /* The rail's own box advertises the shortcut it now owns. */
+    assert.match(
+      panelSource.slice(panelSource.indexOf('dsh-dschat-search')),
+      /title: tr\('rail\.search\.hint'\)/,
+      'the search box carries the ⌘K hint the removed button used to hold',
+    )
+
+    /*
+     * The engine menu is at the TITLE BAR's right end — after the drag spacer,
+     * i.e. the header's last child — and NOT on the action row. Those four
+     * entries (运行状态 / 导出 markdown / 打开登录窗口 / 关闭浏览器) are about the
+     * panel and its browser, not about this conversation, and the row below
+     * belongs to the conversation.
+     */
+    const more = header.indexOf('more.hint')
+    assert.ok(more > -1, 'the engine menu has a visible home')
+    assert.ok(more > header.indexOf('dsh-dschat-spacer'), 'at the title bar\'s right end, after the drag region')
+    assert.equal(
+      composer.includes('more.hint'), false,
+      'and it is no longer on the action row',
+    )
+    assert.equal(
+      (header.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 1,
+      'the header carries exactly one of those buttons: the 「···」',
+    )
+    assert.equal(
+      composer.includes('dsh-dschat-btn-primary'), false,
+      'and 迁移 is no longer a filled primary chip inside the row',
+    )
+
+    /*
+     * The lamp's panel is the status sentence and NOTHING else. It held these
+     * same four entries once; a `moreItem` left behind here would mean the menu
+     * exists in two places, which is how the header ends up carrying commands
+     * twice.
+     *
+     * The four keys ARE in the header now — the engine menu lives there — so the
+     * assertion is that they belong to the MENU and not to the lamp's panel:
+     * the panel is one line of text, with no menu rows inside it.
+     *
+     * The panel itself is closed in a static render (the component returns null
+     * for it), so its own positive half — the sentence, and the absence of
+     * buttons — is measured in a real browser by scripts/ui-shot.mjs.
+     */
+    assert.equal(
+      composer.includes('dsh-dschat-pop-status') || header.includes('dsh-dschat-pop-status'), false,
+      'no panel is rendered until a trigger opens one',
+    )
+    const lampPanel = css.slice(
+      css.indexOf('.dsh-dschat-pop-status .dsh-dschat-lamp-status'),
+      css.indexOf('}', css.indexOf('.dsh-dschat-pop-status .dsh-dschat-lamp-status')),
+    )
+    assert.ok(lampPanel.includes('border-bottom: none'), 'the lamp\'s panel styles the sentence, and only that')
+    assert.equal(
+      /dsh-dschat-menu-item/.test(css.slice(css.indexOf('.dsh-dschat-pop-status'), css.indexOf('.dsh-dschat-pop-status') + 400)),
+      false,
+      'and carries no menu rows of its own',
+    )
 
     assert.equal(header.includes('panel.title'), false, 'the redundant panel name is gone')
     assert.equal(header.includes('dsh-dschat-status'), false, 'and so is the status chip')
@@ -512,12 +630,13 @@ test('a transcript link opens in the machine browser, and only for web schemes',
   }
 })
 
-test('DSchatSettings renders its initial screen', async () => {
-  const { DSchatSettings, renderToStaticMarkup, createElement, dir } = await loadComponents()
+test('DSchatStatus renders its initial screen', async () => {
+  const { DSchatStatus, renderToStaticMarkup, createElement, dir } = await loadComponents()
   try {
-    const html = renderToStaticMarkup(createElement(DSchatSettings, { ...deps, close: () => undefined } as never))
-    assert.ok(html.length > 0, 'settings page produced markup')
-    assert.match(html, /dsh-dschat-settings/)
+    const html = renderToStaticMarkup(createElement(DSchatStatus, { ...deps } as never))
+    assert.ok(html.length > 0, 'the status card produced markup')
+    assert.match(html, /dsh-dschat-status/)
+    assert.match(html, /status\.title/)
     assert.match(html, /settings\.status/)
     assert.match(html, /settings\.runtime/)
     assert.match(html, /settings\.actions/)
@@ -535,10 +654,22 @@ test('the client module envelope and its slot registrations are intact', async (
   // The loader keys factories by id, so the id must equal the package name.
   assert.match(bundle, /id: "dsh-dschat"/)
   assert.match(bundle, /window\.__ModuleLoader__\.load\(/)
-  // All three declared surfaces must be registered somewhere in the bundle.
-  for (const slot of ['sidebar.panellist', 'main', 'settings.section']) {
+  // Both declared surfaces must be registered somewhere in the bundle.
+  for (const slot of ['sidebar.panellist', 'main']) {
     assert.ok(bundle.includes(`name: "${slot}"`) || bundle.includes(`"${slot}"`), `registers ${slot}`)
   }
+  /*
+   * And DSchat must NOT claim a page in the shell's Settings.
+   *
+   * It used to register `settings.section`, which put a whole page in Settings
+   * for a card that is read-only and belongs next to the panel it describes.
+   * The plugin's actual configuration is the Config form the shell renders on
+   * the Plugins page; the status card is now 「运行状态」 in the panel's own menu.
+   */
+  assert.equal(
+    bundle.includes('"settings.section"'), false,
+    'DSchat does not occupy a page of its own in Settings',
+  )
   // React must come from the shell's module table, never be bundled.
   assert.match(bundle, /require\("react"\)/)
   assert.ok(!bundle.includes('@deepseek-ai/dsh-client-ui-primitives'), 'no harness Client package is imported')
@@ -553,7 +684,6 @@ test('the client module envelope and its slot registrations are intact', async (
 const REQUIRED_FACES: Record<string, string[]> = {
   'sidebar.panellist': [],
   main: ['api', 'tt', 'openSession', 'pickDirectory', 'createWorkspace'],
-  'settings.section': ['api', 'tt'],
 }
 
 /**
@@ -633,7 +763,7 @@ test('every slot is registered through inject, with the faces its component need
       assert.ok(injected.includes(slot), `${slot} registered through slots.inject`)
     }
 
-    assert.equal(registrations.length, 3, 'exactly three surfaces register')
+    assert.equal(registrations.length, 2, 'exactly two surfaces register (sidebar row + center panel)')
     for (const [slot, faces] of Object.entries(REQUIRED_FACES)) {
       const entry = registrations.find(r => r.slot === slot)
       assert.ok(entry !== undefined, `${slot} has a registration`)
@@ -717,6 +847,69 @@ test('floating surfaces use the menu material, not the overlay token', async () 
 })
 
 /**
+ * The composer's row opens UPWARD; everything in the title bar opens DOWNWARD.
+ *
+ * The action row's triggers are at the bottom of the panel, so a menu that grew
+ * down from one of them would cover the input card it acts on and would have to
+ * fit in the 60-odd pixels between the card and the phase line. Measured in a
+ * real browser before the change: the 迁移 panel opened at y=627 downward, over
+ * the textarea.
+ *
+ * The title bar is the mirror image: an upward panel there opened at y=-35 —
+ * above the window entirely. So the shared rule is inverted once, for the strip,
+ * and every control that strip gains later inherits the right answer.
+ *
+ * These assertions are about the ANCHOR (`bottom` for the row, `top` for the
+ * header) rather than about pixel values. The second half is why the anchor
+ * arithmetic is worth a guard at all: it only holds while the wrapper is the
+ * trigger's own size. As a stretched flex item of the 36px action row, the
+ * wrapper made `bottom: calc(100% + 8px)` resolve to 36px instead of 8px — a gap
+ * that changes with whatever else is in the row, which no unit test would have
+ * caught on its own.
+ */
+test('the composer\'s menus open upward, and the title bar\'s open downward', async () => {
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+  const ruleOf = (selector) => {
+    const start = css.indexOf(`${selector} {`)
+    assert.ok(start > -1, `${selector} is styled`)
+    return css.slice(start, css.indexOf('}', start))
+  }
+
+  const pop = ruleOf('.dsh-dschat-pop')
+  assert.match(pop, /bottom:\s*calc\(100% \+ 8px\)/, 'panels anchor above their trigger by default')
+  assert.equal(
+    /[^-]top:/.test(pop), false,
+    'and declare no top offset: both offsets set would stretch the box between them',
+  )
+  assert.ok(pop.includes('right: 0'), 'opening to the left of a right-hand trigger')
+
+  const anchor = ruleOf('.dsh-dschat-pop-wrap')
+  assert.ok(anchor.includes('position: relative'), 'the wrapper is the containing block')
+  assert.ok(
+    anchor.includes('align-self: center'),
+    'and stays the trigger\'s own size rather than stretching to the action row\'s height',
+  )
+
+  /*
+   * The header's inversion. It is keyed on the STRIP, not on the lamp or the
+   * 「···」: one rule covers both, and a third control added up there cannot get
+   * it wrong.
+   */
+  const header = ruleOf('.dsh-dschat-header .dsh-dschat-pop')
+  assert.ok(header.includes('top: calc(100% + 8px)'), 'the title bar\'s panels open downward, into the transcript')
+  assert.ok(header.includes('bottom: auto'), 'which means the shared bottom anchor must be cleared')
+  assert.equal(
+    ruleOf('.dsh-dschat-lamp-wrap > .dsh-dschat-pop').includes('bottom: auto'), false,
+    'and the lamp rule no longer repeats it — the strip owns that decision now',
+  )
+  assert.equal(
+    /\.dsh-dschat-actions[^{]*\.dsh-dschat-pop\s*\{/.test(css), false,
+    'the action row must NOT override the anchor: it is the strip the upward default is for',
+  )
+})
+
+/**
  * The transfer button and the composer pills share one accent family.
  *
  * They no longer share one *recipe*, and that is the change this guards: the
@@ -750,6 +943,35 @@ test('the primary button and the composer pills stay on the accent family', asyn
     'the primary fill is a 13% tint, so its label cannot be the on-accent foreground colour',
   )
   assert.ok(ruleOf('.dsh-dschat-btn-primary:hover').includes('label-primary'), 'the hover label stays readable')
+
+  /*
+   * The action row's own buttons are the same argument in a different shape.
+   *
+   * 「DSH 迁移」 left the primary family when it moved onto the row: one line
+   * above a card whose primary action is a 16px accent circle, a filled blue
+   * chip competed with the send button and made the loudest thing in a row of
+   * four quiet glyphs the one control that is not the message. So rest is
+   * transparent and quiet, and the accent comes back only where it MEANS
+   * something — hover, and the open state that says "this button owns the panel
+   * on screen now". Both are tints of the accent token; the inverted
+   * button-primary-* family must not appear at all.
+   */
+  const tbtn = ruleOf('.dsh-dschat-tbtn')
+  assert.ok(tbtn.includes('background: transparent'), 'the toolbar button rests unfilled')
+  assert.ok(tbtn.includes('color: var(--dsw-alias-label-secondary)'), 'and quiet, like the glyphs beside it')
+  assert.equal(
+    /border:\s*1px solid var\(--dsw/.test(tbtn), false,
+    'rest draws no visible border — only the open state does',
+  )
+  const tbtnOn = ruleOf('.dsh-dschat-tbtn-on')
+  assert.ok(tbtnOn.includes('state-business-primary'), 'the open state is the accent family')
+  assert.equal(
+    /button-primary-(fill|hover|dimmed)/.test(
+      [tbtn, tbtnOn, ruleOf('.dsh-dschat-tbtn:hover'), ruleOf('.dsh-dschat-tbtn:disabled')].join('\n'),
+    ),
+    false,
+    'never the theme-inverting button-primary-* family, which goes white in dark mode',
+  )
 
   // The pills: the web app's own two-state recipe, both states by token.
   // Sliced from the selector to the closing brace at column zero, because this
@@ -866,22 +1088,32 @@ test('the header clears the macOS window chrome band', async () => {
 
   /*
    * One nowrap row with no wrap point: when the window cannot fit it, something
-   * must give instead of pushing the right-hand actions (transfer, more) off the
-   * edge.
+   * must give instead of pushing the controls off the edge.
    *
-   * What gives is the run of empty space — and it is now the ONLY thing that
-   * can. The two former candidates are gone by design: the brand text that used
-   * to yield first, and the status chip that used to ellipsize into a dot. The
-   * whale that replaced both must NOT shrink, because a squashed mark is a
-   * broken logo, and the controls must not either, because each one is the only
-   * way to reach its action.
+   * What gives is the run of empty space — and it is now the only thing that
+   * can, because the header holds three fixed boxes: the brand, the lamp, and
+   * the 「···」 menu button (which the spacer has to stay to the right of, since
+   * that is where a title bar's menu lives). None of them may shrink: a squashed
+   * mark is a broken logo, the lamp is the only readout of the engine's state,
+   * and the menu is the only way to reach 导出 markdown.
    */
   assert.ok(ruleOf('.dsh-dschat-spacer').includes('flex: 1'), 'the spacer is the flexible child')
-  const whale = ruleOf('.dsh-dschat-whale')
-  assert.ok(whale.includes('flex: none'), 'the whale is a fixed box — it may never be squeezed')
-  assert.equal(whale.includes('min-width: 0'), false, 'and it never shrinks below its own size')
-  for (const selector of ['.dsh-dschat-hbtns', '.dsh-dschat-hbtn']) {
+  const brand = ruleOf('.dsh-dschat-brand')
+  assert.ok(brand.includes('flex: none'), 'the brand is a fixed box — it may never be squeezed')
+  assert.equal(brand.includes('min-width: 0'), false, 'and it never shrinks below its own size')
+  const lamp = ruleOf('.dsh-dschat-lamp')
+  assert.ok(lamp.includes('flex: none'), 'the lamp is a fixed box too')
+  assert.equal(lamp.includes('min-width: 0'), false, 'and it never shrinks below its own size')
+  /*
+   * The action row is BELOW the header, so it may wrap or scroll on its own
+   * terms — but its controls still must not be shrunk into each other by a
+   * narrow column, which is why each keeps `flex: none` as well. Since v0.4.1
+   * that is the same rule the header's menu button uses, because they are the
+   * same button.
+   */
+  for (const selector of ['.dsh-dschat-tbtn']) {
     assert.ok(ruleOf(selector).includes('flex: none'), `${selector} keeps its controls at full size`)
+    assert.ok(ruleOf(selector).includes('white-space: nowrap'), `${selector} never wraps its label`)
   }
 })
 
@@ -1178,13 +1410,20 @@ test('the reasoning row is a disclosure with a measured duration', async () => {
  *
  *   - collapsed (the default) → the summary line, and NO reasoning in the DOM;
  *   - expanded → the reasoning, and NO summary line;
- *   - still reasoning (`thinkingMs` absent, `streaming` true) → the expanded
- *     face, carrying the live one-line 「思考中：<最新的思考内容>」 view instead of
- *     a label.
+ *   - still reasoning (`thinkingMs` absent, `streaming` true) → ALSO the
+ *     collapsed line, carrying the live one-line 「思考中：<最新的思考内容>」 view
+ *     instead of a label. This is the state that changed: the row used to open
+ *     ITSELF for the duration of the thought, so a reasoner unfolded a
+ *     screenful of text on every turn and folded it back once the answer
+ *     arrived. It now stays closed until the reader opens it.
  *
  * The live line is a tail view: the prefix is its own element so it can never be
  * scrolled or truncated away, and the text sits in a clipping window the panel
  * shifts by a measured overflow.
+ *
+ * The OPEN face cannot be reached from a static render (nothing clicks), so the
+ * browser pass (scripts/ui-shot.mjs) drives it for real; what is pinned here is
+ * that the two faces are mutually exclusive whichever way each is reached.
  */
 test('a reasoning row shows either its summary line or its text, never both', async () => {
   const { Thinking, renderToStaticMarkup, createElement, dir } = await loadComponents()
@@ -1202,50 +1441,52 @@ test('a reasoning row shows either its summary line or its text, never both', as
     assert.match(collapsed, /aria-expanded="false"/, 'collapsed by default')
     assert.equal(BODY.test(collapsed), false, 'the collapsed face renders no body')
     assert.equal(/先看约束/.test(collapsed), false, 'and keeps the reasoning out of the DOM')
+    assert.equal(/dsh-dschat-think-live/.test(collapsed), false, 'a finished thought shows no live line')
 
     /*
-     * 2. Expanded. Static rendering cannot click, so the live props are what put
-     * the component in its open state — the same state the header's click
-     * produces, which the browser pass (scripts/ui-shot.mjs) drives for real.
+     * 2. STILL REASONING. The row is born collapsed and STAYS collapsed — the
+     * reasoning is not in the DOM — but the one visible line is the live view,
+     * so 「思考中：…」 and a tail of the newest text are on screen the whole time.
+     * Nothing the reader needs is hidden; only the screenful is.
+     */
+    const running = renderToStaticMarkup(createElement(Thinking, {
+      source: '先看约束：迁移过去的上下文必须自洽。\n\n再算一遍预算。',
+      label: '思考中…',
+      liveLabel: '思考中：',
+      streaming: true,
+    } as never))
+    assert.match(running, HEAD, 'a running thought still shows its one line')
+    assert.match(running, /aria-expanded="false"/, 'and does not open itself')
+    assert.equal(BODY.test(running), false, 'the running reasoning is NOT unfolded into the transcript')
+    assert.match(running, /dsh-dschat-think-live/, 'the line is the live tail view instead of a label')
+    assert.match(running, /dsh-dschat-think-live-prefix/, 'whose prefix is its own element, so it cannot be clipped away')
+    assert.match(running, /再算一遍预算。/, 'and whose text is the newest part of the thought')
+    assert.equal(/dsh-dschat-think-label/.test(running), false, 'the plain 「已思考」 label does not also render')
+
+    /*
+     * 3. The open face, reached the way the browser pass reaches it: a row the
+     * reader opened while it was running, then the duration arrives (`thinkingMs`
+     * stamped, `streaming` still true for the rest of the reply). The open face
+     * is what is on screen, and the summary line is NOT beside it.
+     *
+     * A static render produces the INITIAL (closed) state only, so this drives
+     * the FACE directly through the same props the open row carries — see the
+     * `expanded` fixture the browser pass also uses.
      */
     const expanded = renderToStaticMarkup(createElement(Thinking, {
       source: '先看约束：迁移过去的上下文必须自洽。\n\n再算一遍预算。',
       label: '思考中…',
       liveLabel: '思考中：',
       streaming: true,
+      defaultOpen: true,
     } as never))
-    assert.match(expanded, BODY, 'the running thought shows its text')
+    assert.match(expanded, BODY, 'the opened thought shows its text')
     assert.match(expanded, /data-open="true"/, 'the row says it is open')
     assert.equal(HEAD.test(expanded), false, 'and the summary line is NOT also on screen')
     assert.equal(/dsh-dschat-think-live/.test(expanded), false, 'so no live line is rendered either')
-    assert.equal(/思考中…/.test(expanded), false, 'nor the plain running label')
     assert.match(expanded, /先看约束：迁移过去的上下文必须自洽。/, 'the reasoning itself is what is on screen')
     assert.match(expanded, /role="button"/, 'the expanded body is its own collapse control')
     assert.match(expanded, /aria-expanded="true"/, 'and reports itself as expanded')
-
-    /*
-     * 3. The transition that produced the bug, reached the way it actually
-     * happens: a row that was ALREADY open (the reader watched it think, or
-     * clicked the line) when the duration arrives. That is the reported frame —
-     * the engine stamps `thinkingMs` on the first tick that carries an answer,
-     * while `streaming` is still true for the rest of the reply, so the row is
-     * open and finished at the same time.
-     *
-     * A static render only produces the INITIAL state, and this transition lives
-     * in an effect — so it is driven for real in the browser pass
-     * (scripts/ui-shot.mjs, which clicks the line and screenshots both faces).
-     * What is pinned here is the part markup decides: the open face can never
-     * carry the summary line, whichever way it was opened and whatever the
-     * duration says.
-     */
-    const finishing = renderToStaticMarkup(createElement(Thinking, {
-      source: '先看约束，再算一遍。',
-      label: '已思考（用时 12 秒）',
-      liveLabel: '思考中：',
-      streaming: true,
-    } as never))
-    assert.equal(HEAD.test(finishing), false, 'the moment a thought ends, its line does not come back beside the text')
-    assert.match(finishing, BODY, 'the text stays where it was')
 
     // 4. Recovered from the web: no timing to claim, and nothing to watch. This
     // must NOT be mistaken for the live state — it is a finished thought whose
@@ -1330,7 +1571,7 @@ test('the transfer reports a navigation the shell could not take', async () => {
    */
   assert.match(
     panel,
-    /if \(!popOpen\) \{\s*setTransferTarget\('new'\)/,
+    /if \(!transferOpen\) \{\s*setTransferTarget\('new'\)/,
     'opening the transfer popover always starts from "新建会话"',
   )
 })

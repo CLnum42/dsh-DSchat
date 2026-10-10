@@ -102,99 +102,181 @@ export const PANEL_CSS = `
   border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
 /*
- * The header is one nowrap row with no wrap point, so a window too narrow for
- * it must take the space from somewhere instead of pushing the right-hand
- * actions off the edge. The spacer — the run of empty, draggable space — gives
- * up its width first, and it is the only thing that can: everything else in the
- * row is a control the reader needs. The status sentence that used to ellipsize
- * here is a tooltip now, so there is nothing left to truncate.
+ * The header is the product mark and the state lamp, and nothing else.
+ *
+ * The three window controls that used to live here — plus 「在 Harness 中继续」
+ * and 「···」 — moved out: the first three into the action row above the
+ * composer, and the menu onto the lamp. What is left is a fixed 52px strip that
+ * carries the window's drag region (see the panel's own note on the
+ * data-window-drag attribute) and two things a reader needs in every state:
+ * what this panel IS, and whether its engine is up.
  */
-/*
- * The header's product mark, and the panel's state lamp.
- *
- * It replaced the panel name and a status chip. The NAME was redundant — the
- * sidebar row and the document title already say DSchat, and this was the third
- * copy. The CHIP was worse than redundant: 「● 已就绪 · deepseek-reasoner」 was
- * drawn at the window controls' own height and radius, one gap away from them,
- * so it read as a fourth button in that row and did nothing when clicked.
- *
- * The colour is therefore not decoration, it is the whole readout:
- *
- *   grey   nothing is running (or the browser is up but nobody is signed in)
- *   blue   the web engine is usable — 「已就绪」
- *   amber → red while it settles into a usable/unusable state
- *   red    the engine reported an error, which must NOT look like a plain stop
- *
- * The stale chip's sentence survives as this button's tooltip, and as its
- * accessible name, so the state is never carried by colour alone.
- *
- * A fixed box in every state — same width, same height, same glyph — so the
- * three controls beside it never shift by a pixel when the engine changes
- * state. That was the one real hazard of putting a live indicator in a toolbar.
- */
-.dsh-dschat-whale {
-  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
-  border: none; border-radius: 8px; background: transparent; cursor: pointer;
-  color: var(--dsw-alias-state-idle-primary);
+.dsh-dschat-header {
+  flex: none; height: 52px; display: flex; align-items: center; gap: 8px;
+  padding-block: 0;
+  padding-inline: max(14px, var(--dsh-frame-leading-clearance, 0px)) 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
-.dsh-dschat-whale:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.dsh-dschat-whale[data-phase="ready"] { color: var(--dsw-alias-state-business-primary); }
-.dsh-dschat-whale[data-phase="launching"] { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dschat-whale[data-phase="need-login"] { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dschat-whale[data-phase="error"] { color: var(--dsw-alias-state-error-primary); }
 /*
- * Busy states breathe instead of changing colour: "working" is motion, not a
- * different condition, and a third blue would be indistinguishable from ready.
- * Opacity only — an animated transform on the mark would resize the toolbar row
- * every frame while a reply streams.
+ * The product mark: the whale, then the name.
+ *
+ * Neither is a control. The whale used to be a button that started the engine,
+ * which nobody could have guessed from a logo; the name was absent entirely
+ * (the panel's own name was judged redundant against the sidebar row). With the
+ * header reduced to identity + status, the name earns its place: it is the only
+ * thing that says WHICH product this column is talking to, and the sidebar row
+ * does not — it is called DSchat, and this header says DeepSeek Chat.
  */
-.dsh-dschat-whale[data-phase="thinking"],
-.dsh-dschat-whale[data-phase="streaming"] { color: var(--dsw-alias-state-business-primary); }
-.dsh-dschat-whale[data-phase="thinking"] svg,
-.dsh-dschat-whale[data-phase="streaming"] svg { animation: dsh-dschat-breathe 1.6s ease-in-out infinite; }
+.dsh-dschat-brand {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  color: var(--dsw-alias-state-business-primary);
+}
+.dsh-dschat-brand svg { display: block; }
+.dsh-dschat-brand-name {
+  font-size: 13.5px; font-weight: 500; line-height: 1;
+  color: var(--dsw-alias-label-primary); white-space: nowrap;
+}
+
+/*
+ * The state lamp.
+ *
+ * A 7px dot in a 22px hit box — the dot is the readout, the box is the target,
+ * and they are different sizes on purpose: a 7px click target would be a
+ * misfire, and a 22px dot would be a button pretending to be a status light.
+ *
+ * FOUR COLOURS, and the mapping is chosen so that no two of them mean the same
+ * thing to a reader deciding whether to wait (see lampTone in the panel):
+ *
+ *   green  running (ready, and breathing while thinking/streaming)
+ *   amber  starting up, or up but signed out — "wait, or click me"
+ *   red    the engine reported an error, which must not read as a plain stop
+ *   grey   nothing is running
+ *
+ * The colour is never the only channel: the button's title and aria-label
+ * carry the whole sentence (「已就绪 · deepseek-reasoner」, 「引擎错误：…」), and
+ * the menu it opens repeats that sentence as its heading.
+ *
+ * data-tone is what the stylesheet reads, not data-phase: the five phases
+ * collapse to four lamps in the panel, so the colour decision lives there and
+ * the sheet only paints the result.
+ */
+.dsh-dschat-lamp {
+  width: 22px; height: 22px; flex: none; display: grid; place-items: center;
+  border: none; border-radius: 50%; background: transparent; cursor: pointer;
+}
+.dsh-dschat-lamp:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dschat-lamp > i,
+.dsh-dschat-lamp-dot {
+  width: 7px; height: 7px; border-radius: 50%; display: block; flex: none;
+  background: var(--dsw-alias-state-idle-primary);
+}
+.dsh-dschat-lamp[data-tone="green"] > i,
+.dsh-dschat-lamp-dot[data-tone="green"] { background: var(--dsw-alias-state-success-primary); }
+.dsh-dschat-lamp[data-tone="amber"] > i,
+.dsh-dschat-lamp-dot[data-tone="amber"] { background: var(--dsw-alias-state-warn-primary); }
+.dsh-dschat-lamp[data-tone="red"] > i,
+.dsh-dschat-lamp-dot[data-tone="red"] { background: var(--dsw-alias-state-error-primary); }
+/*
+ * Busy states breathe instead of changing hue: "working" is motion, not a
+ * different condition, and a second green (or a blue) would be
+ * indistinguishable from ready at 7px.
+ */
+.dsh-dschat-lamp[data-phase="thinking"] > i,
+.dsh-dschat-lamp[data-phase="streaming"] > i { animation: dsh-dschat-breathe 1.6s ease-in-out infinite; }
 @keyframes dsh-dschat-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) {
-  .dsh-dschat-whale svg { animation: none !important; }
+  .dsh-dschat-lamp > i { animation: none !important; }
 }
 .dsh-dschat-spacer { flex: 1; min-width: 8px; }
 
 /*
- * The header's window controls: 会话列表 / 搜索 / 新建对话.
- *
- * The web app's own header buttons, measured on the live page: a 34px square,
- * a 16px glyph, a secondary/tertiary grey label, and a hover wash that is the
- * only thing marking it as a button until you touch it. Same shape here, so the
- * three controls read as top-level chrome rather than as three more entries in
- * the panel's button family (which is what a 28px labelled button would have
- * said).
- *
- * The pressed state ('.dsh-dschat-hbtn-on') is the web app's own "selected"
- * tint: a light accent wash with an accent glyph, NOT the raised-fill
- * treatment, so it stays legible in both themes.
+ * The lamp's menu wrapper. The 230px panel overhangs its trigger to the LEFT —
+ * the lamp sits at the header's left edge, so a right-anchored panel would hang
+ * off the window — with a narrow-column fallback that lets it out the other
+ * side instead. Both anchor rules live in the popover block below, next to the
+ * shared .dsh-dschat-pop they modify, rather than up here in the header.
  */
-.dsh-dschat-hbtns { display: flex; align-items: center; gap: 2px; flex: none; }
+.dsh-dschat-lamp-wrap { position: relative; flex: none; }
+/* The status sentence, repeated where the reader asked what the colour means. */
+.dsh-dschat-lamp-status {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 4px; padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  font-size: 12.5px; color: var(--dsw-alias-label-secondary);
+}
+
 /*
- * The hairline that used to sit between the window controls and the panel's
- * status chrome is GONE with the chrome: it existed to stop the three glyph
- * buttons blending into the status pill that trailed them, and that pill is now
- * a tooltip on the whale. A divider with nothing on the far side separates
- * nothing.
+ * The action row: 会话列表 / 搜索 / 新对话 on the left, 「⇄ DSH 迁移」 at the
+ * right end — directly above the composer's card, and outside it.
+ *
+ * All four wear the same treatment (see .dsh-dschat-tbtn below): the harness's
+ * own composer buttons, whose language the input card one line down already
+ * speaks. The three left buttons were 34px glyph-only squares — the web app's
+ * own header controls — and that shape was the problem: a square with a glyph
+ * in it is a control the reader has to already know, and this row is the ONE
+ * place anyone looks for 「新对话」 or 「会话列表」. Naming them costs about
+ * 180px of a row that has the space.
+ *
+ * The hairline on top is what separates the row from the transcript: it acts on
+ * the conversation above, so it belongs to it, but it must not read as part of
+ * the last message.
  */
-.dsh-dschat-hbtn {
-  width: 34px; height: 34px; flex: none; display: grid; place-items: center;
-  border: none; border-radius: 8px; background: transparent; cursor: pointer;
-  color: var(--dsw-alias-label-secondary);
+.dsh-dschat-actions {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 0 8px; margin-bottom: 2px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
 }
-.dsh-dschat-hbtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dschat-hbtn:disabled { opacity: .5; cursor: not-allowed; background: transparent; }
-.dsh-dschat-hbtn-on {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, transparent);
-  color: var(--dsw-alias-state-business-primary);
+/*
+ * The row's buttons — and the 「···」 at the title bar's right end, which is the
+ * same control in a different strip.
+ *
+ * This is the shape the row's neighbours speak: the input card directly below
+ * carries 深度思考 / 智能搜索 / 附件 as quiet pills with a glyph and a label, and
+ * the row above it should not speak a second language. So 「DSH 迁移」 is no
+ * longer a blue CHIP: a filled primary pill one line above a card whose own
+ * primary action is a 16px accent circle was competing with the send button for
+ * the reader's eye, and it was the widest, loudest thing in the row.
+ *
+ * Rest is therefore transparent, in label-secondary — the same as the harness's
+ * own toolbar buttons — so the row reads as one strip. The accent comes back in
+ * the two places it MEANS something: hover (this is a live control) and PRESSED
+ * (this button owns the panel on screen now, or this toggle is on). Both are
+ * tints of the accent token rather than members of the button-primary-* family,
+ * which inverts with the theme and goes white in dark mode — see the note on
+ * .dsh-dschat-btn-primary.
+ */
+.dsh-dschat-tbtn {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: 28px; padding: 0 9px; border-radius: var(--dschat-radius-sm);
+  border: 1px solid transparent; background: transparent; cursor: pointer;
+  white-space: nowrap; font-size: 13px; color: var(--dsw-alias-label-secondary);
 }
-.dsh-dschat-hbtn-on:hover {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent);
-  color: var(--dsw-alias-state-business-primary);
+.dsh-dschat-tbtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-tbtn-on {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 32%, transparent);
+  color: var(--dsw-alias-label-primary);
 }
+.dsh-dschat-tbtn-on:hover {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+/*
+ * This button's own two marks: a glyph, and (on 迁移) the disclosure caret.
+ *
+ * Both are spans rather than bare SVGs so the flex gap above can space them:
+ * a bare text node beside an icon has no box to be spaced by. The caret box
+ * exists to be ROTATED — it is a plain span wrapping the 11px glyph, and turning
+ * it around while the panel is open is the standard "this opened upward" cue. A
+ * CSS transform on an inline box does nothing, hence the display:grid.
+ */
+.dsh-dschat-tbtn-glyph { display: grid; place-items: center; flex: none; }
+.dsh-dschat-tbtn-caret { display: grid; place-items: center; flex: none; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-tbtn[aria-expanded='true'] .dsh-dschat-tbtn-caret { transform: rotate(180deg); }
+@media (prefers-reduced-motion: no-preference) {
+  .dsh-dschat-tbtn-caret { transition: transform .16s ease; }
+}
+/* A disabled toolbar button keeps its glyph and loses its colour. */
+.dsh-dschat-tbtn:disabled { opacity: .5; cursor: not-allowed; background: transparent; border-color: transparent; }
 /* ---------- buttons ---------- */
 .dsh-dschat-btn {
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
@@ -728,6 +810,51 @@ body[data-ds-dark-theme] .dsh-dschat-card {
 }
 .dsh-dschat-chip button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 /*
+ * The one control on a HISTORY message's attachment chip: an anchor to the
+ * host's read-back route.
+ *
+ * Only images get it — a 24 MiB screenshot filed under a paperclip is a file
+ * the reader cannot check without leaving the panel, and opening it is exactly
+ * what they were about to do by hand with the path. Text and PDF chips keep
+ * their name and nothing else, because opening one in a browser tab is not the
+ * same gesture.
+ */
+.dsh-dschat-chip-view {
+  width: 18px; height: 18px; display: grid; place-items: center; border-radius: 4px; flex: none;
+  color: var(--dsw-alias-label-tertiary); text-decoration: none; font-size: 11px; line-height: 1;
+}
+.dsh-dschat-chip-view:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+/*
+ * 图片附件：the thumbnail in the composer.
+ *
+ * The picture IS the chip, so this box is sized rather than hugged: an image's
+ * intrinsic size varies from a 12px favicon to a 6000px screenshot, and a row
+ * of attachments that resized itself per file would push the textarea around on
+ * every paste. object-fit: cover crops instead, which keeps the 56px square
+ * meaningful as "what this is" rather than "all of it".
+ *
+ * The remove button floats over the top-right corner, so it does not take a
+ * column of width from the picture. It gets a dark scrim because the corner it
+ * sits on can be any colour the reader attached.
+ */
+.dsh-dschat-thumb {
+  position: relative; width: 56px; height: 56px; flex: none;
+  border-radius: var(--dschat-radius-sm); overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dsh-dschat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dsh-dschat-thumb button {
+  position: absolute; top: 2px; right: 2px; width: 17px; height: 17px; padding: 0;
+  display: grid; place-items: center; border: none; border-radius: 50%; cursor: pointer;
+  background: color-mix(in srgb, #000 58%, transparent); color: #fff;
+  font-size: 10px; line-height: 1; opacity: 0;
+}
+/* Visible on hover, and on keyboard focus, so it is reachable without a mouse. */
+.dsh-dschat-thumb:hover button,
+.dsh-dschat-thumb button:focus-visible { opacity: 1; }
+.dsh-dschat-thumb button:hover { background: color-mix(in srgb, #000 78%, transparent); }
+/*
  * The composer's height is driven by the panel (see resizeComposer): it is set
  * to the content's own height, clamped to the max-height below. Both numbers
  * here are therefore load-bearing — min-height is what an empty box measures,
@@ -742,16 +869,21 @@ body[data-ds-dark-theme] .dsh-dschat-card {
 }
 .dsh-dschat-input::placeholder { color: var(--dsw-alias-label-tertiary); }
 /*
- * The composer is readOnly (not disabled) while the engine is down, so that
- * focusing it can start the engine. Read-only must therefore LOOK inviting:
- * a pointer cursor and an accent-tinted placeholder so it reads as an
- * affordance rather than as broken input, plus a faint wash on the card.
- */
-.dsh-dschat-input:read-only { cursor: pointer; }
-.dsh-dschat-input:read-only::placeholder { color: var(--dsw-alias-link); }
-/*
- * The read-only "start me" wash.
+ * The engine is down: the field still TYPES, so it must not look broken — but
+ * the reader should also know that what they write will start a browser.
  *
+ * The marker is an attribute on the card (data-engine="off"), not a state of
+ * the textarea. The textarea no longer has a read-only state to key off: it is
+ * an ordinary editable field in every engine state (:read-only used to carry
+ * this and no longer exists), and an accent-tinted PLACEHOLDER is the whole
+ * affordance — no pointer cursor, because a text field's cursor is the text
+ * cursor, and no "start me" wash on the card, because the card is not a button.
+ *
+ * The wash itself is kept at a whisper for the one thing it still says: the
+ * accent hairline marks the field as "this will start the page for you".
+ */
+.dsh-dschat-card[data-engine="off"] .dsh-dschat-input::placeholder { color: var(--dsw-alias-link); }
+/*
  * It was a 5% mix of the accent over the card in both themes, and 5% of a dark
  * navy over a #232324 card is not a wash — it is a bruise: the card went muddy
  * grey-blue and the accent it was supposed to advertise disappeared into it.
@@ -760,14 +892,38 @@ body[data-ds-dark-theme] .dsh-dschat-card {
  * instead of being swallowed by it. The border does the advertising in the dark
  * branch anyway — an accent hairline is legible where a 5% fill is not.
  */
-.dsh-dschat-card:has(.dsh-dschat-input:read-only) {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 5%, var(--dsw-alias-bg-layer-1));
+.dsh-dschat-card[data-engine="off"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 3%, var(--dsw-alias-bg-layer-1));
   border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, var(--dsw-alias-border-l1));
 }
-body[data-ds-dark-theme] .dsh-dschat-card:has(.dsh-dschat-input:read-only) {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, var(--dsw-alias-bg-layer-1));
+body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, var(--dsw-alias-bg-layer-1));
   border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, var(--dsw-alias-border-l3));
 }
+/*
+ * The queue: messages typed while the previous turn is still generating.
+ *
+ * Between the box and the tool row, one line each, dimmed — they are not part
+ * of the conversation yet, and they must not look like they are. The row is
+ * capped so a long paragraph does not push the tool row off screen; the whole
+ * text is in the tooltip and back in the box the moment it is cancelled.
+ */
+.dsh-dschat-queue { display: flex; flex-direction: column; gap: 4px; padding: 0 14px 4px; }
+.dsh-dschat-queue-item {
+  display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 4px 0 8px;
+  border-radius: var(--dschat-radius-sm); font-size: 12px;
+  background: var(--dsw-alias-bg-layer-2); border: 1px dashed var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-dschat-queue-mark { flex: none; font-size: 11px; }
+.dsh-dschat-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dschat-queue-files { flex: none; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-queue-item button {
+  width: 18px; height: 18px; flex: none; display: grid; place-items: center; border: none; border-radius: 4px;
+  background: transparent; cursor: pointer; color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dschat-queue-item button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-queue-note { padding-left: 2px; font-size: 11.5px; color: var(--dsw-alias-label-tertiary); }
 /*
  * The composer's tool row, on the page's own metrics: 12px of padding on every
  * side, a 4px gap between controls, and 34px-tall controls in it. 'flex-wrap' is
@@ -984,14 +1140,104 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
 .dsh-dschat-phase b { font-weight: 600; color: var(--dsw-alias-label-secondary); }
 .dsh-dschat-phase .dsh-dschat-spin { width: 11px; height: 11px; }
 
-/* transfer popover */
-.dsh-dschat-pop-wrap { position: relative; }
+/*
+ * The wrapper AROUND each trigger: the panel's containing block, and therefore
+ * its anchor.
+ *
+ * Two properties here are mechanisms, not tidying:
+ *
+ *   position:relative  makes the box the containing block at all. Standing the
+ *                      wrapper BESIDE the trigger instead of around it is the
+ *                      bug the lamp already paid for once (a zero-width sibling
+ *                      that the header's flex spacer had pushed to the far edge
+ *                      put a 230px panel at x=1266, hundreds of pixels from the
+ *                      dot that opened it).
+ *   align-self:center  keeps that box the size of the TRIGGER. As a flex item of
+ *                      the action row it would otherwise STRETCH to the row's
+ *                      height — 36px, set by the 34px glyph buttons beside it —
+ *                      and the panel's bottom offset would then measure from 8px
+ *                      below the button's own bottom rather than from its top,
+ *                      opening at a gap that changes with the row. Measured:
+ *                      stretched, the panel landed 36px above its trigger's top
+ *                      instead of 8px.
+ */
+.dsh-dschat-pop-wrap { position: relative; display: flex; align-items: center; align-self: center; width: auto; }
+/*
+ * Panels open UPWARD, because the triggers are on the composer's action row —
+ * the bottom of the panel.
+ *
+ * They used to hang below (top: 36px), which was wrong twice over once the
+ * action row moved here: the 迁移 panel covered the input card the reader was
+ * about to type in (it grew down over the textarea and the tool row, i.e. the
+ * thing the button exists to act on), and it had to fit in the space between
+ * the card and the phase line, which it does not. Upward, it opens over the
+ * TRANSCRIPT — the content the reader is looking at to decide what to migrate —
+ * and its height is limited by the thread above rather than by the composer
+ * below.
+ *
+ * The calc(100% + 8px) bottom offset measures from the anchor's top edge — the
+ * trigger's own top, since the wrapper is exactly its size — so the 8px gap is
+ * between panel and button in every state. No top offset is declared at all:
+ * with both offsets set, an absolutely positioned box with a height would
+ * stretch between them.
+ */
 .dsh-dschat-pop {
-  position: absolute; top: 36px; right: 0; width: 348px; z-index: 40; padding: 12px;
+  position: absolute; bottom: calc(100% + 8px); right: 0; width: 348px; z-index: 40; padding: 12px;
   border-radius: var(--dschat-radius-lg);
   background: var(--dschat-surface); backdrop-filter: var(--dsw-menu-backdrop-filter, blur(28px) saturate(160%));
   border: 1px solid var(--dschat-surface-border);
   box-shadow: var(--dsw-elevation-prominent, 0 16px 40px #00000024, 0 2px 8px #00000014);
+}
+/*
+ * The 「···」 menu: a short list, so 348px of form would be a slab. Right
+ * anchored like everything else on this row; a column too narrow to hold it
+ * lets it out from the other side.
+ */
+.dsh-dschat-pop-menu { width: 230px; padding: 6px; }
+@media (max-width: 620px) {
+  .dsh-dschat-pop-menu { right: auto; left: 0; }
+}
+/*
+ * A menu row. A full-width left-aligned button rather than a .dsh-dschat-btn
+ * with inline width/justify-content — the inline style was the only reason
+ * these could not be styled as a list (they had no padding of their own, no
+ * state colour, and no full-bleed hit area).
+ */
+.dsh-dschat-menu-item {
+  display: flex; align-items: center; width: 100%; height: 30px; padding: 0 8px;
+  border: none; border-radius: var(--dschat-radius-sm); background: transparent; cursor: pointer;
+  font-size: 13px; color: var(--dsw-alias-label-secondary); text-align: left;
+}
+.dsh-dschat-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+/*
+ * Everything anchored in the TITLE BAR opens DOWNWARD.
+ *
+ * Upward is a rule about the composer's row (see the note on .dsh-dschat-pop):
+ * a trigger at the bottom of the panel must open into the transcript above it.
+ * Both of the header's triggers — the state lamp and the 「···」 — are at the TOP
+ * instead, so that rule would open their panels 30px off the ceiling: measured,
+ * the lamp's landed at y=-35, i.e. above the window. A trigger in the top strip
+ * opens into the conversation below, which is the half of the screen with room
+ * in it.
+ *
+ * Declaring it ONCE for the strip is deliberate: the rule belongs to the strip,
+ * not to either button, and the next control added up here then cannot get it
+ * wrong. The top:auto declaration is not decoration — the shared rule sets a bottom offset,
+ * and a box with both offsets set is stretched between them rather than
+ * positioned.
+ */
+.dsh-dschat-header .dsh-dschat-pop { bottom: auto; top: calc(100% + 8px); }
+/*
+ * The lamp's panel hangs to the LEFT of its trigger, which is the strip's
+ * leftmost control — a right-anchored panel there would run off the window. A
+ * column too narrow for the overhang lets it out the right side instead.
+ */
+.dsh-dschat-lamp-wrap { position: relative; flex: none; display: flex; align-items: center; }
+.dsh-dschat-lamp-wrap > .dsh-dschat-pop { width: 230px; right: auto; left: 0; padding: 10px; }
+/* A one-line panel: the sentence is the whole content, so its own margins go. */
+.dsh-dschat-pop-status .dsh-dschat-lamp-status { margin: 0; padding: 0; border-bottom: none; }
+@media (max-width: 620px) {
+  .dsh-dschat-lamp-wrap > .dsh-dschat-pop { left: auto; right: 0; }
 }
 /*
  * Host rule for menus: light menus keep the border-l1 hairline, dark menus
@@ -1038,26 +1284,25 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-prog { height: 3px; border-radius: 99px; background: var(--dsw-alias-bg-skeleton); overflow: hidden; margin: 2px 0 4px; }
 .dsh-dschat-prog > i { display: block; height: 100%; width: 0; background: var(--dsw-alias-state-business-primary); transition: width .3s ease; }
 
-/* ---------- settings page (settings.section slot) ---------- */
-.dsh-dschat-settings {
-  height: 100%; overflow: auto; padding: 28px clamp(24px, 4vw, 48px) 48px;
-  display: block;
-}
+/* ---------- run-status card (panel modal, not a settings page) ---------- */
+.dsh-dschat-status { display: block; }
 .dsh-dschat-sethead h1 { margin: 0 0 4px; font-size: 20px; font-weight: 500; line-height: 28px; }
 .dsh-dschat-sethead p { margin: 0 0 20px; font-size: 13px; color: var(--dsw-alias-label-secondary); max-width: 640px; }
 .dsh-dschat-setcard {
-  max-width: 720px; margin: 0 0 16px; padding: 14px 16px;
+  margin: 0 0 12px; padding: 12px 14px;
   border-radius: var(--dschat-radius-lg);
   background: var(--dsw-alias-bg-layer-2);
   border: 1px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2));
 }
+.dsh-dschat-status .dsh-dschat-sethead h1 { font-size: 15px; font-weight: 600; line-height: 22px; }
+.dsh-dschat-status .dsh-dschat-sethead p { margin: 0 0 12px; max-width: none; }
 .dsh-dschat-setcard h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
 .dsh-dschat-setrow {
   display: flex; align-items: baseline; gap: 16px; padding: 5px 0;
   border-top: 1px solid var(--dsw-alias-border-l1);
 }
 .dsh-dschat-setrow:first-of-type { border-top: none; }
-.dsh-dschat-setlabel { flex: none; width: 190px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.dsh-dschat-setlabel { flex: none; width: 150px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
 .dsh-dschat-setvalue {
   flex: 1; min-width: 0; font-size: 12.5px; color: var(--dsw-alias-label-primary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1067,7 +1312,49 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-on { color: var(--dsw-alias-state-success-primary); }
 .dsh-dschat-off { color: var(--dsw-alias-label-tertiary); }
 .dsh-dschat-setactions { display: flex; gap: 8px; }
-.dsh-dschat-sethint { margin: 10px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); max-width: 620px; }
+.dsh-dschat-sethint { margin: 10px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }
+
+/* ---------- engine notice (in the transcript) ---------- */
+/*
+ * 「网页端没有就绪」, at the end of the conversation.
+ *
+ * Not a toast: it is a state, not an event — it stays until the page is up, and
+ * the button that fixes it is on the card. Tinted with the WARNING state rather
+ * than the error one, because the message it concerns is not lost (it goes back
+ * into the composer or waits in the queue) and the common cause is mundane.
+ */
+.dsh-dschat-notice {
+  display: flex; align-items: flex-start; gap: 10px; margin: 14px 0 4px; padding: 12px 14px;
+  border-radius: var(--dschat-radius-lg);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, var(--dsw-alias-border-l3)) 45%, var(--dsw-alias-border-l2));
+}
+.dsh-dschat-notice-mark {
+  flex: none; display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px;
+  color: var(--dsw-alias-state-warn-primary, var(--dsw-alias-label-secondary));
+}
+.dsh-dschat-notice-body { flex: 1; min-width: 0; }
+.dsh-dschat-notice-body strong { display: block; font-size: 13px; font-weight: 600; }
+.dsh-dschat-notice-body p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--dsw-alias-label-secondary); word-break: break-word; }
+.dsh-dschat-notice-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+
+/* ---------- 运行状态 modal ---------- */
+.dsh-dschat-modal {
+  position: absolute; inset: 0; z-index: 55; display: grid; place-items: center;
+  background: color-mix(in srgb, #000 42%, transparent); padding: 24px;
+}
+.dsh-dschat-modal-card {
+  position: relative; width: min(640px, 100%); max-height: 100%; overflow: auto;
+  padding: 18px 20px 20px; border-radius: var(--dschat-radius-lg);
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l3);
+  box-shadow: 0 18px 48px #0000003d;
+}
+.dsh-dschat-modal-close {
+  position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
+  display: grid; place-items: center; border: none; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dschat-modal-close:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 
 /* ---------- toasts ---------- */
 .dsh-dschat-toasts {

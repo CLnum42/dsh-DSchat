@@ -321,13 +321,31 @@ function fakeRequest(body: unknown, host = '127.0.0.1:19387', address = '127.0.0
   }
 }
 
-/** A minimal ServerResponse stand-in capturing status + parsed JSON body. */
+/**
+ * A minimal ServerResponse stand-in capturing status, headers, and the body.
+ *
+ * The body has two arms, and both are needed. The JSON routes answer with a
+ * string, which is parsed and exposed as `body`; the attachment route answers
+ * the stored FILE, so its Buffer is exposed as `bytes` — a fake that parsed
+ * everything as JSON could not tell whether those bytes ever arrived.
+ */
 function fakeResponse() {
-  const captured: { status: number; body: any } = { status: 0, body: undefined }
+  const captured: {
+    status: number
+    body: any
+    bytes: Buffer
+    headers: Record<string, string>
+  } = { status: 0, body: undefined, bytes: Buffer.alloc(0), headers: {} }
   return {
     captured,
-    writeHead(status: number) { captured.status = status },
-    end(payload: string) { captured.body = JSON.parse(payload) },
+    writeHead(status: number, headers?: Record<string, string>) {
+      captured.status = status
+      if (headers !== undefined) captured.headers = headers
+    },
+    end(payload: string | Buffer) {
+      if (typeof payload === 'string') captured.body = JSON.parse(payload)
+      else captured.bytes = payload
+    },
   }
 }
 
@@ -356,12 +374,96 @@ test('attach route persists pasted image bytes and returns a real path', async (
     assert.match(res.captured.body.path, /attachments\/.*\.png$/)
     assert.ok(res.captured.body.path.startsWith(dataDir), 'attachment lands under the plugin data dir')
     assert.deepEqual(readFileSync(res.captured.body.path), bytes)
+    /*
+     * The stored name keeps the reader's own file name, after the UUID.
+     *
+     * It used to be a bare `${randomUUID}${ext}`, which is what the composer
+     * then printed as the chip's label — the reported 「一串数字」. The UUID must
+     * still lead (it is the uniqueness guarantee) and the extension must still
+     * be last, so this pins the whole shape, not just "contains the name".
+     */
+    const file = res.captured.body.path.split('/').pop()
+    assert.match(file, /^[0-9a-f-]{36}__screenshot\.png$/, 'uuid, then the readable name, then the extension')
+    assert.equal(res.captured.body.name, 'screenshot.png', 'and the bare name is handed back for the chip')
 
     // An empty body is a caller error, not a crash.
     const bad = fakeResponse()
     await attach.handler(fakeRequest({ name: 'x.png', mediaType: 'image/png', data: '' }), bad)
     assert.equal(bad.captured.status, 400)
     assert.equal(bad.captured.body.ok, false)
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+/**
+ * The read-back route: the composer's thumbnails, and the fence around them.
+ *
+ * Three things are being pinned, and each one is a bug that is invisible without
+ * a test:
+ *
+ *   · the bytes come back (a broken route means every chip in the composer
+ *     renders a broken image, and the panel cannot tell that from a pruned file);
+ *   · the media type follows the EXTENSION, so an image is served as an image
+ *     and a document does not pretend to be one;
+ *   · a path outside the attachment directory is refused — this route reads
+ *     from disk, and `?path=/etc/passwd` must be a 404 rather than a file.
+ */
+test('attachment route serves stored bytes and refuses anything outside the directory', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-attachment-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+
+    const attach = (routes as Route).find(route => route.path === '/api/dsh-dschat/attach')
+    const serve = (routes as Route).find(route => route.path === '/api/dsh-dschat/attachment')
+    assert.ok(attach !== undefined && serve !== undefined, 'both attachment routes registered')
+
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02])
+    const stored = fakeResponse()
+    await attach.handler(fakeRequest({ name: '季度 经营 分析.png', mediaType: 'image/png', data: bytes.toString('base64') }), stored)
+    const path = stored.captured.body.path as string
+    assert.match(path, /__季度 经营 分析\.png$/, 'the label is the reader\'s own name, extension outside it, spaces and all')
+
+    const ok = fakeResponse()
+    await serve.handler(
+      fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/attachment?path=${encodeURIComponent(path)}`),
+      ok,
+    )
+    assert.equal(ok.captured.status, 200)
+    assert.equal(ok.captured.headers['content-type'], 'image/png', 'the extension decides the media type')
+    assert.equal(ok.captured.headers['content-length'], String(bytes.length))
+    assert.match(ok.captured.headers['content-disposition'] ?? '', /filename\*=UTF-8''/, 'the download name is the readable one')
+    assert.deepEqual(ok.captured.bytes, bytes, 'and the stored bytes are what came back')
+
+    // A path outside the attachment directory is never read.
+    const outside = fakeResponse()
+    await serve.handler(
+      fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/attachment?path=${encodeURIComponent('/etc/hosts')}`),
+      outside,
+    )
+    assert.equal(outside.captured.status, 404, 'a path outside the attachment directory is refused')
+
+    // A file that was pruned, and a request that named nothing at all.
+    const missing = fakeResponse()
+    await serve.handler(
+      fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', `/api/dsh-dschat/attachment?path=${encodeURIComponent(join(dataDir, 'attachments', 'gone.png'))}`),
+      missing,
+    )
+    assert.equal(missing.captured.status, 404)
+    const unnamed = fakeResponse()
+    await serve.handler(fakeRequest(undefined, '127.0.0.1:19387', '127.0.0.1', '/api/dsh-dschat/attachment'), unnamed)
+    assert.equal(unnamed.captured.status, 400)
+
+    // And the same loopback fence as every other route in the family.
+    const remote = fakeResponse()
+    await serve.handler(
+      fakeRequest(undefined, '192.168.1.9:19387', '192.168.1.9', `/api/dsh-dschat/attachment?path=${encodeURIComponent(path)}`),
+      remote,
+    )
+    assert.equal(remote.captured.status, 403)
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     dispose()
@@ -1566,7 +1668,25 @@ test('recovered markdown is not mangled by the HTML converter', async () => {
     rmSync(dataDir, { recursive: true, force: true })
   }
 })
-test('the composer stays focusable when the engine is down', async () => {
+/**
+ * The composer is an ORDINARY text field.
+ *
+ * Both ways this box used to refuse the reader are pinned here, because each was
+ * reported as its own bug:
+ *
+ *   - `disabled` (the first version) dropped every pointer event — 「点击输入框
+ *     无反应」;
+ *   - `readOnly` (the fix for that) kept the caret but still refused TEXT: with
+ *     the web page down, or while a reply was streaming, the one control on
+ *     screen that looks like a text field could not hold a sentence. The reader
+ *     who pastes a screenshot and then wants to describe it had nowhere to type.
+ *
+ * So: neither attribute, in any engine state. What the gestures MEAN is decided
+ * by the handlers — clicking or focusing starts the page in the background
+ * (`onFocus` alone is not enough: clicking a box that is already focused fires
+ * no focus event, which is the second attempt after a failed start).
+ */
+test('the composer is editable in every engine state, and starting is a side effect', async () => {
   const { readFileSync } = await import('node:fs')
   const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
   const start = panel.indexOf("className: 'dsh-dschat-input'")
@@ -1576,20 +1696,133 @@ test('the composer stays focusable when the engine is down', async () => {
     /disabled:/.test(block), false,
     'the composer must not use `disabled`: that drops pointer events entirely, which is the reported "点击输入框无反应"',
   )
-  assert.ok(/readOnly:/.test(block), 'it uses readOnly instead')
+  assert.equal(
+    /readOnly:/.test(block), false,
+    'and it must not use readOnly either: the field has to accept text while the engine is down and while a reply streams',
+  )
   assert.ok(/onFocus:/.test(block), 'focusing it is wired to starting the engine')
+  assert.ok(/onClick:/.test(block), 'so is clicking it — a click on an already-focused box fires no focus event')
+  // Placeholder: the only thing that reports engine state in the field, and it
+  // never says "waiting for the reply" (requirement 2).
+  assert.equal(
+    /composer\.busy/.test(block), false,
+    'a running turn does not turn the composer into a status display',
+  )
+  /*
+   * The send control is armed by CONTENT, not by engine state: a message typed
+   * before the page is up, or during a reply, has to be submittable.
+   */
+  assert.ok(
+    /const canSend = draft\.trim\(\) !== '' \|\| images\.length > 0/.test(panel),
+    'send is armed by the draft, not by `loggedIn`/`busy`',
+  )
 })
 
-test('the offline composer explains itself and looks clickable', async () => {
+/**
+ * A start that fails explains itself IN THE CONVERSATION, with a retry.
+ *
+ * Reported: with the page down, the composer said nothing useful and the failed
+ * launch was a toast — gone before the reader looked back from the browser
+ * window, and with nothing to click. The notice is the fix: it renders at the
+ * end of the thread (both in an empty conversation and under the last message),
+ * it stays until the engine is up, and it carries the one action that can fix
+ * it. `force` matters: the automatic start is deliberately rate-limited after a
+ * failure, and the button must not be swallowed by that.
+ */
+test('a failed engine start reports itself in the conversation with a retry', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+
+  assert.ok(/const \[launchError, setLaunchError\] = useState/.test(panel), 'the failure is state, not a toast')
+  assert.match(panel, /dsh-dschat-notice/, 'it renders as a notice card')
+  assert.ok(
+    /engine\.notice\.retry/.test(panel) && /engine\.notice\.title/.test(panel),
+    'the notice is titled and carries a retry label',
+  )
+  // It is inside the thread — the conversation is where the failed message was.
+  const thread = panel.slice(panel.indexOf('function thread()'), panel.indexOf('function messageNode'))
+  assert.ok(thread.includes('engineNotice()'), 'the notice renders at the end of the transcript')
+  // The retry button forces the start past the failure cooldown.
+  const retry = panel.slice(panel.indexOf('const retryEngine'), panel.indexOf('const send ='))
+  assert.ok(/ensureReady\(\{ force: true \}\)/.test(retry), 'the retry button ignores the cooldown')
+  assert.ok(
+    /WAKE_RETRY_COOLDOWN_MS/.test(panel),
+    'the automatic start is rate-limited after a failure, so a dead engine is not relaunched per keystroke',
+  )
+  /*
+   * And the failure paths actually set it: one per way a start can go wrong
+   * (no answer at all, a host too old for /wake, and a page that wants a
+   * sign-in), each with its own sentence — a single generic "启动失败" would
+   * leave the reader with nothing to act on.
+   */
+  for (const key of ['engine.notice.unreachable', 'engine.notice.staleHost', 'engine.notice.needLogin']) {
+    assert.ok(panel.includes(`'${key}'`), `\`${key}\` is reported`)
+  }
+  assert.ok(
+    (panel.match(/setLaunchError\(/g) ?? []).length >= 4,
+    'every failure path (and the retry) touches the notice state',
+  )
+})
+
+/**
+ * A message written while a reply streams is QUEUED, not refused.
+ *
+ * The web page answers one question at a time, so a second send genuinely cannot
+ * go out immediately — but the reader is typing into an ordinary composer, and
+ * the old answers were both wrong: the engine refused it with BUSY, and the
+ * panel pre-empted that by disabling send (`!canSend`). The message now waits in
+ * the panel's own outbox and leaves when the turn ends.
+ */
+test('a message sent during a turn waits in the outbox instead of being refused', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+
+  assert.ok(/const \[outbox, setOutbox\] = useState<QueuedMessage\[\]>/.test(panel), 'the outbox exists')
+  const send = panel.slice(panel.indexOf('const send = useCallback'), panel.indexOf('const stop = useCallback'))
+  assert.ok(
+    /if \(busy \|\| streaming\) \{[\s\S]*?enqueue\(text, sentImages\)/.test(send),
+    'a send during a turn is queued rather than dropped',
+  )
+  assert.ok(
+    /outcome === 'busy'\) enqueue\(text, sentImages\)/.test(send),
+    'the engine saying BUSY (a stale panel snapshot) is queued too, not shown as an error',
+  )
+  // The queue drains itself when the turn ends, and only then.
+  const drain = panel.slice(panel.indexOf('const drainOutbox'), panel.indexOf('const send = useCallback'))
+  assert.ok(/if \(busy \|\| streaming\) return/.test(drain), 'the drain waits for the turn to end')
+  assert.ok(
+    /if \(launchError !== undefined\) return/.test(drain),
+    'and it stops retrying while a failure notice is up, so a dead engine cannot spin',
+  )
+  // It is visible and cancellable: a queue the reader cannot see is one they
+  // will type again.
+  assert.match(panel, /dsh-dschat-queue-item/, 'queued messages are rendered')
+  assert.ok(/composer\.queue\.cancel/.test(panel), 'and each row can be cancelled')
+})
+
+test('the offline composer explains itself without pretending to be a button', async () => {
   const { readFileSync } = await import('node:fs')
   const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
-  assert.ok(/\.dsh-dschat-input:read-only \{ cursor: pointer/.test(css), 'read-only shows a pointer cursor')
   assert.ok(
-    /\.dsh-dschat-card:has\(\.dsh-dschat-input:read-only\)/.test(css),
+    /\.dsh-dschat-card\[data-engine="off"\] \.dsh-dschat-input::placeholder/.test(css),
+    'the offline state tints the placeholder, which is what says "this will start the page"',
+  )
+  assert.ok(
+    /\.dsh-dschat-card\[data-engine="off"\] \{/.test(css),
     'the card is tinted while the engine is down',
+  )
+  assert.equal(
+    /\.dsh-dschat-input:read-only/.test(css), false,
+    'no rule keys off a read-only composer any more: the field has no such state',
+  )
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+  assert.ok(
+    /'data-engine': loggedIn === true && engineLive \? 'on' : 'off'/.test(panel),
+    'the panel sets the marker the stylesheet keys off',
   )
   const locales = readFileSync(join(root, 'src/client/locales.ts'), 'utf8')
   assert.ok(/composer\.offline/.test(locales), 'the offline placeholder exists')
+  assert.ok(/composer\.queue\.note/.test(locales), 'and so does the queue hint')
 })
 
 /* --------------------------------------------------------------- streaming */

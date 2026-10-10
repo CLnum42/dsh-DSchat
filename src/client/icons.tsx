@@ -263,3 +263,21 @@ export function MoreIcon({ size = 16 }: IconProps): ReactNode {
   )
 }
 
+/**
+ * Two arrows crossing: the 「DSH 迁移」 mark.
+ *
+ * A swap, not a cloud or a rocket: both migration modes take the conversation
+ * OUT of this panel and put it somewhere else (a distilled brief, or a verbatim
+ * replay), and two opposed arrows is the one shape that says "this goes over
+ * there" without a longer word than the row can hold. Drawn on the same 16-box
+ * stroke grid as the glyphs beside it, so the action row keeps one rhythm.
+ */
+export function SwapIcon({ size = 14 }: IconProps): ReactNode {
+  return svg(size, <>
+    <path d="M2.6 5.4h9.1" />
+    <path d="M9.4 3.1l2.3 2.3-2.3 2.3" />
+    <path d="M13.4 10.6H4.3" />
+    <path d="M6.6 8.3l-2.3 2.3 2.3 2.3" />
+  </>)
+}
+
