@@ -6,15 +6,67 @@
  * history.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { DSchatMessage, DSchatTranscript } from './protocol.ts'
+
+/**
+ * The store format this build reads and writes.
+ *
+ * Written into every file so a FUTURE version can be recognised instead of
+ * silently misread: the old code wrote `version: 1` and never looked at it, so a
+ * v2 file (extra fields, different message shape) would have been loaded as v1 —
+ * dropping whatever it did not recognise and then overwriting the original on
+ * the next write. A newer file is now left alone and reported.
+ */
+export const STORE_VERSION = 1
 
 /** Default plugin data directory (tests inject a sandbox root). */
 export function defaultDataDir(): string {
   const home = process.env.DSH_HOME ?? process.env.HOME ?? '.'
   return join(home, '.dsh', 'dsh-dschat')
+}
+
+/**
+ * True when a pid is a live process we can see.
+ *
+ * `EPERM` means the process exists but belongs to someone else — still alive,
+ * and still the owner of the lock.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === 'EPERM'
+  }
+}
+
+/**
+ * Flush a directory entry, so a rename survives a power cut.
+ *
+ * Best effort by necessity: Node cannot open a directory for reading on Windows
+ * at all, and some file systems refuse the fsync. A failure here is not a write
+ * failure — the data IS on disk, only the durability of its NAME is unconfirmed
+ * — so it must never be reported as one.
+ */
+function syncDirectory(dir: string): void {
+  let handle: number | undefined
+  try {
+    handle = openSync(dir, 'r')
+    fsyncSync(handle)
+  } catch {
+    // Windows, or a file system that will not fsync a directory.
+  } finally {
+    if (handle !== undefined) {
+      try {
+        closeSync(handle)
+      } catch {
+        // Already closed or never really open; nothing to recover.
+      }
+    }
+  }
 }
 
 export interface TranscriptStoreOptions {
@@ -40,7 +92,7 @@ export interface ImportResult {
 }
 
 interface StoreFile {
-  version: 1
+  version: number
   activeChatId?: string
   chats: DSchatTranscript[]
 }
@@ -393,12 +445,32 @@ export class TranscriptStore {
    */
   private warning: string | undefined
 
+  /**
+   * False when this process must NOT write (a newer on-disk format, or another
+   * live instance owns the file).
+   *
+   * Reads keep working and the in-memory history keeps serving, because refusing
+   * to write must not look like refusing to run — but clobbering the file is not
+   * an option either, and the reason is reported through {@link storeWarning}.
+   */
+  private writable = true
+
+  /** The lock file this instance created, when it holds one. */
+  private lockFile: string | undefined
+
   constructor(options: TranscriptStoreOptions = {}) {
     this.dataDir = options.dataDir ?? defaultDataDir()
     this.file = join(this.dataDir, 'transcripts.json')
+    /*
+     * The lock is taken BEFORE the first write and after the first read, so the
+     * refusal below can be decided in the right order: a second instance learns
+     * it must not write while the history is still readable, instead of losing
+     * the race and overwriting a live transcript.
+     */
     const loaded = this.read()
     this.chats = loaded.chats
     this.activeChatId = loaded.activeChatId
+    this.acquireLock()
     if (this.activeChatId !== undefined && !this.chats.some(chat => chat.id === this.activeChatId)) {
       // `chats` is newest-first (`createChat` unshifts), so the newest is at 0.
       // This used to read `.at(-1)` — the OLDEST conversation — so a store whose
@@ -445,6 +517,76 @@ export class TranscriptStore {
   }
 
   /**
+   * Claim the transcript file, or stand down if another live process has it.
+   *
+   * Two harness instances pointed at one data dir used to be a silent
+   * last-writer-wins race: each kept a whole copy of the history in memory and
+   * rewrote the file on every change, so whichever quit last erased everything
+   * the other had added. The lock (`transcripts.json.lock`, holding a pid) turns
+   * that into a named condition the reader can act on.
+   *
+   * Ownership is decided by LIVENESS rather than by the file existing, because a
+   * crash must not lock the reader out of their own history forever: a lock whose
+   * pid is gone is taken over. Same-process holders (the tests, a second store on
+   * one dir) are simply us.
+   */
+  private acquireLock(): void {
+    const lock = `${this.file}.lock`
+    try {
+      mkdirSync(this.dataDir, { recursive: true, mode: 0o700 })
+      writeFileSync(lock, String(process.pid), { flag: 'wx', mode: 0o600 })
+      this.lockFile = lock
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== 'EEXIST') {
+        // An unwritable data dir is already reported by the first write attempt;
+        // failing here would turn "cannot lock" into "cannot start".
+        return
+      }
+    }
+    let owner = Number.NaN
+    try {
+      owner = Number.parseInt(readFileSync(lock, 'utf8').trim(), 10)
+    } catch {
+      // An unreadable lock is treated as "no usable owner" and taken over.
+    }
+    if (Number.isInteger(owner) && owner !== process.pid && isProcessAlive(owner)) {
+      this.writable = false
+      this.warn(
+        `另一份 DSH 实例（pid ${String(owner)}）正在使用同一份会话记录（${this.file}）。` +
+        '为避免互相覆盖，本次只读：新消息仍会显示，但不会写入磁盘，请关掉另一个实例后重启。',
+      )
+      return
+    }
+    try {
+      // A stale lock (a crashed owner, an unreadable one): take it over.
+      writeFileSync(lock, String(process.pid), { mode: 0o600 })
+      this.lockFile = lock
+    } catch {
+      // Best effort: without the lock we behave as before, still reporting any
+      // real write failure.
+    }
+  }
+
+  /**
+   * Land everything pending and give the lock back.
+   *
+   * Called from the plugin's disposer: a normal shutdown should not leave a lock
+   * file behind for the next start to reason about — liveness handles the crash
+   * case, this handles the tidy one.
+   */
+  dispose(): void {
+    this.flush()
+    if (this.lockFile === undefined) return
+    try {
+      rmSync(this.lockFile, { force: true })
+    } catch {
+      // Leaving it is harmless: the pid is gone, so the next start takes over.
+    }
+    this.lockFile = undefined
+  }
+
+  /**
    * Move an unreadable store aside so the next write cannot destroy it.
    *
    * Renaming (not deleting, not copying) is what makes this safe: whatever the
@@ -475,13 +617,30 @@ export class TranscriptStore {
       if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') {
         this.warn(`读取会话记录失败（${String(error)}）。本次以空历史启动，原文件未被覆盖。`)
       }
-      return { version: 1, chats: [] }
+      return { version: STORE_VERSION, chats: [] }
     }
     try {
       const parsed = JSON.parse(text) as Partial<StoreFile>
+      /*
+       * A NEWER format is read as far as possible and then left alone.
+       *
+       * The version field was written and never read, so a future v2 file —
+       * extra fields, a different message shape — was loaded as v1: whatever
+       * this build did not recognise was dropped, and the next write replaced
+       * the original with that reduced copy. Refusing to write is the only
+       * honest answer when the reader's data is newer than the reader.
+       */
+      const version = typeof parsed.version === 'number' ? parsed.version : STORE_VERSION
+      if (version > STORE_VERSION) {
+        this.writable = false
+        this.warn(
+          `会话记录文件是新版本（v${String(version)}，本插件只到 v${String(STORE_VERSION)}）。` +
+          '本次只读：历史仍可查看，但不会写回，以免丢掉新版本的字段。请升级 dsh-dschat 插件。',
+        )
+      }
       const chats = Array.isArray(parsed.chats) ? parsed.chats : []
       return {
-        version: 1,
+        version,
         activeChatId: typeof parsed.activeChatId === 'string' ? parsed.activeChatId : undefined,
         chats: chats.filter(chat => typeof chat?.id === 'string' && Array.isArray(chat.messages)),
       }
@@ -489,7 +648,7 @@ export class TranscriptStore {
       // Unparseable JSON: quarantine before the first write can land, or the
       // only copy of every conversation is gone.
       this.warn(`会话记录文件无法解析（${String(error)}）${this.quarantine()}。本次以空历史启动。`)
-      return { version: 1, chats: [] }
+      return { version: STORE_VERSION, chats: [] }
     }
   }
 
@@ -518,7 +677,19 @@ export class TranscriptStore {
   }
 
   /**
-   * The atomic write itself: tmp file + rename, compact JSON.
+   * The atomic, DURABLE write: tmp file → fsync → rename → fsync the directory.
+   *
+   * `tmp + rename` alone is atomic against a crash of the WRITER, which is all
+   * it was ever claimed to be — but it says nothing about the bytes reaching the
+   * platter. A rename that lands while the file's contents are still in the page
+   * cache leaves, after a power cut, a file that is present, correctly named and
+   * EMPTY. Both fsyncs are needed for that reason, and for different halves of
+   * it: the first flushes the data before the name can point at it, the second
+   * flushes the directory entry that does the pointing.
+   *
+   * The tmp name carries the pid, so two processes writing one data dir cannot
+   * destroy each other's half-written file — they no longer share a name to
+   * collide on.
    *
    * Failures are caught, not thrown: the debounced write runs from a bare
    * `setTimeout`, so a throw here (ENOSPC, EACCES, a read-only volume) escaped
@@ -527,16 +698,32 @@ export class TranscriptStore {
    * `/state` instead, and the in-memory history stays served.
    */
   private writeNow(): void {
+    if (!this.writable) return
+    const tmp = `${this.file}.${String(process.pid)}-${randomUUID().slice(0, 8)}.tmp`
     try {
       mkdirSync(this.dataDir, { recursive: true, mode: 0o700 })
-      const payload: StoreFile = { version: 1, activeChatId: this.activeChatId, chats: this.chats }
-      const tmp = `${this.file}.tmp`
+      const payload: StoreFile = { version: STORE_VERSION, activeChatId: this.activeChatId, chats: this.chats }
       // Compact, not `null, 2`: this file is machine-written and can reach
       // megabytes, and the streaming path rewrites it. Indenting it doubled both
       // the serialize cost and the bytes for no reader's benefit.
-      writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 })
+      const data = JSON.stringify(payload)
+      const handle = openSync(tmp, 'w', 0o600)
+      try {
+        writeSync(handle, data)
+        fsyncSync(handle)
+      } finally {
+        closeSync(handle)
+      }
       renameSync(tmp, this.file)
+      syncDirectory(this.dataDir)
     } catch (error) {
+      // The tmp file is this call's own; leaving it behind would accumulate one
+      // dead megabyte per failed write.
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        // Nothing left to do about it, and it must not mask the real error.
+      }
       this.warn(`保存会话记录失败（${String(error)}）。本次运行的历史只存在于内存中，关闭窗口后会丢失。`)
     }
   }

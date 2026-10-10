@@ -190,8 +190,10 @@ export function apply(ctx: Context, config?: Config): void {
     // Transcript writes are coalesced (see `PERSIST_DEBOUNCE_MS`), so a disposal
     // is the last chance to land whatever the debounce is still holding. Closing
     // the browser does not imply a flush, and the process may be gone before the
-    // timer would have fired.
-    store.flush()
+    // timer would have fired. `dispose()` also hands back the single-writer lock
+    // (see `TranscriptStore.acquireLock`), so a clean shutdown leaves nothing for
+    // the next start to reason about.
+    store.dispose()
     void engine.disposeBrowser()
   }, 'dsh-dschat: engine')
 
