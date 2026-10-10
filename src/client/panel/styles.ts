@@ -8,6 +8,11 @@
  * here can reach the rest of the UI.
  *
  * What is deliberately NOT a token:
+ *   · the accent family, which is spelled with the DeepSeek web app's own
+ *     literals. The harness ships the same design system with two steps of the
+ *     deepseek ramp repainted (its 500 is #4176e6 and its 400 #7aaaff where the
+ *     web paints #3964fe and #679efe), so reading the token back would paint a
+ *     blue this panel is not allowed to use. See the accent block below;
  *   · artwork gradients;
  *   · shadows and black/white alpha scrims, which the host also spells as
  *     literals inside its elevation material;
@@ -21,17 +26,125 @@
  *     that remain, each one a measured contrast fix).
  *
  * The layout follows the host's own page composition: a 52px header row with a
- * hairline, a left list column, a centered readable message column, and a
- * composer card with the radius scale from the host's base sheet.
+ * hairline, a centered readable message column, and a composer card with the
+ * radius scale from the host's base sheet. (The left list column is gone —
+ * 会话列表 is a popover anchored to its own trigger now, see sessionsPopover in
+ * the panel and the .dsh-dschat-listpop rules below.)
+ *
+ * ONE SYNTAX RULE FOR EVERYTHING BELOW: no backticks. The sheet is a template
+ * literal, so a single one of those characters in a comment — the way markdown
+ * names an identifier — ends the CSS mid-file and the next line is parsed as
+ * TypeScript. The symptom is a parse error naming some innocent rule hundreds of
+ * lines later, which is exactly how a first version of the header rules reported
+ * "Expected ';' but found 'corner'" against a comment. Write identifiers bare,
+ * or in quotes.
  */
 
 export const PANEL_CSS = `
 .dsh-dschat {
+  /* Radius scale — artwork and wells only; controls are 999px pills. */
   --dschat-radius-sm: var(--dsw-radius-sm, 8px);
   --dschat-radius-md: var(--dsw-radius-md, 12px);
   --dschat-radius-lg: var(--dsw-radius-lg, 16px);
-  --dschat-radius-xl: var(--dsw-radius-xl, 20px);
   --dschat-mono: var(--dsw-font-family-code, ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace);
+
+  /*
+   * THE accent: everything that means "on", "current", or "the primary action".
+   *
+   * These are the DeepSeek web app's OWN values, read out of its stylesheet
+   * (fe-static.deepseek.com/chat/static/main.*.css, the two token blocks keyed
+   * on body and body[data-ds-dark-theme]):
+   *
+   *   light  #3964fe  deepseek-500 — the web's brand-primary, its send disc
+   *   dark   #5686fe  deepseek-450 — the same token one theme over
+   *
+   * They are literals rather than var(--dsw-static-deepseek-*) on purpose. The
+   * harness ships the same ramp with two steps repainted — its 500 is #4176e6
+   * and its 400 #7aaaff, which is what this panel used to paint with — so
+   * reading the token back would keep exactly the deeper blue that sent the
+   * reader to the web app for a reference. Only those two steps differ:
+   * 50/100/200/300/450/600/800/900 are byte-identical in both sheets.
+   */
+  --dschat-accent: #3964fe;
+  /*
+   * The ink that sits ON the accent — the send arrow, the empty page's mark,
+   * the citation chip.
+   *
+   * The web paints it label-primary-foreground, which is white in BOTH themes,
+   * so this no longer flips with the accent and the dark-mode branch that used
+   * to lift the disabled disc toward white is gone with it.
+   */
+  --dschat-on-accent: #fff;
+  /*
+   * The colour of WORDS on an accent TINT (lit pill, open toolbar button, the
+   * primary button, citation chips): the web's brand-text, which is deepseek-500
+   * in light and deepseek-400 in dark — the accent's own step in both.
+   */
+  --dschat-on-accent-tint: #3964fe;
+  /*
+   * The tint itself, and the hairline it is drawn with: the web's
+   * button-ghost-active-fill and the border on its 深度思考 pill —
+   * deepseek-50/-300 in light, deepseek-900/-600 in dark.
+   *
+   * Exact steps rather than "12% of the accent over whatever is behind it",
+   * which was the old recipe and is not a theme: that mix darkened into every
+   * grey surface it landed on, and doubled the web's own tint on white.
+   */
+  --dschat-tint: #edf3fe;
+  --dschat-tint-line: #b7c8fe;
+  /*
+   * The reader's own message.
+   *
+   * The web paints it deepseek-50 — the palest step of the accent, not a
+   * neutral grey — and leaves the assistant's turns on the bare page. In dark
+   * both sheets land on bluish-850, the card layer, which is where the dark
+   * block below takes it.
+   */
+  --dschat-bubble: #edf3fe;
+
+  /* The four surfaces. */
+  --dschat-ground: var(--dsw-static-neutral-bluish-00, #fff);
+  --dschat-raised: var(--dsw-static-neutral-bluish-00, #fff);
+  --dschat-filled: var(--dsw-static-neutral-bluish-75, #f1f3f5);
+  --dschat-quiet: var(--dsw-static-neutral-bluish-100, #ebeef2);
+  /* Hairlines, three weights: surface edge, control edge, content edge. */
+  --dschat-line: var(--dsw-static-neutral-bluish-150, #e9ecf2);
+  --dschat-line-2: var(--dsw-static-neutral-bluish-200, #e1e5ee);
+  --dschat-line-3: var(--dsw-static-neutral-bluish-300, #cfd3d6);
+
+  /* Three label weights, then the interaction washes. */
+  --dschat-tx: var(--dsw-static-neutral-bluish-1000, #0f1115);
+  --dschat-tx-2: var(--dsw-static-neutral-bluish-700, #61666b);
+  /*
+   * The quiet label — metadata, the placeholder, the empty rail.
+   *
+   * label-tertiary (#81858c), NOT the lighter bluish-500: the placeholder is
+   * the first sentence a reader reads on the composer, and this step keeps the
+   * 3.7:1 the panel already had where the lighter one measures 2.7:1. Nothing
+   * in this sheet may make text harder to read in exchange for tidier numbers.
+   */
+  --dschat-tx-3: var(--dsw-static-neutral-bluish-600, #81858c);
+  /*
+   * The interaction washes, taken from the web's interactive-bg-* aliases: a
+   * blue-tinted alpha in light (rgba(38,49,72,·)) and a white alpha in dark.
+   * They used to be opaque bluish-75/100 fills, which greyed every surface they
+   * landed on instead of deepening it — the same "one recipe, two themes"
+   * problem the tint above solves by naming both steps.
+   */
+  --dschat-hover: var(--dsw-alias-interactive-bg-hover, #2631480f);
+  --dschat-active: var(--dsw-alias-interactive-bg-active, #2631481a);
+  /* The one colour the panel borrows from the harness instead of owning. */
+  --dschat-danger: var(--dsw-alias-state-error-primary, #ec1313);
+  /*
+   * The success tone, the second colour the panel shares with the harness (the
+   * status card's 「已登录」 rows). It stays an alias rather than joining the
+   * accent family: green means "working", not "primary".
+   */
+  --dschat-success: var(--dsw-alias-state-success-primary, #22c55e);
+
+  /* The card's hairline shadow — the only shadow this sheet defines. */
+  --dschat-card-shadow: 0 1px 2px #0f11150a, 0 6px 18px #0f11150d;
+
   /*
    * Material for every floating surface (menus, hover toolbars, toasts).
    *
@@ -48,12 +161,11 @@ export const PANEL_CSS = `
   min-width: 0;
   display: flex;
   flex-direction: column;
-  color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-bg-base);
+  color: var(--dschat-tx);
+  background: var(--dschat-ground);
   font-size: 14px;
   line-height: 1.6;
 }
-
 .dsh-dschat *, .dsh-dschat *::before, .dsh-dschat *::after { box-sizing: border-box; }
 .dsh-dschat button { font: inherit; color: inherit; }
 
@@ -113,17 +225,22 @@ export const PANEL_CSS = `
   flex: none; height: 52px; display: flex; align-items: center; gap: 8px;
   padding-block: 0;
   padding-inline: max(14px, var(--dsh-frame-leading-clearance, 0px)) 14px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  border-bottom: 1px solid var(--dschat-line);
 }
 /*
- * The header is the product mark and the state lamp, and nothing else.
+ * The header holds the product mark and the state lamp, and nothing else.
  *
  * The three window controls that used to live here — plus 「在 Harness 中继续」
  * and 「···」 — moved out: the first three into the action row above the
- * composer, and the menu onto the lamp. What is left is a fixed 52px strip that
- * carries the window's drag region (see the panel's own note on the
- * data-window-drag attribute) and two things a reader needs in every state:
- * what this panel IS, and whether its engine is up.
+ * composer, and the menu onto the lamp. 会话列表 briefly came back here while
+ * the list was a centred dialog, and left again when it became a popover — a
+ * popover opens UPWARD off its trigger, and this strip has 52px of window
+ * chrome above it and a transcript below, so a button up here can only open a
+ * panel DOWN over the conversation it lists. See the note on actions() in the
+ * panel. What is left is a fixed 52px strip that carries the window's drag
+ * region (see the panel's own note on the data-window-drag attribute) and the
+ * two things a reader needs in every state: what this panel IS, and whether its
+ * engine is up.
  */
 .dsh-dschat-header {
   flex: none; height: 52px; display: flex; align-items: center; gap: 8px;
@@ -143,12 +260,12 @@ export const PANEL_CSS = `
  */
 .dsh-dschat-brand {
   display: flex; align-items: center; gap: 8px; flex: none;
-  color: var(--dsw-alias-state-business-primary);
+  color: var(--dschat-accent);
 }
 .dsh-dschat-brand svg { display: block; }
 .dsh-dschat-brand-name {
   font-size: 13.5px; font-weight: 500; line-height: 1;
-  color: var(--dsw-alias-label-primary); white-space: nowrap;
+  color: var(--dschat-tx); white-space: nowrap;
 }
 
 /*
@@ -178,11 +295,11 @@ export const PANEL_CSS = `
   width: 22px; height: 22px; flex: none; display: grid; place-items: center;
   border: none; border-radius: 50%; corner-shape: round; background: transparent; cursor: pointer;
 }
-.dsh-dschat-lamp:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dschat-lamp:hover { background: var(--dschat-hover); }
 .dsh-dschat-lamp > i,
 .dsh-dschat-lamp-dot {
   width: 7px; height: 7px; border-radius: 50%; corner-shape: round; display: block; flex: none;
-  background: var(--dsw-alias-state-idle-primary);
+  background: var(--dschat-line-3);
 }
 .dsh-dschat-lamp[data-tone="green"] > i,
 .dsh-dschat-lamp-dot[data-tone="green"] { background: var(--dsw-alias-state-success-primary); }
@@ -214,9 +331,43 @@ export const PANEL_CSS = `
 /* The status sentence, repeated where the reader asked what the colour means. */
 .dsh-dschat-lamp-status {
   display: flex; align-items: center; gap: 7px; margin: 0 0 4px; padding: 6px 8px 8px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
-  font-size: 12.5px; color: var(--dsw-alias-label-secondary);
+  border-bottom: 1px solid var(--dschat-line);
+  font-size: 12.5px; color: var(--dschat-tx-2);
 }
+/*
+ * THE DARK TOKEN BRANCH.
+ *
+ * The dark block is inserted here rather than welded into the base block above
+ * because it is a THEME OVERRIDE: keeping it next to the token layer's base
+ * declarations is what makes the two readable side by side.
+ *
+ * Every value below is the web app's own dark value for the same idea, so the
+ * two sheets can be read against each other a line at a time. Note what is NOT
+ * here any more: --dschat-on-accent (white in both themes now, the way the web
+ * paints label-primary-foreground) and the hover/active washes (the harness's
+ * interactive-bg-* aliases already carry the dark branch).
+ */
+body[data-ds-dark-theme] .dsh-dschat {
+  --dschat-accent: #5686fe;
+  --dschat-on-accent-tint: #679efe;
+  --dschat-tint: #283142;
+  --dschat-tint-line: #4868b2;
+  --dschat-bubble: var(--dsw-static-neutral-bluish-850, #2c2c2e);
+
+  --dschat-ground: var(--dsw-static-neutral-bluish-950, #151517);
+  --dschat-raised: var(--dsw-static-neutral-bluish-875, #232324);
+  --dschat-filled: var(--dsw-static-neutral-bluish-850, #2c2c2e);
+  --dschat-quiet: var(--dsw-static-neutral-bluish-800, #353638);
+  --dschat-line: #ffffff14;
+  --dschat-line-2: #ffffff1f;
+  --dschat-line-3: #ffffff29;
+
+  --dschat-tx: var(--dsw-static-neutral-bluish-50, #f9fafb);
+  --dschat-tx-2: var(--dsw-static-neutral-bluish-300, #cfd3d6);
+  --dschat-tx-3: var(--dsw-static-neutral-bluish-400, #adb2b8);
+  --dschat-card-shadow: 0 1px 0 #ffffff0a inset;
+}
+
 
 /*
  * The action row: 会话列表 / 搜索 / 新对话 on the left, 「⇄ DSH 迁移」 at the
@@ -263,17 +414,24 @@ export const PANEL_CSS = `
   display: inline-flex; align-items: center; gap: 6px; flex: none;
   height: 30px; padding: 0 11px; border-radius: 999px; corner-shape: round;
   border: 1px solid transparent; background: transparent; cursor: pointer;
-  white-space: nowrap; font-size: 13px; color: var(--dsw-alias-label-secondary);
+  white-space: nowrap; font-size: 13px; color: var(--dschat-tx-2);
 }
-.dsh-dschat-tbtn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-tbtn:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+/*
+ * PRESSED, and the pill's exact colour pair is the web's own 深度思考 pill:
+ * deepseek-50 on deepseek-300 in light, deepseek-900 on deepseek-600 in dark,
+ * with the label on brand-text. The hover step is the label mixed back into the
+ * tint, which deepens the same hue in both themes instead of darkening it in
+ * one and lightening it in the other.
+ */
 .dsh-dschat-tbtn-on {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 32%, transparent);
-  color: var(--dsw-alias-label-primary);
+  background: var(--dschat-tint);
+  border-color: var(--dschat-tint-line);
+  color: var(--dschat-on-accent-tint);
 }
 .dsh-dschat-tbtn-on:hover {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
-  color: var(--dsw-alias-label-primary);
+  background: color-mix(in srgb, var(--dschat-on-accent-tint) 10%, var(--dschat-tint));
+  color: var(--dschat-on-accent-tint);
 }
 /*
  * This button's own two marks: a glyph, and (on 迁移) the disclosure caret.
@@ -285,7 +443,7 @@ export const PANEL_CSS = `
  * CSS transform on an inline box does nothing, hence the display:grid.
  */
 .dsh-dschat-tbtn-glyph { display: grid; place-items: center; flex: none; }
-.dsh-dschat-tbtn-caret { display: grid; place-items: center; flex: none; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-tbtn-caret { display: grid; place-items: center; flex: none; color: var(--dschat-tx-3); }
 .dsh-dschat-tbtn[aria-expanded='true'] .dsh-dschat-tbtn-caret { transform: rotate(180deg); }
 @media (prefers-reduced-motion: no-preference) {
   .dsh-dschat-tbtn-caret { transition: transform .16s ease; }
@@ -296,9 +454,9 @@ export const PANEL_CSS = `
 .dsh-dschat-btn {
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
   border-radius: var(--dschat-radius-sm); cursor: pointer; white-space: nowrap; font-size: 13px;
-  border: 1px solid transparent; background: transparent; color: var(--dsw-alias-label-secondary);
+  border: 1px solid transparent; background: transparent; color: var(--dschat-tx-2);
 }
-.dsh-dschat-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-btn:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 /*
  * One dimming rule for every variant. 0.5 rather than 0.4 because most of
  * these buttons also carry a tinted fill, and the measure in a real browser
@@ -312,24 +470,25 @@ export const PANEL_CSS = `
  * toggles, on purpose: in the composer these sit side by side, and the toggle
  * pair is the visual language of "this panel's accent".
  *
- * button-primary-fill resolves to brand-primary, which flips per theme:
- * near-white #f9fafb in dark mode, near-black in light mode. In dark mode that
- * made the button — and the menu it opens — the brightest thing on the panel,
- * the reported "太白了". Both ends of that family are inverted relative to the
- * accent, so no pairing of primary-fill / primary-hover / primary-dimmed with
- * label-primary-foreground can stay on the blue accent in both themes.
- * state-business-primary IS the accent (#4176e6 light, #7aaaff dark): tinting
- * it over whatever is behind it is one rule that is correct in both themes.
+ * button-primary-fill resolves to brand-primary, which the HARNESS repaints as
+ * plain ink: near-white #f9fafb in dark mode, near-black in light mode. In dark
+ * mode that made the button — and the menu it opens — the brightest thing on
+ * the panel, the reported "太白了". Both ends of that family are inverted
+ * relative to the accent, so no pairing of primary-fill / primary-hover /
+ * primary-dimmed with label-primary-foreground can stay on the blue accent in
+ * both themes. (The web app's own brand-primary is the blue, not the ink; the
+ * harness is the one that deviates.) So this button takes the same tint pair
+ * the lit 深度思考 pill takes, which is correct in both themes by construction.
  */
 .dsh-dschat-btn-primary {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, transparent);
-  color: var(--dsw-alias-label-primary);
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, transparent);
+  background: var(--dschat-tint);
+  border-color: var(--dschat-tint-line);
+  color: var(--dschat-on-accent-tint);
   font-weight: 500; height: 30px; padding: 0 12px; border-radius: var(--dschat-radius-md);
 }
 .dsh-dschat-btn-primary:hover {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent);
-  color: var(--dsw-alias-label-primary);
+  background: color-mix(in srgb, var(--dschat-on-accent-tint) 10%, var(--dschat-tint));
+  color: var(--dschat-on-accent-tint);
 }
 /*
  * Disabled keeps the hue (a faint wash, so the button still reads as "the
@@ -342,61 +501,99 @@ export const PANEL_CSS = `
  * label really does win here.
  */
 .dsh-dschat-btn-primary:disabled {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, transparent);
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent);
+  background: color-mix(in srgb, var(--dschat-tint) 55%, transparent);
+  border-color: color-mix(in srgb, var(--dschat-tint-line) 55%, transparent);
   cursor: not-allowed;
 }
-.dsh-dschat-btn-ghost { border-color: var(--dsw-alias-border-l2); }
-/* ---------- body: rail + chat ---------- */
+.dsh-dschat-btn-ghost { border-color: var(--dschat-line-2); }
+/* ---------- body: the transcript column ---------- */
+/*
+ * One column, the full width of the panel.
+ *
+ * It used to be two: a 238px rail and the chat beside it, which left the
+ * transcript 382px of a 620px panel (measured) for as long as the panel was
+ * open. The rail is gone — 会话列表 is a popover over this column now (see
+ * sessionsPopover in the panel) — so the transcript's width is the panel's
+ * width, and the only thing that eats into it is the question navigator's own
+ * 34px column, which appears only once the reader has asked two questions.
+ */
 .dsh-dschat-body { flex: 1; min-height: 0; display: flex; position: relative; }
+/* ---------- 会话列表, as a popover ---------- */
 /*
- * The conversation list.
+ * The list panel: 迁移's material with a LIST's proportions.
  *
- * Its width is a user setting, applied inline by the panel (238px default, see
- * RAIL_WIDTH_DEFAULT), so this rule carries only the fallback — a panel whose
- * width state somehow never arrives still lays out.
+ * Width and surface come from .dsh-dschat-pop above (348px, the shared
+ * floating material, the shared elevation) and the direction from the row's own
+ * .dsh-dschat-pop-up rule — this class only decides what the panel's INSIDE
+ * is, which is the one thing the form-shaped 迁移 panel does not answer:
  *
- * Collapsed is not a state of this element: the panel drops the subtree
- * entirely (see 'rail()'), because a zero-width column would keep its resize
- * strip and its tab stops on screen. So there is nothing here to animate, and
- * nothing here to hide.
+ *   · a column, so the search box, the rows and the footer stack;
+ *   · a CEILING and no height, so the panel is as tall as its list and no
+ *     taller. A fixed-height panel was tried first and a three-row list left
+ *     ~150px of dead surface under the last row (measured on the render). The
+ *     ceiling is what the trigger's own position can afford: .dsh-dschat-pop
+ *     already caps at 100% of the trigger's top edge, so a long list scrolls
+ *     instead of opening off the top of the panel — which is the "adapts to the
+ *     window" half of the same requirement.
+ *   · hidden overflow, so the desktop shell's own scrollbar-gutter cannot give
+ *     this panel a scrollbar of its own (see the sheet's first section).
+ *
+ * The padding is the popover's own 12px (declared in .dsh-dschat-pop), so
+ * there is none here — adding a second one would inset this panel twice against
+ * the 迁移 panel beside it.
  */
-.dsh-dschat-rail {
-  position: relative; width: 238px; min-width: 0; flex: none; min-height: 0;
-  display: flex; flex-direction: column;
-  border-right: 1px solid var(--dsw-alias-border-l1); padding: 10px 8px 8px;
+.dsh-dschat-listpop { display: flex; flex-direction: column; overflow: hidden; }
+/*
+ * Anchored to the LEADING edge of the trigger, unlike 迁移.
+ *
+ * .dsh-dschat-pop defaults to right: 0, which is right for a trigger at the
+ * right end of the row (迁移) and wrong at the left end: anchored right, this
+ * 348px panel reached 128px right of the button and 220px PAST the panel's own
+ * left edge — measured on the render, where it was clipped by the window and
+ * three rows of the list were unreachable. Leading-edge anchoring puts it from
+ * the button's left edge rightward instead, and 348 + 26px of inset fits inside
+ * any column this panel can be, which is why this needs no narrow-width escape
+ * hatch the way the right-anchored menus do.
+ */
+.dsh-dschat-pop-wrap > .dsh-dschat-listpop { right: auto; left: 0; }
+/* The search box, first, full width — it filters the rows directly below it. */
+.dsh-dschat-listpop .dsh-dschat-search { flex: none; margin: 0 0 8px; }
+/*
+ * The rows: the panel's only scrolling child.
+ *
+ * min-height: 0 overrides the flex default (a flex item's automatic minimum
+ * size is its content), which is what lets a long list reach the ceiling and
+ * scroll inside it instead of stretching the panel past the monitor. There is
+ * deliberately NO floor: a fixed 96px one put an empty band under a two-row
+ * list. The empty state has padding of its own (see .dsh-dschat-hint-empty).
+ */
+.dsh-dschat-listpop .dsh-dschat-list {
+  flex: 1; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 1px; padding: 2px;
 }
 /*
- * The drag handle. A 7px strip straddling the border, because a 1px target is
- * not a target; it is invisible until the pointer is on it, so the panel keeps
- * the hairline it had. touch-action:none is what makes a pointer drag work
- * on a trackpad/touch surface instead of being read as a scroll.
+ * The footer: 「从网页同步」 on the left, the destructive clear at the right end.
+ *
+ * A hairline separates it from the rows because it is not one of them — it acts
+ * on the LIST rather than on a conversation in it — and it is flex: none so it
+ * stays put while the rows scroll behind it.
  */
-.dsh-dschat-rail-resize {
-  position: absolute; top: 0; bottom: 0; right: -4px; width: 7px; z-index: 5;
-  cursor: col-resize; touch-action: none; background: transparent;
-  transition: background .12s ease;
+.dsh-dschat-listpop-foot {
+  flex: none; display: flex; gap: 6px; padding: 10px 2px 0; margin-top: 8px;
+  border-top: 1px solid var(--dschat-line);
 }
-.dsh-dschat-rail-resize:hover,
-.dsh-dschat-rail-resize:focus-visible,
-.dsh-dschat-rail[data-resizing="true"] .dsh-dschat-rail-resize {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent);
-  outline: none;
-}
-/*
- * While a drag is in flight the pointer is somewhere over the transcript, so
- * the resize cursor and the text-selection block belong to the whole panel —
- * otherwise the drag selects the conversation titles it passes over.
- */
-.dsh-dschat[data-rail-drag="true"] { cursor: col-resize; user-select: none; }
+/* ---------- search box (shared: the list popover owns the only one) ---------- */
 .dsh-dschat-search { position: relative; margin: 0 2px 8px; }
 .dsh-dschat-search input {
   width: 100%; height: 30px; padding: 0 30px 0 28px; font: inherit; font-size: 13px; outline: none;
-  color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dschat-radius-sm);
+  color: var(--dschat-tx); background: var(--dschat-filled);
+  border: 1px solid transparent; border-radius: var(--dschat-radius-sm);
 }
-.dsh-dschat-search input::placeholder { color: var(--dsw-alias-label-tertiary); }
-.dsh-dschat-search input:focus { border-color: var(--dsw-alias-border-l3); }
+.dsh-dschat-search input::placeholder { color: var(--dschat-tx-3); }
+.dsh-dschat-search input:focus {
+  border-color: color-mix(in srgb, var(--dschat-accent) 46%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dschat-accent) 12%, transparent);
+}
 .dsh-dschat-search > svg { position: absolute; left: 8px; top: 8px; opacity: .5; pointer-events: none; }
 /*
  * The clear affordance, shown only while there is something to clear. It sits
@@ -407,19 +604,19 @@ export const PANEL_CSS = `
 .dsh-dschat-search-clear {
   position: absolute; right: 4px; top: 4px; width: 22px; height: 22px;
   display: grid; place-items: center; border: none; border-radius: 6px;
-  background: transparent; cursor: pointer; color: var(--dsw-alias-label-tertiary);
+  background: transparent; cursor: pointer; color: var(--dschat-tx-3);
 }
-.dsh-dschat-search-clear:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-search-clear:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 .dsh-dschat-list { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; padding: 2px; }
 .dsh-dschat-item {
   display: flex; align-items: center; gap: 8px; padding: 7px 8px;
   border-radius: var(--dschat-radius-sm); cursor: pointer;
 }
-.dsh-dschat-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.dsh-dschat-item[data-active] { background: var(--dsw-alias-interactive-bg-active); }
+.dsh-dschat-item:hover { background: var(--dschat-hover); }
+.dsh-dschat-item[data-active] { background: color-mix(in srgb, var(--dschat-accent) 10%, transparent); }
 .dsh-dschat-item-main { min-width: 0; flex: 1; }
 .dsh-dschat-item-title {
-  font-size: 13px; color: var(--dsw-alias-label-primary);
+  font-size: 13px; color: var(--dschat-tx);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dschat-item[data-active] .dsh-dschat-item-title { font-weight: 600; }
@@ -430,22 +627,18 @@ export const PANEL_CSS = `
  * it. Truncating is the same information in a stable box.
  */
 .dsh-dschat-item-meta {
-  font-size: 11px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums;
+  font-size: 11px; color: var(--dschat-tx-3); font-variant-numeric: tabular-nums;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dschat-item-acts { display: none; gap: 2px; flex: none; }
 .dsh-dschat-item:hover .dsh-dschat-item-acts { display: flex; }
 .dsh-dschat-mini {
   width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; cursor: pointer;
-  border: none; background: transparent; color: var(--dsw-alias-label-tertiary);
+  border: none; background: transparent; color: var(--dschat-tx-3);
 }
-.dsh-dschat-mini:hover { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); }
-.dsh-dschat-mini-danger:hover { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
-.dsh-dschat-rail-foot {
-  flex: none; display: flex; padding: 6px 2px 0; margin-top: 6px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
-}
-.dsh-dschat-hint-empty { padding: 14px 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-mini:hover { background: var(--dschat-active); color: var(--dschat-tx); }
+.dsh-dschat-mini-danger:hover { background: color-mix(in srgb, var(--dschat-danger) 14%, transparent); color: var(--dschat-danger); }
+.dsh-dschat-hint-empty { padding: 14px 8px; font-size: 12px; color: var(--dschat-tx-3); }
 
 /* ---------- question navigator (right edge) ---------- */
 /*
@@ -488,8 +681,8 @@ export const PANEL_CSS = `
 .dsh-dschat-nav {
   display: flex; flex-direction: column;
   width: 34px; padding: 14px 0; border-radius: 16px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 84%, transparent);
+  border: 1px solid var(--dschat-line);
+  background: var(--dschat-surface);
   backdrop-filter: blur(8px);
   transition: width .16s ease;
 }
@@ -497,18 +690,18 @@ export const PANEL_CSS = `
 .dsh-dschat-nav-item {
   display: flex; align-items: center; width: 100%; height: 30px; padding: 0;
   border: none; border-radius: 8px; background: transparent; cursor: pointer;
-  font: inherit; font-size: 12px; color: var(--dsw-alias-label-tertiary); text-align: left;
+  font: inherit; font-size: 12px; color: var(--dschat-tx-3); text-align: left;
 }
 .dsh-dschat-nav-idx, .dsh-dschat-nav-text { display: none; }
 .dsh-dschat-nav-tick {
   display: block; width: 8px; height: 2px; margin: 0 auto; border-radius: 4px;
-  background: var(--dsw-alias-border-l3);
+  background: var(--dschat-line-3);
 }
-.dsh-dschat-nav-item:hover .dsh-dschat-nav-tick { width: 16px; background: var(--dsw-alias-label-secondary); }
+.dsh-dschat-nav-item:hover .dsh-dschat-nav-tick { width: 16px; background: var(--dschat-tx-2); }
 .dsh-dschat-nav-item:focus-visible { outline: none; }
-.dsh-dschat-nav-item:focus-visible .dsh-dschat-nav-tick { width: 16px; background: var(--dsw-alias-label-primary); }
+.dsh-dschat-nav-item:focus-visible .dsh-dschat-nav-tick { width: 16px; background: var(--dschat-tx); }
 .dsh-dschat-nav-item[data-active='true'] .dsh-dschat-nav-tick {
-  width: 12px; height: 3px; background: var(--dsw-alias-state-business-primary);
+  width: 12px; height: 3px; background: var(--dschat-accent);
 }
 /* The expanded card. */
 .dsh-dschat-nav[data-open='true'] {
@@ -527,12 +720,11 @@ export const PANEL_CSS = `
 }
 .dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-tick { margin: 0; flex: none; }
 .dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-item:hover {
-  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+  background: var(--dschat-hover); color: var(--dschat-tx);
 }
 .dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-item[data-active='true'] {
-  color: var(--dsw-alias-label-primary); font-weight: 500;
+  color: var(--dschat-tx); font-weight: 500;
 }
-body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 92%, transparent); }
 @media (prefers-reduced-motion: reduce) {
   .dsh-dschat-nav { transition: none; }
 }
@@ -553,11 +745,11 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-latest {
   display: inline-flex; align-items: center; height: 30px; padding: 0 13px;
   border-radius: 999px; corner-shape: round; cursor: pointer; font: inherit; font-size: 12.5px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: var(--dschat-surface); color: var(--dsw-alias-label-secondary);
+  border: 1px solid var(--dschat-line-2);
+  background: var(--dschat-surface); color: var(--dschat-tx-2);
   box-shadow: 0 4px 14px #00000024;
 }
-.dsh-dschat-latest:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dschat-latest:hover { color: var(--dschat-tx); background: var(--dschat-hover); }
 
 /* ---------- chat column ---------- */
 .dsh-dschat-chat { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -566,7 +758,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
   max-width: 760px; margin: 0 auto; padding: 0 26px;
   display: flex; flex-direction: column; gap: 20px;
 }
-.dsh-dschat-day { text-align: center; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-day { text-align: center; font-size: 11px; color: var(--dschat-tx-3); }
 
 .dsh-dschat-msg { display: flex; flex-direction: column; gap: 6px; position: relative; }
 /*
@@ -582,43 +774,51 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  */
 .dsh-dschat-msg-jump {
   border-radius: var(--dschat-radius-md);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--dschat-accent) 18%, transparent);
   animation: dsh-dschat-jump 1.8s ease-out forwards;
 }
 @keyframes dsh-dschat-jump {
-  0% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, transparent); }
-  100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--dsw-alias-state-business-primary) 0%, transparent); }
+  0% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--dschat-accent) 30%, transparent); }
+  100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--dschat-accent) 0%, transparent); }
 }
 .dsh-dschat-msg[data-role="user"] { align-items: flex-end; }
-.dsh-dschat-msg-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-msg-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dschat-tx-3); }
 .dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-head { flex-direction: row-reverse; }
-.dsh-dschat-msg-who { font-weight: 600; color: var(--dsw-alias-label-secondary); }
-.dsh-dschat-msg-body { font-size: 14px; line-height: 1.72; min-width: 0; }
+.dsh-dschat-msg-who { font-weight: 600; color: var(--dschat-tx-2); }
+.dsh-dschat-msg-body { font-size: 14px; line-height: 1.72; min-width: 0; color: var(--dschat-tx); }
 /* The bubble's width cap lives on the wrapper, so it is a share of the MESSAGE
    width rather than of a shrink-to-fit parent (which would be circular). */
 .dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-line { max-width: 78%; }
+/*
+ * The reader's own turn, painted the way the web app paints it: the palest step
+ * of the accent (deepseek-50 in light, bluish-850 in dark) with NO border, and
+ * the assistant's turns left on the bare page. It used to be a grey card with a
+ * hairline, which is a different idea — "a panel" rather than "you said this" —
+ * and it was the one large grey object in a palette that is otherwise blue.
+ */
 .dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-body {
   max-width: 100%; padding: 10px 14px; border-radius: var(--dschat-radius-lg);
   border-bottom-right-radius: 6px;
-  background: var(--dsw-alias-interactive-bg-hover); border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dschat-bubble); border: none;
+  color: var(--dschat-tx);
 }
 .dsh-dschat-msg-body > div > *:first-child { margin-top: 0; }
 .dsh-dschat-msg-body > div > *:last-child { margin-bottom: 0; }
 .dsh-dschat-msg-body p { margin: 0 0 10px; }
 .dsh-dschat-msg-body ul, .dsh-dschat-msg-body ol { margin: 0 0 10px; padding-left: 22px; }
 .dsh-dschat-msg-body li { margin: 3px 0; }
-.dsh-dschat-msg-body li::marker { color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-msg-body li::marker { color: var(--dschat-tx-3); }
 .dsh-dschat-msg-body strong { font-weight: 600; }
 .dsh-dschat-msg-body em { font-style: italic; }
 .dsh-dschat-msg-body code {
   font-family: var(--dschat-mono); font-size: .875em; padding: 1px 5px; border-radius: 6px;
-  background: var(--dsw-alias-markdown-inline-code);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
 }
-.dsh-dschat-msg-body a { color: var(--dsw-alias-link); text-decoration: none; }
+.dsh-dschat-msg-body a { color: var(--dschat-accent); text-decoration: none; }
 .dsh-dschat-msg-body a:hover { text-decoration: underline; }
 .dsh-dschat-msg-body blockquote {
-  margin: 0 0 10px; padding: 2px 0 2px 12px; color: var(--dsw-alias-label-secondary);
-  border-left: 2px solid var(--dsw-alias-border-l3);
+  margin: 0 0 10px; padding: 2px 0 2px 12px; color: var(--dschat-tx-2);
+  border-left: 2px solid var(--dschat-line-3);
 }
 .dsh-dschat-msg-body h1, .dsh-dschat-msg-body h2, .dsh-dschat-msg-body h3,
 .dsh-dschat-msg-body h4, .dsh-dschat-msg-body h5, .dsh-dschat-msg-body h6 {
@@ -627,7 +827,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-msg-body h1 { font-size: 18px; } .dsh-dschat-msg-body h2 { font-size: 16px; }
 .dsh-dschat-msg-body h3 { font-size: 15px; } .dsh-dschat-msg-body h4,
 .dsh-dschat-msg-body h5, .dsh-dschat-msg-body h6 { font-size: 14px; }
-.dsh-dschat-msg-body hr { border: none; border-top: 1px solid var(--dsw-alias-border-l1); margin: 14px 0; }
+.dsh-dschat-msg-body hr { border: none; border-top: 1px solid var(--dschat-line); margin: 14px 0; }
 /*
  * The reasoning disclosure.
  *
@@ -646,18 +846,18 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  */
 .dsh-dschat-think {
   margin: 0 0 10px; border-radius: var(--dschat-radius-md); overflow: hidden;
-  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
 }
 .dsh-dschat-think[data-live="true"] {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, transparent);
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-2));
+  border-color: color-mix(in srgb, var(--dschat-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--dschat-accent) 7%, var(--dschat-filled));
 }
 .dsh-dschat-think-head {
   display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px;
   border: none; background: transparent; cursor: pointer; text-align: left; font-size: 12.5px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dschat-tx-2);
 }
-.dsh-dschat-think-head:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-think-head:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 .dsh-dschat-think-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /*
  * The live line: 「思考中：」 + the newest characters of the reasoning, on ONE line.
@@ -678,11 +878,11 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-think-live { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; }
 .dsh-dschat-think-live-prefix {
   flex: none; font-weight: 500;
-  color: var(--dsw-alias-label-deep-diving, var(--dsw-alias-state-business-primary));
+  color: var(--dsw-alias-label-deep-diving, var(--dschat-accent));
   background-image: linear-gradient(90deg,
-    var(--dsw-alias-label-deep-diving-shimmer, var(--dsw-alias-state-business-primary)),
-    var(--dsw-alias-label-deep-diving, var(--dsw-alias-state-business-primary)),
-    var(--dsw-alias-label-deep-diving-shimmer, var(--dsw-alias-state-business-primary)));
+    var(--dsw-alias-label-deep-diving-shimmer, var(--dschat-accent)),
+    var(--dsw-alias-label-deep-diving, var(--dschat-accent)),
+    var(--dsw-alias-label-deep-diving-shimmer, var(--dschat-accent)));
   background-size: 200% 100%;
   -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -692,7 +892,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-think-live-clip { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
 .dsh-dschat-think-live-tail {
   display: inline-block; white-space: nowrap; will-change: transform;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dschat-tx-2);
 }
 /*
  * A live row's hover keeps the accent rather than flipping to label-primary:
@@ -720,7 +920,7 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  */
 .dsh-dschat-think-body {
   max-height: 360px; overflow: auto; padding: 8px 12px 10px;
-  font-size: 13px; line-height: 1.68; color: var(--dsw-alias-label-secondary);
+  font-size: 13px; line-height: 1.68; color: var(--dschat-tx-2);
 }
 .dsh-dschat-think-body > div { cursor: pointer; }
 .dsh-dschat-think-body > div > *:first-child { margin-top: 0; }
@@ -752,15 +952,15 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 }
 .dsh-dschat-msg-body .dsh-dschat-citation {
   display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px;
-  padding: 0 4px; border-radius: 5px; border: 1px solid transparent; font-size: 10px; font-weight: 600;
-  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);
+  padding: 0 4px; border-radius: 5px; border: 1px solid var(--dschat-tint-line); font-size: 10px; font-weight: 600;
+  background: var(--dschat-tint); color: var(--dschat-on-accent-tint);
   text-decoration: none; cursor: default;
 }
 .dsh-dschat-msg-body a.dsh-dschat-citation { cursor: pointer; }
 .dsh-dschat-msg-body a.dsh-dschat-citation:hover {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, transparent);
-  color: var(--dsw-alias-label-primary);
+  background: color-mix(in srgb, var(--dschat-on-accent-tint) 10%, var(--dschat-tint));
+  border-color: var(--dschat-on-accent-tint);
+  color: var(--dschat-on-accent-tint);
 }
 /*
  * The source list under a cited reply (the panel's answer to the web's 参考来源).
@@ -772,15 +972,15 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  */
 .dsh-dschat-sources {
   margin: 0 0 10px; border-radius: var(--dschat-radius-md); overflow: hidden;
-  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
 }
 .dsh-dschat-sources-head {
   display: flex; align-items: center; gap: 6px; width: 100%; padding: 7px 10px;
   border: none; background: transparent; cursor: pointer; text-align: left;
-  font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary);
+  font-size: 12px; font-weight: 600; color: var(--dschat-tx-2);
 }
-.dsh-dschat-sources-head:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dschat-sources[data-open] .dsh-dschat-sources-head { border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dsh-dschat-sources-head:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-sources[data-open] .dsh-dschat-sources-head { border-bottom: 1px solid var(--dschat-line); }
 .dsh-dschat-sources ol {
   margin: 0; padding: 8px 10px; list-style: none;
   display: flex; flex-direction: column; gap: 4px;
@@ -789,34 +989,34 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-source-no {
   flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px;
   padding: 0 4px; border-radius: 5px; font-size: 10px; font-weight: 600;
-  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary);
+  background: var(--dschat-quiet); color: var(--dschat-tx-2);
 }
-.dsh-dschat-sources a { color: var(--dsw-alias-link); text-decoration: none; }
+.dsh-dschat-sources a { color: var(--dschat-accent); text-decoration: none; }
 .dsh-dschat-sources a:hover { text-decoration: underline; }
 .dsh-dschat-table-wrap { margin: 0 0 10px; overflow-x: auto; }
 .dsh-dschat-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .dsh-dschat-table th, .dsh-dschat-table td {
-  border: 1px solid var(--dsw-alias-border-l1); padding: 6px 10px; text-align: left;
+  border: 1px solid var(--dschat-line); padding: 6px 10px; text-align: left;
 }
-.dsh-dschat-table th { background: var(--dsw-alias-bg-layer-2); font-weight: 600; }
+.dsh-dschat-table th { background: var(--dschat-filled); font-weight: 600; }
 
 /* code block with its own banner + copy action */
 .dsh-dschat-code {
   margin: 0 0 10px; border-radius: var(--dschat-radius-md); overflow: hidden;
-  border: .5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
+  border: .5px solid var(--dschat-line); background: var(--dschat-filled);
 }
 .dsh-dschat-code-bar {
   display: flex; align-items: center; gap: 8px; padding: 5px 10px;
-  background: var(--dsw-alias-markdown-code-block-banner);
-  font-family: var(--dschat-mono); font-size: 11px; color: var(--dsw-alias-label-secondary);
+  background: var(--dschat-quiet);
+  font-family: var(--dschat-mono); font-size: 11px; color: var(--dschat-tx-2);
 }
 .dsh-dschat-code-copy {
   display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 6px;
   border-radius: 5px; border: none; background: transparent; cursor: pointer; font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dschat-tx-2);
 }
-.dsh-dschat-code-copy:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dschat-code pre { margin: 0; padding: 12px 14px; overflow: auto; font-family: var(--dschat-mono); font-size: 12.5px; line-height: 1.6; }
+.dsh-dschat-code-copy:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-code pre { margin: 0; padding: 12px 14px; overflow: auto; font-family: var(--dschat-mono); font-size: 12.5px; line-height: 1.6; color: var(--dschat-tx); }
 
 /* images */
 .dsh-dschat-imgs { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 10px; }
@@ -824,22 +1024,22 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 /* streaming caret + errors */
 .dsh-dschat-caret {
   display: inline-block; width: 7px; height: 15px; margin-left: 2px; vertical-align: -2px;
-  background: var(--dsw-alias-label-primary); animation: dsh-dschat-blink 1s steps(1) infinite;
+  background: var(--dschat-tx); animation: dsh-dschat-blink 1s steps(1) infinite;
 }
 @keyframes dsh-dschat-blink { 50% { opacity: 0; } }
 .dsh-dschat-spin {
   width: 12px; height: 12px; border-radius: 50%; corner-shape: round; flex: none;
-  border: 1.6px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, transparent);
-  border-top-color: var(--dsw-alias-state-business-primary);
+  border: 1.6px solid color-mix(in srgb, var(--dschat-accent) 30%, transparent);
+  border-top-color: var(--dschat-accent);
   animation: dsh-dschat-rot .7s linear infinite;
 }
 @keyframes dsh-dschat-rot { to { transform: rotate(360deg); } }
 .dsh-dschat-err {
   display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px;
   border-radius: var(--dschat-radius-sm); font-size: 13px;
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
-  color: var(--dsw-alias-state-error-primary);
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 25%, transparent);
+  background: color-mix(in srgb, var(--dschat-danger) 8%, transparent);
+  color: var(--dschat-danger);
+  border: 1px solid color-mix(in srgb, var(--dschat-danger) 25%, transparent);
 }
 
 /* message hover actions */
@@ -868,9 +1068,9 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 .dsh-dschat-msg-acts:focus-within { opacity: 1; }
 .dsh-dschat-msg-acts button {
   width: 26px; height: 26px; display: grid; place-items: center; border: none; border-radius: 6px;
-  background: transparent; cursor: pointer; color: var(--dsw-alias-label-secondary);
+  background: transparent; cursor: pointer; color: var(--dschat-tx-2);
 }
-.dsh-dschat-msg-acts button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-msg-acts button:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 
 /* empty state */
 .dsh-dschat-empty {
@@ -879,10 +1079,10 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 }
 .dsh-dschat-empty-mark {
   width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; margin-bottom: 2px;
-  background: var(--dsw-alias-brand-primary); color: var(--dsw-alias-label-primary-foreground);
+  background: var(--dschat-accent); color: var(--dschat-on-accent);
 }
-.dsh-dschat-empty h3 { margin: 0; font-size: 17px; font-weight: 600; }
-.dsh-dschat-empty p { margin: 0; max-width: 400px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
+.dsh-dschat-empty h3 { margin: 0; font-size: 17px; font-weight: 600; color: var(--dschat-tx); }
+.dsh-dschat-empty p { margin: 0; max-width: 400px; font-size: 13px; color: var(--dschat-tx-2); }
 /*
  * The same block, worn by a conversation whose body is still in flight.
  *
@@ -892,11 +1092,54 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  * See the thread() branch in the panel for which one is picked.
  */
 .dsh-dschat-loading .dsh-dschat-empty-mark { opacity: .5; }
-.dsh-dschat-loading h3 { font-size: 14px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
+.dsh-dschat-loading h3 { font-size: 14px; font-weight: 500; color: var(--dschat-tx-2); }
 .dsh-dschat-kbd {
   display: inline-flex; align-items: center; height: 19px; padding: 0 5px; border-radius: 5px;
-  font-family: var(--dschat-mono); font-size: 11px; color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1);
+  font-family: var(--dschat-mono); font-size: 11px; color: var(--dschat-tx-2);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
+}
+
+/*
+ * 或者试试: the prompt chips under the invitation.
+ *
+ * Same 30px/999px shape as every other text control in the panel (see
+ * .dsh-dschat-tbtn), so the empty page speaks the composer's language; the
+ * difference is only WHERE the accent sits. These are quiet at rest — a
+ * hairline and the secondary label — and take the accent on hover, which is the
+ * moment they reveal themselves as things to press. Nothing here is a primary
+ * action: the send circle is, and three blue pills above it would compete with
+ * it for the reader's eye.
+ *
+ * The list is as wide as the column allows and centred, so the three sentences
+ * read as one block rather than a left-aligned list of links, and it wraps to a
+ * second line instead of overflowing on a narrow panel.
+ */
+.dsh-dschat-empty-try { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 6px; }
+.dsh-dschat-empty-try-label { font-size: 11px; letter-spacing: .04em; color: var(--dschat-tx-3); }
+.dsh-dschat-empty-try-list {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 460px;
+}
+.dsh-dschat-try {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 12px;
+  border-radius: 999px; corner-shape: round; cursor: pointer; white-space: nowrap;
+  font-size: 12.5px; color: var(--dschat-tx-2);
+  background: transparent; border: 1px solid var(--dschat-line-2);
+}
+.dsh-dschat-try:hover {
+  background: color-mix(in srgb, var(--dschat-accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--dschat-accent) 32%, transparent);
+  color: var(--dschat-tx);
+}
+/*
+ * The key reference, demoted below the invitation it belongs to.
+ *
+ * It keeps the chips' own gap as its top margin, because that is the distance
+ * between the two; the keycaps themselves are unchanged — a reader who wants
+ * the shortcut scans for the boxes, and they should not change shape depending
+ * on which state the page is in.
+ */
+.dsh-dschat-empty-keys {
+  margin: 2px 0 0; display: flex; gap: 6px; align-items: center; justify-content: center; font-size: 12px;
 }
 
 /* composer */
@@ -917,56 +1160,38 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
  * rather than beside it.
  */
 .dsh-dschat-card {
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dschat-radius-xl);
-  background: var(--dsw-alias-bg-layer-1);
-  box-shadow: 0 4px 12px #00000005, 0 2px 4px #4868b203;
+  border: 1px solid var(--dschat-line-2);
+  border-radius: var(--dschat-radius-lg);
+  background: var(--dschat-raised);
+  box-shadow: var(--dschat-card-shadow);
   transition: border-color .12s ease, background-color .12s ease;
 }
-/*
- * Dark mode, where the card needs a boundary of its own.
- *
- * Both figures above are LIGHT-mode figures, and both quietly stop working in a
- * dark theme: #00000005 of shadow on a #151517 page is invisible, so the card
- * lost the edge that separates it from the panel and the composer read as a
- * floating row of pills rather than a field you type into. The dark branch
- * therefore promotes the hairline one step (border-l2 is #ffffff1f against the
- * page's #ffffff0f) and drops the useless shadow. The surface itself stays
- * 'bg-layer-1' — the token the harness raises its own cards with, and one step
- * off the page in dark exactly as it is in light.
- */
-body[data-ds-dark-theme] .dsh-dschat-card {
-  border-color: var(--dsw-alias-border-l3);
-  box-shadow: none;
-}
+
 .dsh-dschat-card:focus-within {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 42%, var(--dsw-alias-border-l2));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
-}
-body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, var(--dsw-alias-border-l3));
+  border-color: color-mix(in srgb, var(--dschat-accent) 52%, var(--dschat-line-2));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dschat-accent) 12%, transparent);
 }
 .dsh-dschat-card.dsh-dschat-dragging {
-  border-color: var(--dsw-alias-state-business-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
+  border-color: var(--dschat-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dschat-accent) 16%, transparent);
 }
 .dsh-dschat-dropline {
   display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 8px 10px 0; font-size: 12px; color: var(--dsw-alias-state-business-primary);
+  padding: 8px 10px 0; font-size: 12px; color: var(--dschat-accent);
 }
 .dsh-dschat-attachments { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 10px 0; }
 .dsh-dschat-chip {
   display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 8px;
   border-radius: var(--dschat-radius-sm); font-size: 12px;
-  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
   max-width: 260px;
 }
 .dsh-dschat-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-dschat-chip button {
   width: 18px; height: 18px; display: grid; place-items: center; border: none; border-radius: 4px;
-  background: transparent; cursor: pointer; color: var(--dsw-alias-label-tertiary); flex: none;
+  background: transparent; cursor: pointer; color: var(--dschat-tx-3); flex: none;
 }
-.dsh-dschat-chip button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-chip button:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 /*
  * The one control on a HISTORY message's attachment chip: an anchor to the
  * host's read-back route.
@@ -979,9 +1204,9 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
  */
 .dsh-dschat-chip-view {
   width: 18px; height: 18px; display: grid; place-items: center; border-radius: 4px; flex: none;
-  color: var(--dsw-alias-label-tertiary); text-decoration: none; font-size: 11px; line-height: 1;
+  color: var(--dschat-tx-3); text-decoration: none; font-size: 11px; line-height: 1;
 }
-.dsh-dschat-chip-view:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-chip-view:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 /*
  * 图片附件：the thumbnail in the composer.
  *
@@ -998,8 +1223,8 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
 .dsh-dschat-thumb {
   position: relative; width: 56px; height: 56px; flex: none;
   border-radius: var(--dschat-radius-sm); overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dschat-line);
+  background: var(--dschat-filled);
 }
 .dsh-dschat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .dsh-dschat-thumb button {
@@ -1015,17 +1240,39 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
 /*
  * The composer's height is driven by the panel (see resizeComposer): it is set
  * to the content's own height, clamped to the max-height below. Both numbers
- * here are therefore load-bearing — min-height is what an empty box measures,
- * max-height is where the panel stops growing it and the textarea starts
- * scrolling instead. An explicit overflow-y makes that second half intentional
- * rather than a UA default.
+ * here are therefore load-bearing — min-height is what an EMPTY box measures
+ * (nothing ever sets an inline height for it: scrollHeight of an empty
+ * textarea is one line, and the panel would shrink the box back), max-height is
+ * where the panel stops growing it and the textarea starts scrolling instead.
+ * An explicit overflow-y makes that second half intentional rather than a UA
+ * default.
+ *
+ * min-height was 46px, and 46 is the number that produced the complaint this
+ * rule exists to answer: 12px of top padding + 22.4px of line + 4px of bottom
+ * padding leaves exactly ONE line of text visible (measured: 1.3 lines, i.e.
+ * the descenders of line two clipped by the scroll box). A reader writing a
+ * paragraph did it through a slit, and every re-read of what they had written
+ * was a scroll.
+ *
+ * 84px is THREE lines: 12 + 3×22.4 + 4 = 83.2, rounded up so the third line's
+ * descenders are inside the box rather than at its edge. Three is the smallest
+ * number that shows a sentence the reader can still see the start of, and it
+ * keeps the composer a text field rather than a document: the card ends up
+ * ~134px tall in a 620px-wide panel, roughly a fifth of it, and everything
+ * above that (the transcript) keeps the rest.
+ *
+ * max-height moved with it, 180 → 220, so the box keeps growing for about the
+ * same number of lines before scrolling instead of gaining a floor and losing
+ * the range above it. The two numbers live in two files on purpose — this cap
+ * is what the browser enforces, COMPOSER_MAX_HEIGHT is what the panel measures
+ * against — and they must be changed together.
  */
 .dsh-dschat-input {
   display: block; width: 100%; resize: none; border: none; outline: none; background: transparent;
-  font: inherit; font-size: 14px; line-height: 1.6; color: var(--dsw-alias-label-primary);
-  padding: 12px 14px 4px; min-height: 46px; max-height: 180px; overflow-y: auto;
+  font: inherit; font-size: 14px; line-height: 1.6; color: var(--dschat-tx);
+  padding: 12px 14px 4px; min-height: 84px; max-height: 220px; overflow-y: auto;
 }
-.dsh-dschat-input::placeholder { color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-input::placeholder { color: var(--dschat-tx-3); }
 /*
  * The engine is down: the field still TYPES, so it must not look broken — but
  * the reader should also know that what they write will start a browser.
@@ -1040,7 +1287,7 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
  * The wash itself is kept at a whisper for the one thing it still says: the
  * accent hairline marks the field as "this will start the page for you".
  */
-.dsh-dschat-card[data-engine="off"] .dsh-dschat-input::placeholder { color: var(--dsw-alias-link); }
+.dsh-dschat-card[data-engine="off"] .dsh-dschat-input::placeholder { color: color-mix(in srgb, var(--dschat-accent) 82%, var(--dschat-tx)); }
 /*
  * It was a 5% mix of the accent over the card in both themes, and 5% of a dark
  * navy over a #232324 card is not a wash — it is a bruise: the card went muddy
@@ -1051,12 +1298,8 @@ body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
  * branch anyway — an accent hairline is legible where a 5% fill is not.
  */
 .dsh-dschat-card[data-engine="off"] {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 3%, var(--dsw-alias-bg-layer-1));
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, var(--dsw-alias-border-l1));
-}
-body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 8%, var(--dsw-alias-bg-layer-1));
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, var(--dsw-alias-border-l3));
+  background: color-mix(in srgb, var(--dschat-accent) 4%, var(--dschat-raised));
+  border-color: color-mix(in srgb, var(--dschat-accent) 26%, var(--dschat-line-2));
 }
 /*
  * The queue: messages typed while the previous turn is still generating.
@@ -1070,18 +1313,18 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
 .dsh-dschat-queue-item {
   display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 4px 0 8px;
   border-radius: var(--dschat-radius-sm); font-size: 12px;
-  background: var(--dsw-alias-bg-layer-2); border: 1px dashed var(--dsw-alias-border-l2);
-  color: var(--dsw-alias-label-secondary);
+  background: var(--dschat-filled); border: 1px dashed var(--dschat-line-2);
+  color: var(--dschat-tx-2);
 }
 .dsh-dschat-queue-mark { flex: none; font-size: 11px; }
 .dsh-dschat-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-dschat-queue-files { flex: none; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-queue-files { flex: none; color: var(--dschat-tx-3); }
 .dsh-dschat-queue-item button {
   width: 18px; height: 18px; flex: none; display: grid; place-items: center; border: none; border-radius: 4px;
-  background: transparent; cursor: pointer; color: var(--dsw-alias-label-tertiary);
+  background: transparent; cursor: pointer; color: var(--dschat-tx-3);
 }
-.dsh-dschat-queue-item button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dschat-queue-note { padding-left: 2px; font-size: 11.5px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-queue-item button:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-queue-note { padding-left: 2px; font-size: 11.5px; color: var(--dschat-tx-3); }
 /*
  * The composer's tool row: a 4px gap between controls and 30px-tall controls in
  * it — the SAME height and the same pill/circle shapes as the action row eight
@@ -1107,9 +1350,9 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
 .dsh-dschat-attach {
   width: 30px; height: 30px; flex: none; display: grid; place-items: center;
   border: none; border-radius: 50%; corner-shape: round; background: transparent; cursor: pointer;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--dschat-tx-2);
 }
-.dsh-dschat-attach:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-attach:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 .dsh-dschat-attach:disabled { opacity: .5; cursor: not-allowed; background: transparent; }
 /*
  * The composer's 深度思考 / 智能搜索 pills.
@@ -1128,12 +1371,13 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
  *   off  fill rgba(45,53,70,.8) / border rgba(78,109,181,.8) / label #f9fafb
  *   on   fill #283142           / border #4868b2                / label #679efe
  *
- * Those are the page's dark-mode values; on the panel they are expressed in the
- * harness's own tokens, which resolve per theme for the same effect — the fill
- * is a neutral layer, and the "on" wash is the deepseek-static blue family that
- * DSH ships for exactly this purpose (with a color-mix fallback if a future
- * theme drops the statics). The "on" state deliberately sits inside the same
- * recipe the transfer button uses, so the accent still reads as one family.
+ * Those are the page's dark-mode values; on the panel the "on" pair is the
+ * --dschat-tint / --dschat-tint-line / --dschat-on-accent-tint triplet, whose
+ * two steps are exactly this line and its light-theme twin (#edf3fe on
+ * #b7c8fe in #3964fe). The "off" pill is the harness's neutral: transparent
+ * with a control-edge hairline. The "on" state deliberately sits on the same
+ * triplet the transfer button and the toolbar's pressed state use, so the
+ * accent still reads as one family.
  *
  * DARK MODE: the OFF pill must be a hole, not a window.
  *
@@ -1149,12 +1393,12 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
 .dsh-dschat-toggle {
   display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px;
   border-radius: 999px; corner-shape: round; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500;
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dschat-line-2);
+  background: transparent;
+  color: var(--dschat-tx-2);
 }
 .dsh-dschat-toggle-text { line-height: 1; color: inherit; }
-.dsh-dschat-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dschat-toggle:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 .dsh-dschat-toggle:disabled { opacity: .5; cursor: not-allowed; }
 /*
  * Naming the label AND repeating the pill is deliberate, and it is not
@@ -1166,128 +1410,50 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
  * stayed blue (the descendant rule won for the span) while the glyph went
  * neutral, which is exactly the half-painted pill that took a computed-style
  * probe to see. The compound selector below ties on specificity and wins on
- * order. Measured after the fix: pill and label both rgb(65,118,230).
+ * order. Measured after the fix: pill and label both rgb(57,100,254) — the
+ * accent, and the same pair the web's own 深度思考 pill carries.
  */
 .dsh-dschat-toggle.dsh-dschat-toggle-on,
 .dsh-dschat-toggle.dsh-dschat-toggle-on > .dsh-dschat-toggle-text {
-  background: var(--dsw-static-deepseek-50, color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, transparent));
-  color: var(--dsw-static-deepseek-500, var(--dsw-alias-state-business-primary));
-  border-color: var(--dsw-static-deepseek-300, color-mix(in srgb, var(--dsw-alias-state-business-primary) 34%, transparent));
+  background: var(--dschat-tint);
+  border-color: var(--dschat-tint-line);
+  color: var(--dschat-on-accent-tint);
 }
 .dsh-dschat-toggle.dsh-dschat-toggle-on:hover {
-  background: var(--dsw-static-deepseek-100, color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent));
+  background: color-mix(in srgb, var(--dschat-on-accent-tint) 10%, var(--dschat-tint));
 }
+
 /*
- * Dark mode needs the other end of the same static ramp: the light-mode tint
- * (#edf3fe) is nearly the panel's own fill in a dark theme, so the pill would
- * lose its "on" state entirely. The static ramp does NOT flip with the theme
- * (those tokens are theme-independent by design), so the branch has to be
- * written out — keyed off the shell's own 'data-ds-dark-theme', which is a user
- * setting rather than the OS's, and matched to the selector shape the popover
- * rules below already use.
+ * 发送: the page's filled circle, in the page's own blue — the web paints this
+ * disc with brand-primary and puts label-primary-foreground (white) on it, in
+ * BOTH themes, which is what the two rules below now do.
  *
- * The compound class is repeated for the same reason it is above: the blanket
- * button rule outranks a single class, so a dark pill written the short way
- * would keep the light-mode accent. Measured at (0,2,1) versus (0,1,1).
- *
- * AND THE LABEL MUST BE NAMED HERE TOO — that is the reported bug.
- *
- * The light branch above is ONE rule with TWO selectors, and it sets the label's
- * colour through the second one: (0,2,1), which beats '.dsh-dschat-toggle-text'
- * at (0,1,0). This branch used to name only the pill, at (0,3,0) — which beats
- * the pill's (0,2,1) but equals the LABEL selector's (0,2,1) and therefore
- * LOSES to it on document order. The result, measured on a real render and not
- * guessed: in dark mode the lit pill painted its fill and border from the dark
- * branch while the words 「深度思考」 stayed #edf3fe — a near-white label with a
- * cold blue fill, which is the "颜色仍然不对" the reader saw. The glyph was
- * fine (it inherits from the button), so only half the pill was wrong.
- *
- * The selector list below is the same two-part shape the light rule uses, and
- * it is ordered so the label's colour is decided HERE in both branches.
+ * That replaced a rule pair: the disc used to be the harness's
+ * 'state-business-primary' (#4176e6 / #7aaaff, and the deeper #4176e6 is one of
+ * the two blues the reader asked to replace), and the dark theme needed its own
+ * disabled branch because near-black ink on a lifted bright blue was the only
+ * way to keep the arrow readable there. With white ink, "mix the accent toward
+ * the card" dims the disc correctly in both themes, so that branch is gone:
+ * light 2.4:1 and dark 6.2:1 for the disabled arrow, both read as "waiting".
  */
-body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on,
-body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on > .dsh-dschat-toggle-text {
-  background: var(--dsw-static-deepseek-800, #34415b);
-  color: var(--dsw-static-deepseek-400, var(--dsw-alias-state-business-primary));
-  border-color: var(--dsw-static-deepseek-600, #4868b2);
-}
-/*
- * The fill belongs to the pill alone: repeated for the span so the label's
- * background can never be re-declared by the light branch — a text span with
- * the light-mode #edf3fe behind it is the "highlighted word" look the screenshot
- * shows, and 'background: transparent' in the light rule is what the two
- * branches have to agree on.
- */
-body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on > .dsh-dschat-toggle-text {
-  background: transparent;
-}
-body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on:hover {
-  background: color-mix(in srgb, var(--dsw-static-deepseek-800, #34415b), white 6%);
-}
-body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on:hover > .dsh-dschat-toggle-text {
-  background: transparent;
-}
-/*
- * The dark branch for the OFF pill.
- *
- * ORDER IS THE MECHANISM, not decoration: this selector and the "on" branch
- * directly above have the SAME specificity (0,3,0), so only document order can
- * decide between them — and the "on" branch must win, because a lit pill that
- * loses its fill to the off branch looks like a broken switch. Written here,
- * after it, the off rule covers what it should (both plain states) and yields
- * on every class the on rule names. The earlier draft of this file had them the
- * other way round, which silently flattened the lit pill back to transparent.
- *
- * Why a hole instead of a fill: 'bg-layer-2' is one step DARKER than the card's
- * 'bg-layer-1' in the dark ramp (#2c2c2e over #232324) — the opposite direction
- * from light mode — so the off pill read as a slightly different, warmer grey
- * glued onto the card. Two misaligned greys inside one card is what made the
- * dark composer look assembled rather than designed. The border describes the
- * pill instead, and the hover wash keeps it reading as a control.
- */
-body[data-ds-dark-theme] .dsh-dschat-toggle {
-  background: transparent;
-  border-color: var(--dsw-alias-border-l3);
-}
-body[data-ds-dark-theme] .dsh-dschat-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); }
-/*
- * 发送: the page's 34px filled circle.
- *
- * The fill is the accent itself — 'state-business-primary', the token whose
- * light value is the page's #4176e6 — rather than 'button-primary-fill', which
- * resolves to brand-primary and flips to near-white in dark mode (the "太白了"
- * bug this file already documents twice). Disabled is that same circle at 40%
- * opacity, exactly how the page dims an empty composer, so the button keeps its
- * identity instead of turning into a grey disc.
- *
- * Dark mode needs MORE of that identity, not less: 40% of #7aaaff composited
- * onto a #232324 card is a muddy desaturated disc that reads as a disabled
- * PLACEHOLDER rather than as the send button waiting for text. The dark branch
- * raises it to 45% and rings it with a hairline of its own colour, so the circle
- * keeps its edge in the one theme where a dimmed accent has nothing to sit on.
- */
-.dsh-dschat-send {
+button.dsh-dschat-send {
   width: 30px; height: 30px; flex: none; border-radius: 50%; corner-shape: round; display: grid; place-items: center; cursor: pointer;
-  border: none; background: var(--dsw-alias-state-business-primary);
-  color: var(--dsw-alias-label-primary-inverted);
+  border: none; background: var(--dschat-accent);
+  color: var(--dschat-on-accent);
 }
 .dsh-dschat-send:hover { filter: brightness(1.06); }
-.dsh-dschat-send:disabled {
-  opacity: .4;
+button.dsh-dschat-send:disabled {
+  opacity: 1;
+  background: color-mix(in srgb, var(--dschat-accent) 60%, var(--dschat-raised));
   cursor: not-allowed;
-  filter: none;
-}
-body[data-ds-dark-theme] .dsh-dschat-send:disabled {
-  opacity: .45;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent);
 }
 .dsh-dschat-stop {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
   border-radius: 999px; corner-shape: round; cursor: pointer; font-size: 13px;
-  border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dschat-line-2); background: var(--dschat-raised);
 }
-.dsh-dschat-stop:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.dsh-dschat-stop i { width: 9px; height: 9px; border-radius: 2px; background: var(--dsw-alias-state-error-primary); }
+.dsh-dschat-stop:hover { background: var(--dschat-hover); }
+.dsh-dschat-stop i { width: 9px; height: 9px; border-radius: 2px; background: var(--dschat-danger); }
 /*
  * The composer's right-hand keyboard hint (「⌘K 搜索」) is GONE, and so is the
  * rule that used to hide its text below 620px.
@@ -1302,11 +1468,11 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
 /* phase rail under the composer */
 .dsh-dschat-phase {
   display: flex; align-items: center; gap: 10px; justify-content: center; flex-wrap: wrap;
-  padding: 6px 26px 12px; font-size: 11.5px; color: var(--dsw-alias-label-tertiary);
+  padding: 6px 26px 12px; font-size: 11.5px; color: var(--dschat-tx-3);
   font-variant-numeric: tabular-nums;
 }
 .dsh-dschat-phase .dsh-dschat-sep { opacity: .4; }
-.dsh-dschat-phase b { font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.dsh-dschat-phase b { font-weight: 600; color: var(--dschat-tx-2); }
 .dsh-dschat-phase .dsh-dschat-spin { width: 11px; height: 11px; }
 
 /*
@@ -1356,6 +1522,86 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
   background: var(--dschat-surface); backdrop-filter: var(--dsw-menu-backdrop-filter, blur(28px) saturate(160%));
   border: 1px solid var(--dschat-surface-border);
   box-shadow: var(--dsw-elevation-prominent, 0 16px 40px #00000024, 0 2px 8px #00000014);
+  /*
+   * A CEILING, in the caller's own default plus a measured override.
+   *
+   * It cannot be a percentage. The panel is absolutely positioned, so
+   * max-height: 100% resolves against the containing block — the trigger's own
+   * box, 30px tall — which is a 30px ceiling, not a useful one, and there is no
+   * definite height anywhere above it to inherit instead. The measured result of
+   * leaving it open was a twenty-conversation list rendering as a 1182px panel
+   * whose top was at y=-622: most of it above the window, unreachable, with no
+   * scrollbar to say so.
+   *
+   * The 60vh / 520px pair is the FALLBACK, for the surfaces that do not measure
+   * themselves (the 「···」 menu, the lamp's status line, 迁移's form). The
+   * conversation list does, and it overrides this below: see the
+   * --dschat-list-avail rule.
+   */
+  max-height: min(60vh, 520px);
+  /*
+   * Clipping is what turns a panel that is taller than its ceiling into a
+   * SCROLLING one: without it the children spill out of the box and the rows
+   * simply hang below the panel's border. The same declaration appears on
+   * .dsh-dschat-listpop for the flex column it needs; here it is the safety net
+   * for every other panel on this sheet.
+   */
+  overflow: hidden;
+}
+/*
+ * The measured ceiling, for 会话列表 only.
+ *
+ * --dschat-list-avail is written onto the WRAPPER by the panel (see the
+ * measurement effect in DSchatPanel): the distance from this button's top edge to
+ * the body's top edge, less 4px of air under the header. It is a live number,
+ * not a constant — the row sits below a transcript, a queue and an attachment
+ * strip that all move it — so a tall window gives the list room to be a long menu
+ * and a short one gives it exactly what is left, with the rows scrolling inside
+ * it.
+ *
+ * The min() with the fallback is the belt-and-braces half: if the variable is
+ * ever absent (a first paint before the effect, a document where layout never
+ * settles) the popover still gets a real ceiling instead of none.
+ *
+ * 640px, not the 520px this started at: 520 put a hard floor under how many rows
+ * a tall window could show even when there was room for twice as many, and the
+ * result read as "有点矮" — a menu that stops short for no visible reason. The
+ * number still has a job — a very tall window must not turn the list into a
+ * second page — it is just set where it stops being the thing the reader hits
+ * first. It is also the only ceiling left on this panel: 迁移's form is short
+ * enough that its own 60vh / 520px fallback never comes up.
+ */
+.dsh-dschat-pop-wrap > .dsh-dschat-listpop {
+  max-height: min(var(--dschat-list-avail, 100vh), 640px);
+  /*
+   * And it FILLS that ceiling rather than shrinking to its rows.
+   *
+   * A ceiling alone leaves a short list floating: with five conversations in a
+   * roomy window the card measured 381px of a possible 508 and sat 179px down
+   * from the top — and the top edge is what the eye reads as "where the list
+   * starts", so a dropdown that stops short of the room it was given still reads
+   * as short, which is the same complaint the ceiling change was meant to answer.
+   *
+   * A dropdown hangs from the top of the space it opens into and runs to whatever
+   * length it needs; that is the shape 迁移 has (its form is as tall as its
+   * fields) and what a menu does everywhere else. So the card takes the room: the
+   * ROWS still stop where the rows stop, and the area below them is the list's own
+   * surface, with the search box at the top, the footer pinned at the bottom and
+   * the rows scrolling in between when there are too many.
+   *
+   * The height arrives as a PIXEL value from the panel, not as a percentage: 100%
+   * would resolve against the wrapper, a shrink-to-fit flex item with no definite
+   * height, and collapse to auto. See the measurement effect, which writes
+   * --dschat-list-h beside --dschat-list-avail — the two are the same
+   * measurement, one clamped here by 640px and one not.
+   *
+   * Note the shape: MIN, not a nested one. min(min(a, b), c) is a min()
+   * with a min() inside it, and the nested call makes the whole declaration
+   * invalid — Chrome drops it, the height silently falls back to auto, and the
+   * panel shrinks to its rows again with no error anywhere. The first version of
+   * this rule did exactly that.
+   */
+  height: min(var(--dschat-list-h, 100vh), 640px);
 }
 /*
  * The 「···」 menu: a short list, so 348px of form would be a slab. Right
@@ -1375,9 +1621,9 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
 .dsh-dschat-menu-item {
   display: flex; align-items: center; width: 100%; height: 30px; padding: 0 8px;
   border: none; border-radius: var(--dschat-radius-sm); background: transparent; cursor: pointer;
-  font-size: 13px; color: var(--dsw-alias-label-secondary); text-align: left;
+  font-size: 13px; color: var(--dschat-tx-2); text-align: left;
 }
-.dsh-dschat-menu-item:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-menu-item:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 /*
  * Everything anchored in the TITLE BAR opens DOWNWARD.
  *
@@ -1408,34 +1654,37 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
 @media (max-width: 620px) {
   .dsh-dschat-lamp-wrap > .dsh-dschat-pop { left: auto; right: 0; }
 }
+
+.dsh-dschat-pop h4 { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--dschat-tx); }
 /*
- * Host rule for menus: light menus keep the border-l1 hairline, dark menus
- * use the stronger border-l3 stroke (a 1px #ffffff0f hairline disappears on a
- * dark translucent fill).
+ * Host rule for menus: light menus keep the hairline, dark menus use the
+ * stronger stroke — a 1px #ffffff0f hairline disappears on a dark translucent
+ * fill. One rule for both floating surfaces, because they are one material
+ * (see --dschat-surface in the token block).
  */
 body[data-ds-dark-theme] .dsh-dschat-pop,
-body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-border-l3); }
-.dsh-dschat-pop h4 { margin: 0 0 2px; font-size: 13px; font-weight: 600; }
-.dsh-dschat-pop .dsh-dschat-sub { margin: 0 0 10px; font-size: 11.5px; color: var(--dsw-alias-label-tertiary); }
+body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dschat-line-3); }
+}
+.dsh-dschat-pop .dsh-dschat-sub { margin: 0 0 10px; font-size: 11.5px; color: var(--dschat-tx-3); }
 .dsh-dschat-field { margin-bottom: 10px; }
-.dsh-dschat-field > label { display: block; font-size: 11px; color: var(--dsw-alias-label-tertiary); margin-bottom: 4px; }
-.dsh-dschat-seg { display: flex; gap: 3px; padding: 2px; border-radius: var(--dschat-radius-sm); background: var(--dsw-alias-bg-layer-2); }
+.dsh-dschat-field > label { display: block; font-size: 11px; color: var(--dschat-tx-3); margin-bottom: 4px; }
+.dsh-dschat-seg { display: flex; gap: 3px; padding: 2px; border-radius: var(--dschat-radius-sm); background: var(--dschat-filled); }
 .dsh-dschat-seg button {
   flex: 1; height: 26px; border-radius: 6px; border: none; background: transparent; cursor: pointer;
-  font-size: 12px; color: var(--dsw-alias-label-secondary);
+  font-size: 12px; color: var(--dschat-tx-2);
 }
 .dsh-dschat-seg button[data-on] {
-  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
-  font-weight: 500; box-shadow: 0 1px 2px #00000012;
+  background: var(--dschat-raised); color: var(--dschat-tx);
+  font-weight: 500; box-shadow: var(--dschat-card-shadow);
 }
 .dsh-dschat-select {
   width: 100%; height: 30px; padding: 0 8px; font: inherit; font-size: 12.5px; cursor: pointer;
-  color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dschat-radius-sm);
+  color: var(--dschat-tx); background: var(--dschat-raised);
+  border: 1px solid var(--dschat-line-2); border-radius: var(--dschat-radius-sm);
 }
 .dsh-dschat-hintline {
   display: flex; align-items: center; gap: 6px; font-size: 11px;
-  color: var(--dsw-alias-label-tertiary); margin: -2px 0 10px;
+  color: var(--dschat-tx-3); margin: -2px 0 10px;
 }
 /*
  * A hint that is not decoration.
@@ -1457,8 +1706,8 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
  * push the confirmation button off the dialog.
  */
 .dsh-dschat-preview {
-  background: var(--dsw-alias-bg-layer-1);
-  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dschat-filled);
+  border: 1px solid var(--dschat-line);
   border-radius: var(--dschat-radius-sm);
   padding: 8px 10px; min-height: 96px; max-height: 220px; overflow-y: auto;
   font-size: 12px; line-height: 1.55; white-space: pre-wrap;
@@ -1474,49 +1723,50 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-preview-note { align-items: flex-start; line-height: 1.55; }
 .dsh-dschat-pop-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 .dsh-dschat-steps { display: flex; flex-direction: column; gap: 7px; padding: 4px 0 8px; }
-.dsh-dschat-step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
-.dsh-dschat-step[data-done] { color: var(--dsw-alias-label-primary); }
+.dsh-dschat-step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dschat-tx-2); }
+.dsh-dschat-step[data-done] { color: var(--dschat-tx); }
 .dsh-dschat-tick {
   width: 16px; height: 16px; border-radius: 50%; corner-shape: round; flex: none; display: grid; place-items: center;
-  border: 1.5px solid var(--dsw-alias-border-l3);
+  border: 1.5px solid var(--dschat-line-3);
 }
 .dsh-dschat-step[data-done] .dsh-dschat-tick {
   background: var(--dsw-alias-state-success-primary);
   border-color: var(--dsw-alias-state-success-primary); color: #fff;
 }
 .dsh-dschat-step .dsh-dschat-spin { width: 14px; height: 14px; border-width: 1.8px; }
-.dsh-dschat-prog { height: 3px; border-radius: 99px; corner-shape: round; background: var(--dsw-alias-bg-skeleton); overflow: hidden; margin: 2px 0 4px; }
-.dsh-dschat-prog > i { display: block; height: 100%; width: 0; background: var(--dsw-alias-state-business-primary); transition: width .3s ease; }
+.dsh-dschat-prog { height: 3px; border-radius: 99px; corner-shape: round; background: var(--dschat-quiet); overflow: hidden; margin: 2px 0 4px; }
+.dsh-dschat-prog > i { display: block; height: 100%; width: 0; background: var(--dschat-accent); transition: width .3s ease; }
 
 /* ---------- run-status card (panel modal, not a settings page) ---------- */
 .dsh-dschat-status { display: block; }
 .dsh-dschat-sethead h1 { margin: 0 0 4px; font-size: 20px; font-weight: 500; line-height: 28px; }
-.dsh-dschat-sethead p { margin: 0 0 20px; font-size: 13px; color: var(--dsw-alias-label-secondary); max-width: 640px; }
+.dsh-dschat-sethead p { margin: 0 0 20px; font-size: 13px; color: var(--dschat-tx-2); max-width: 640px; }
 .dsh-dschat-setcard {
   margin: 0 0 12px; padding: 12px 14px;
   border-radius: var(--dschat-radius-lg);
-  background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2));
+  background: var(--dschat-filled);
+  border: 1px solid var(--dschat-line);
 }
 .dsh-dschat-status .dsh-dschat-sethead h1 { font-size: 15px; font-weight: 600; line-height: 22px; }
 .dsh-dschat-status .dsh-dschat-sethead p { margin: 0 0 12px; max-width: none; }
 .dsh-dschat-setcard h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; }
 .dsh-dschat-setrow {
   display: flex; align-items: baseline; gap: 16px; padding: 5px 0;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  border-top: 1px solid var(--dschat-line);
 }
 .dsh-dschat-setrow:first-of-type { border-top: none; }
-.dsh-dschat-setlabel { flex: none; width: 150px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }
+.dsh-dschat-setlabel { flex: none; width: 150px; font-size: 12.5px; color: var(--dschat-tx-2); }
 .dsh-dschat-setvalue {
-  flex: 1; min-width: 0; font-size: 12.5px; color: var(--dsw-alias-label-primary);
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--dschat-tx);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dschat-mono { font-family: var(--dschat-mono); font-size: 11.5px; }
 .dsh-dschat-on, .dsh-dschat-off { display: inline-flex; align-items: center; gap: 5px; }
-.dsh-dschat-on { color: var(--dsw-alias-state-success-primary); }
-.dsh-dschat-off { color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-on { color: var(--dschat-success); }
+.dsh-dschat-off { color: var(--dschat-tx-3); }
+
 .dsh-dschat-setactions { display: flex; gap: 8px; }
-.dsh-dschat-sethint { margin: 10px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }
+.dsh-dschat-sethint { margin: 10px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--dschat-tx-3); }
 
 /* ---------- engine notice (in the transcript) ---------- */
 /*
@@ -1530,8 +1780,8 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-notice {
   display: flex; align-items: flex-start; gap: 10px; margin: 14px 0 4px; padding: 12px 14px;
   border-radius: var(--dschat-radius-lg);
-  background: var(--dsw-alias-bg-layer-2);
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, var(--dsw-alias-border-l3)) 45%, var(--dsw-alias-border-l2));
+  background: var(--dschat-filled);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 45%, var(--dschat-line-2));
 }
 .dsh-dschat-notice-mark {
   flex: none; display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px;
@@ -1539,7 +1789,7 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 }
 .dsh-dschat-notice-body { flex: 1; min-width: 0; }
 .dsh-dschat-notice-body strong { display: block; font-size: 13px; font-weight: 600; }
-.dsh-dschat-notice-body p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--dsw-alias-label-secondary); word-break: break-word; }
+.dsh-dschat-notice-body p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--dschat-tx-2); word-break: break-word; }
 .dsh-dschat-notice-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 
 /* ---------- 运行状态 modal ---------- */
@@ -1550,15 +1800,15 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
 .dsh-dschat-modal-card {
   position: relative; width: min(640px, 100%); max-height: 100%; overflow: auto;
   padding: 18px 20px 20px; border-radius: var(--dschat-radius-lg);
-  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l3);
+  background: var(--dschat-raised); border: 1px solid var(--dschat-line-3);
   box-shadow: 0 18px 48px #0000003d;
 }
 .dsh-dschat-modal-close {
   position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
   display: grid; place-items: center; border: none; border-radius: 6px; cursor: pointer;
-  background: transparent; color: var(--dsw-alias-label-tertiary);
+  background: transparent; color: var(--dschat-tx-3);
 }
-.dsh-dschat-modal-close:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dschat-modal-close:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
 
 /* ---------- toasts ---------- */
 .dsh-dschat-toasts {
@@ -1588,13 +1838,15 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
   text-align: center; height: 100%;
 }
 .dsh-dschat-crash-message {
-  margin: 0; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 1.6; max-width: 46ch;
+  margin: 0; color: var(--dschat-tx); font-size: 13px; line-height: 1.6; max-width: 46ch;
 }
 .dsh-dschat-crash-detail {
   margin: 0; max-width: 100%; overflow: auto; text-align: left;
   padding: 10px 12px; border-radius: var(--dschat-radius-sm);
-  background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dschat-surface-border);
-  color: var(--dsw-alias-state-error-primary);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line-2);
+  color: var(--dschat-danger);
   font-family: var(--dschat-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word;
 }
+
+
 `

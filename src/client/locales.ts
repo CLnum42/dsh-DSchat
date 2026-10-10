@@ -62,10 +62,10 @@ export interface DSchatDict {
   'action.newChat': string
   'action.newChat.hint': string
   /*
-   * The action row's VISIBLE labels. They are deliberately shorter than the
-   * titles beside them: 收起会话列表 is a sentence for a tooltip, 会话列表 is
-   * what fits on the button. The row's three buttons are named rather than
-   * glyph-only, so each needs its own noun.
+   * The name of 会话列表, used in three places now: the header button's
+   * accessible name, the dialog's own heading, and the tests that pin both.
+   * The button itself shows no text (see the header note in styles.ts), so this
+   * string is the whole of what a screen reader hears for the control.
    */
   'action.sessions': string
   'action.recover': string
@@ -89,6 +89,17 @@ export interface DSchatDict {
   'transfer.short': string
   'transfer.short.hint': string
 
+  /*
+   * 会话列表's popover. The keys keep the `rail.` prefix for the reason the
+   * storage key keeps its own (see RAIL_OPEN_STORE in the panel): they are read
+   * from the same places, and a rename would be churn in ten locales' worth of
+   * call sites for a word the reader never sees.
+   *
+   * `rail.show` / `rail.hide` are the trigger's tooltip AND its accessible name
+   * — the button carries the visible noun (action.sessions) and the tooltip
+   * carries the sentence, which is what a reader hovering it needs to know:
+   * whether the press opens or closes.
+   */
   'rail.search': string
   'rail.search.hint': string
   'rail.search.clear': string
@@ -98,7 +109,6 @@ export interface DSchatDict {
   'rail.noMatch': string
   'rail.clear': string
   'rail.clearConfirm': string
-  'rail.resize': string
 
   /*
    * The right-edge question navigator: the tick rail that expands into the
@@ -129,6 +139,19 @@ export interface DSchatDict {
 
   'empty.title': string
   'empty.body': string
+  /**
+   * The invitation to start: a label over three example asks.
+   *
+   * The empty page used to end on 「Enter 发送 / ⌘/ 聚焦」 — a key reference,
+   * which is documentation rather than an invitation, and it says nothing about
+   * WHAT this panel is good for. Three real questions the web model answers
+   * well say it in one glance, and each one is a sentence the reader can send
+   * as-is.
+   */
+  'empty.try': string
+  'empty.try.translate': string
+  'empty.try.summarize': string
+  'empty.try.polish': string
   /**
    * Shown for a conversation whose body is still on its way, so a chat WITH
    * history never renders as the empty state (see `thread()`).
@@ -394,13 +417,12 @@ export const zh: DSchatDict = {
   'rail.search': '搜索会话…',
   'rail.search.hint': '搜索会话内容（⌘K）',
   'rail.search.clear': '清空搜索',
-  'rail.show': '显示会话列表',
-  'rail.hide': '收起会话列表',
-  'rail.empty': '还没有对话，点标题栏的「＋」开始',
+  'rail.show': '打开会话列表',
+  'rail.hide': '关闭会话列表',
+  'rail.empty': '还没有对话，点输入框上方的「＋ 新对话」开始',
   'rail.noMatch': '没有匹配的会话',
   'rail.clear': '清空全部',
   'rail.clearConfirm': '确认清空？',
-  'rail.resize': '拖动调整会话列表宽度（双击恢复默认）',
 
   'qnav.label': '提问导航',
   'qnav.title': '本会话提问 · {count} 条',
@@ -437,15 +459,19 @@ export const zh: DSchatDict = {
   'engine.notice.needLogin': '网页端需要登录：请在弹出的浏览器窗口里完成登录，登录成功后这条提示会自动消失。',
   'engine.notice.queued': '待发消息暂时发不出去（网页端没起来）。消息还在队列里，启动成功后会自动发出。',
 
-  'empty.title': '在 DSH 里直接聊 DeepSeek 网页端',
-  'empty.body': '复用你的网页登录会话，不消耗 API 额度。聊完可以一键蒸馏成任务简报，在 harness 里继续开发。',
+  'empty.title': '直接和 DeepSeek 对话',
+  'empty.body': '沿用你的网页登录，不消耗 API 额度。聊完一键蒸馏成任务简报。',
+  'empty.try': '或者试试',
+  'empty.try.translate': '把英文翻译为通顺的中文',
+  'empty.try.summarize': '总结这份文档的主要内容',
+  'empty.try.polish': '润色这段文字',
 
   'thread.loading': '正在载入这段对话…',
 
-  'composer.placeholder': '给 DeepSeek 网页端发消息…',
-  'composer.notLoggedIn': '网页端需要登录 · 直接输入，登录后即可发送',
-  'composer.offline': '网页端未启动 · 直接输入，会自动在后台启动',
-  'composer.connecting': '正在后台启动网页端…可以先输入',
+  'composer.placeholder': '给 DeepSeek 发消息，回车发送',
+  'composer.notLoggedIn': '登录后即可发送 · 先输入也行',
+  'composer.offline': '直接输入，会自动在后台打开',
+  'composer.connecting': '正在打开 · 可以先输入',
   'composer.attach.drop': '松开即可添加文件',
   'composer.queue.note': '上一条回复还在生成，以上消息会在它结束后依次发出',
   'composer.queue.files': '附件 {count}',
@@ -668,13 +694,12 @@ export const en: DSchatDict = {
   'rail.search': 'Search conversations…',
   'rail.search.hint': 'Search conversation text (⌘K)',
   'rail.search.clear': 'Clear search',
-  'rail.show': 'Show conversation list',
-  'rail.hide': 'Hide conversation list',
-  'rail.empty': 'No conversations yet — start a new chat',
+  'rail.show': 'Open the conversation list',
+  'rail.hide': 'Close the conversation list',
+  'rail.empty': 'No conversations yet — start one with the New chat button above the input',
   'rail.noMatch': 'No matching conversation',
   'rail.clear': 'Clear all',
   'rail.clearConfirm': 'Clear all?',
-  'rail.resize': 'Drag to resize the conversation list (double-click to reset)',
 
   'qnav.label': 'Question navigator',
   'qnav.title': 'Questions · {count}',
@@ -711,15 +736,19 @@ export const en: DSchatDict = {
   'engine.notice.needLogin': 'DeepSeek web needs a sign-in: finish it in the browser window that just opened — this notice disappears on its own once you are in.',
   'engine.notice.queued': 'Queued messages cannot go out while the web engine is down. They stay in the queue and leave automatically once it starts.',
 
-  'empty.title': 'Talk to DeepSeek web right inside DSH',
-  'empty.body': 'Reuses your web sign-in instead of API billing. When you are done, distill the chat into a task brief and keep going in a harness session.',
+  'empty.title': 'Chat with DeepSeek, right here',
+  'empty.body': 'Your web sign-in, not API billing. Distill the chat into a task brief when you are done.',
+  'empty.try': 'Or try',
+  'empty.try.translate': 'Translate this English into natural Chinese',
+  'empty.try.summarize': 'Summarize what this document is about',
+  'empty.try.polish': 'Polish this passage of text',
 
   'thread.loading': 'Loading this conversation…',
 
-  'composer.placeholder': 'Message DeepSeek web…',
-  'composer.notLoggedIn': 'Web sign-in needed · type now, it sends once you are in',
-  'composer.offline': 'Web engine is off · just type, it starts in the background',
-  'composer.connecting': 'Starting the web engine in the background… type ahead',
+  'composer.placeholder': 'Message DeepSeek — Enter to send',
+  'composer.notLoggedIn': 'Sends once you sign in · typing now is fine',
+  'composer.offline': 'Just type — it opens in the background',
+  'composer.connecting': 'Opening · type ahead',
   'composer.attach.drop': 'Drop to attach',
   'composer.queue.note': 'The previous reply is still generating; these go out one by one when it ends',
   'composer.queue.files': '{count} file(s)',

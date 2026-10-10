@@ -95,9 +95,12 @@ test('DSchatPanel renders its initial screen', async () => {
   try {
     const html = renderToStaticMarkup(createElement(DSchatPanel, deps as never))
     assert.ok(html.length > 0, 'panel produced markup')
-    // The shell of the panel, its rail and its composer must all be present.
+    // The shell of the panel, the list's trigger and its composer must all be
+    // present. The list's PANEL is not: it returns null while closed, and a
+    // static render has no localStorage, which means the documented default —
+    // open — applies. See the open/closed test below for the other half.
     assert.match(html, /dsh-dschat-header/)
-    assert.match(html, /dsh-dschat-rail/)
+    assert.match(html, /dsh-dschat-tbtn-sessions/)
     assert.match(html, /dsh-dschat-composer/)
     assert.match(html, /dsh-dschat-phase/)
     // With no snapshot yet the status gauge must read as not-started, not blank.
@@ -234,20 +237,26 @@ test('the composer wakes the engine instead of forcing a login window', async ()
 })
 
 /**
- * The header's two halves, and the three window controls that moved OUT of it.
+ * The header's two halves, and the controls that live on the action row instead.
  *
- * The controls exist because the conversation list, the search box and 新对话
- * had no visible entry point: the list was permanent (with no way to give the
- * conversation the full width), the search box was a bare input nobody was told
- * about, and the only 新对话 button sat above that list. They used to live in
- * the header; they now sit in the action row directly above the composer, next
- * to the conversation they act on.
+ * The controls exist because the conversation list and 新对话 had no visible
+ * entry point: the list was permanent (with no way to give the conversation the
+ * full width), and the only 新对话 button sat above that list. They used to live
+ * in the header; they now sit in the action row directly above the composer,
+ * next to the conversation they act on.
  *
  * The header keeps identity (the whale + the product name) and the engine's
- * state lamp, which is also the entry to the engine menu. The rail is rendered
- * by DEFAULT (a reader who has never touched the toggle gets the list), so this
- * asserts the initial screen: the brand, one lamp, three buttons in the action
- * row, the history one pressed, the list on screen.
+ * state lamp, which is also the entry to the engine menu. 会话列表 has moved
+ * between the two strips twice, and the rule that settles it is WHERE ITS PANEL
+ * OPENS: the list is a popover that hangs upward off its trigger (the same one
+ * 迁移 opens), so the trigger has to sit at the bottom of the panel — in the
+ * header, the only room above it is the 52px title strip, and the list would
+ * have to open downward over the conversation it lists. See `actions()`.
+ *
+ * The list's panel IS rendered by default (a reader who has never touched the
+ * toggle gets the list), so this asserts the initial screen: the brand, one
+ * lamp, the three labelled buttons on the action row, 会话列表 lit as pressed,
+ * and the popover on screen with its search box.
  */
 test('the header carries the whale mark and the lamp, and the controls moved to the action row', async () => {
   const { DSchatPanel, renderToStaticMarkup, createElement, dir } = await loadComponents()
@@ -258,6 +267,18 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
     const html = renderToStaticMarkup(createElement(DSchatPanel, deps as never))
     const header = html.slice(html.indexOf('dsh-dschat-header'), html.indexOf('dsh-dschat-body'))
     const composer = html.slice(html.indexOf('dsh-dschat-composer'), html.indexOf('dsh-dschat-phase'))
+    /*
+     * The action row on its own, because the list's POPOVER is rendered inside
+     * the composer too (the trigger and its panel share a wrapper), and that
+     * panel contains the search box — which legitimately carries
+     * `rail.search.hint`. Counting buttons over the whole composer would count
+     * the popover's own controls as row verbs, and looking for the search hint
+     * there would find the list's box rather than a button.
+     */
+    const actions = composer.slice(
+      composer.indexOf('dsh-dschat-actions'),
+      composer.indexOf('dsh-dschat-card'),
+    )
 
     /*
      * Identity first, status after: the whale names the product, the lamp
@@ -281,35 +302,66 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
      * row is where a reader looks for "a new chat", so a glyph-only square there
      * was a control they had to already know.
      *
-     * 搜索 is deliberately NOT one of them: it duplicated the rail's own search
-     * box, which is on screen whenever the rail is (the default). What it
-     * uniquely did — reach search with the rail collapsed — belongs to ⌘K, and
-     * the assertion below makes sure ⌘K still does it.
+     * 会话列表's label is the VISIBLE noun (action.sessions) while its tooltip
+     * and accessible name are the sentence, which is why the assertion looks for
+     * rail.hide here: the list is rendered (see the comment above), so the
+     * trigger says what pressing it will do.
+     *
+     * 搜索 is deliberately NOT one of them: it duplicated the list's own search
+     * box, which is on screen whenever the list is (the default). What it
+     * uniquely did — reach search with the list closed — belongs to ⌘K, and the
+     * assertion below makes sure ⌘K still does it.
      */
     assert.equal(
-      (composer.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 3,
+      (actions.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 3,
       'three labelled buttons on the action row',
     )
-    const history = composer.indexOf('rail.hide')
-    const fresh = composer.indexOf('action.newChat.hint')
-    assert.ok(history > -1 && fresh > -1, 'each button carries its own label')
-    assert.ok(history < fresh, 'in the order 会话列表, 新对话')
-    assert.equal(
-      composer.includes('rail.search.hint'), false,
-      'and the row no longer carries a search button',
+    const sessions = actions.indexOf('rail.hide')
+    const fresh = actions.indexOf('action.newChat.hint')
+    assert.ok(sessions > -1 && fresh > -1, 'each button carries its own label')
+    assert.ok(sessions < fresh, 'in the order 会话列表, 新对话')
+    /*
+     * The row has no SEARCH button, and the ⌘K hint is not a button's tooltip
+     * either: it sits on the popover's own input, below the trigger, which is
+     * where the feature lives. One advertisement, in one place.
+     */
+    assert.ok(
+      actions.indexOf('title="rail.search.hint"') > actions.indexOf('dsh-dschat-listpop'),
+      'the ⌘K hint is on the list popover\'s input, not on a row button',
     )
-    assert.match(composer, /aria-pressed="true"/, 'the history toggle reads as pressed while the list is shown')
+    /*
+     * NOT aria-pressed. That attribute belongs to a toggle button, and while the
+     * list WAS a column that never went away, "pressed" was the honest reading.
+     * A popover is a thing that opens: the state it reports is `aria-expanded`,
+     * and the button that owns it is the same one that closes it.
+     */
+    assert.match(actions, /aria-expanded="true"/, 'the trigger reports an open menu while the list is shown')
+    assert.match(actions, /aria-haspopup="dialog"/, 'and says what it opens')
+    assert.equal(actions.includes('aria-pressed'), false, 'a popover trigger is not a toggle button')
     for (const key of ['action.sessions', 'action.newChat']) {
-      assert.ok(composer.includes(key), `the button carries the visible word for ${key}`)
+      assert.ok(actions.includes(key), `the button carries the visible word for ${key}`)
     }
+    /*
+     * And the popover itself is a sibling of that button inside one wrapper —
+     * the wrapper is what makes `.dsh-dschat-pop` anchor to the trigger rather
+     * than to the panel (see the note on the lamp's wrapper for the bug that
+     * rule exists to prevent). Its search box is inside the popover, i.e. it
+     * advertises the shortcut from the list rather than from the row.
+     */
+    assert.match(actions, /dsh-dschat-pop-wrap/, 'the trigger and its panel share a positioned wrapper')
+    assert.match(actions, /dsh-dschat-listpop/, 'and the panel is the list, not a form')
+    assert.ok(
+      actions.indexOf('dsh-dschat-listpop') > actions.indexOf('dsh-dschat-tbtn-sessions'),
+      'the panel follows the trigger inside that wrapper',
+    )
 
     /*
      * The search it dropped is still reachable, and by the path that has to work
-     * in every state: the shortcut goes through `openSearch()`, which brings a
-     * collapsed rail back before focusing. The direct `searchRef.current?.focus()`
-     * this replaced was a no-op whenever the rail was hidden — the box is not in
-     * the DOM then — so the old code silently lost the shortcut in exactly the
-     * state where a keyboard path matters most.
+     * in every state: the shortcut goes through `openSearch()`, which opens the
+     * list before focusing. The direct `searchRef.current?.focus()` this
+     * replaced was a no-op whenever the list was closed — the box is not in the
+     * DOM then — so the old code silently lost the shortcut in exactly the state
+     * where a keyboard path matters most.
      *
      * Comments are stripped before matching: the fix's own comment names the
      * call it warns against, and prose must not trip a code-level guard.
@@ -322,9 +374,9 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
     assert.ok(shortcut.includes('openSearch()'), '⌘K opens the search through the same path the button used')
     assert.equal(
       /searchRef\.current\?\.focus\(\)/.test(shortcut), false,
-      'and never focuses the ref directly: it is null while the rail is collapsed',
+      'and never focuses the ref directly: it is null while the list is closed',
     )
-    /* The rail's own box advertises the shortcut it now owns. */
+    /* The list's own box advertises the shortcut it now owns. */
     assert.match(
       panelSource.slice(panelSource.indexOf('dsh-dschat-search')),
       /title: tr\('rail\.search\.hint'\)/,
@@ -387,8 +439,22 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
     assert.equal(header.includes('dsh-dschat-status'), false, 'and so is the status chip')
     assert.equal(header.includes('dsh-dschat-vsep'), false, 'with the divider that framed it')
 
-    assert.match(html, /dsh-dschat-rail/, 'and the list is on screen without any interaction')
+    /*
+     * The header carries the mark and the lamp and NOTHING else. 会话列表 is the
+     * one control that came back here once (while the list was a centred dialog)
+     * and left again, so this is the assertion that pins the answer: a control
+     * whose panel opens upward cannot live in the top strip.
+     */
+    assert.equal(
+      header.includes('dsh-dschat-tbtn-sessions'), false,
+      'the list trigger is not in the header: its panel opens upward',
+    )
+    assert.match(html, /dsh-dschat-listpop/, 'and the list is on screen without any interaction')
     assert.match(html, /dsh-dschat-search/, 'with its search box')
+    assert.equal(
+      html.includes('dsh-dschat-modal'), false,
+      'the list is anchored to its trigger, not a centred dialog',
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -419,15 +485,16 @@ test('the composer no longer advertises the ⌘K search shortcut', async () => {
 })
 
 /**
- * A collapsed rail is ABSENT, not narrow.
+ * A closed conversation list is ABSENT, not hidden.
  *
- * The panel reads the choice from localStorage, so the collapsed state is
- * reachable in a static render. A zero-width column would keep the resize
- * handle in the tab order and its 6px strip on screen — a phantom control
- * nobody can see, which is exactly the "sidebar collapsed" bug class this
- * panel has already been bitten by once.
+ * The panel reads the choice from localStorage, so both states are reachable in
+ * a static render. The list returns `null` rather than a `display: none` box:
+ * a hidden subtree keeps its rows in the tab order and its search box focusable,
+ * which is a phantom menu nobody can see — the same "controls that are not on
+ * screen are still reachable" bug class this panel has already been bitten by
+ * once, when a zero-width sidebar kept its resize handle.
  */
-test('a collapsed conversation list leaves the DOM entirely', async () => {
+test('a closed conversation list leaves the DOM entirely', async () => {
   const { DSchatPanel, renderToStaticMarkup, createElement, dir } = await loadComponents()
   const globals = globalThis as { window?: unknown }
   const hadWindow = 'window' in globals
@@ -444,17 +511,24 @@ test('a collapsed conversation list leaves the DOM entirely', async () => {
 
     store.set('dsh-dschat.rail.open', '0')
     const closed = render()
-    assert.equal(/dsh-dschat-rail\b/.test(closed), false, 'no rail element is rendered')
-    assert.equal(/dsh-dschat-rail-resize/.test(closed), false, 'and no resize handle survives it')
-    assert.match(closed, /rail\.show/, 'the header button offers the way back')
-    assert.match(closed, /dsh-dschat-composer/, 'and the conversation keeps its composer')
+    assert.equal(/dsh-dschat-listpop/.test(closed), false, 'no list panel is rendered')
+    assert.equal(/dsh-dschat-search/.test(closed), false, 'and no search box survives it')
+    assert.equal(/dsh-dschat-item\b/.test(closed), false, 'with no rows in the tab order')
+    assert.match(closed, /dsh-dschat-tbtn-sessions/, 'the trigger is still on the action row')
+    assert.match(closed, /rail\.show/, 'offering the list back')
+    assert.match(closed, /aria-expanded="false"/, 'and reporting itself closed')
+    assert.match(closed, /dsh-dschat-composer/, 'while the conversation keeps its composer')
 
-    // '0' is the only value that means closed: a first-run reader (nothing
-    // stored) and any other value both get the list.
+    /*
+     * '0' is the only value that means closed: a first-run reader (nothing
+     * stored) and any other value both get the list. That default is why the
+     * upgrade from the sidebar version opens the list rather than losing it, and
+     * it is asserted here because a change to `!== '0'` would be silent.
+     */
     store.delete('dsh-dschat.rail.open')
-    assert.match(render(), /dsh-dschat-rail-resize/, 'an unset preference shows the list')
+    assert.match(render(), /dsh-dschat-listpop/, 'an unset preference shows the list')
     store.set('dsh-dschat.rail.open', '1')
-    assert.match(render(), /dsh-dschat-rail-resize/, 'and so does an explicit open')
+    assert.match(render(), /dsh-dschat-listpop/, 'and so does an explicit open')
   } finally {
     if (hadWindow) globals.window = undefined
     else delete globals.window
@@ -910,19 +984,27 @@ test('the composer\'s menus open upward, and the title bar\'s open downward', as
 })
 
 /**
- * The transfer button and the composer pills share one accent family.
+ * The transfer button and the composer pills are the SAME tint triplet.
  *
- * They no longer share one *recipe*, and that is the change this guards: the
- * pills are now the web app's own switches (a deepseek-static wash with the
- * accent as both border and label — see the composer section of the README),
- * while 「在 Harness 中继续」 is the panel's own primary action and keeps the
- * 13% `state-business-primary` tint that is correct in both themes regardless of
- * which statics a future skin ships.
+ * They used to be two recipes in two colour families: the pills mixed three
+ * different `static-deepseek-*` values (a #edf3fe fill, a #4868b2 border, a
+ * #7aaaff label) while 「在 Harness 中继续」 took a 13% `state-business-primary`
+ * tint — four blues for one meaning, which is what 「配色不统一」 meant in
+ * practice. A later pass collapsed those into one accent, and this one replaces
+ * the *mixing* with the web app's actual steps.
  *
- * What must NOT come back is the mistake that produced both rules:
- * `button-primary-fill` resolves to brand-primary, which is near-white in dark
- * mode — the reported 「太白了」. So the assertions below are about the accent
- * family and the inverted family, not about matching percentages.
+ * They now share one rule shape: the --dschat-tint fill, the --dschat-tint-line
+ * hairline, and --dschat-on-accent-tint for the label — the exact pair
+ * deepseek.com paints its own 深度思考 pill with (deepseek-50 on deepseek-300 in
+ * deepseek-500; deepseek-900 on deepseek-600 in deepseek-400). The panel's own
+ * palette block is the single place those resolve, so one edit moves all four
+ * controls.
+ *
+ * What must NOT come back is the mistake that produced the old rules:
+ * `button-primary-fill` resolves to brand-primary, near-white in dark mode (the
+ * reported 「太白了」), and the inverted foreground family is its dark half. So
+ * the assertions below are about the FAMILY each rule draws from, not about
+ * matching percentages.
  */
 test('the primary button and the composer pills stay on the accent family', async () => {
   const { readFileSync } = await import('node:fs')
@@ -932,17 +1014,32 @@ test('the primary button and the composer pills stay on the accent family', asyn
     assert.ok(start > -1, `${selector} is styled`)
     return css.slice(start, css.indexOf('}', start))
   }
+  /*
+   * The whole sheet must stay off the harness's deepseek statics.
+   *
+   * Two of their steps are the old blues (500 is #4176e6, 400 #7aaaff) while
+   * the web app paints #3964fe and #5686fe at the same two names, so ANY rule
+   * that reaches for the static is a rule that silently keeps the palette the
+   * reader asked to replace. The literals live in the palette block; nothing
+   * else reads them from the harness. Comments are stripped first, because the
+   * block's own explanation has to name the tokens it refuses.
+   */
+  assert.equal(
+    /--dsw-static-deepseek-/.test(css.replace(/\/\*[\s\S]*?\*\//g, '')), false,
+    'no rule may read the harness deepseek ramp: its 400/500 are the old blues',
+  )
   const primary = ruleOf('.dsh-dschat-btn-primary')
-  assert.ok(primary.includes('state-business-primary'), 'the primary fill is the accent')
+  assert.ok(primary.includes('var(--dschat-tint)'), 'the primary fill is the tint step')
+  assert.ok(primary.includes('var(--dschat-tint-line)'), 'with the tint hairline around it')
   assert.equal(
     /var\(\s*--dsw-alias-button-primary-(fill|hover|dimmed)\s*\)/.test(primary), false,
     'no button-primary-* token: that family inverts with the theme and goes white in dark mode',
   )
   assert.equal(
     primary.includes('label-primary-foreground'), false,
-    'the primary fill is a 13% tint, so its label cannot be the on-accent foreground colour',
+    'the primary fill is a tint, so its label cannot be the on-accent foreground colour',
   )
-  assert.ok(ruleOf('.dsh-dschat-btn-primary:hover').includes('label-primary'), 'the hover label stays readable')
+  assert.ok(ruleOf('.dsh-dschat-btn-primary:hover').includes('--dschat-on-accent-tint'), 'the hover label stays readable')
 
   /*
    * The action row's own buttons are the same argument in a different shape.
@@ -953,18 +1050,19 @@ test('the primary button and the composer pills stay on the accent family', asyn
    * four quiet glyphs the one control that is not the message. So rest is
    * transparent and quiet, and the accent comes back only where it MEANS
    * something — hover, and the open state that says "this button owns the panel
-   * on screen now". Both are tints of the accent token; the inverted
-   * button-primary-* family must not appear at all.
+   * on screen now". The open state wears the same tint triplet as the pills;
+   * the inverted button-primary-* family must not appear at all.
    */
   const tbtn = ruleOf('.dsh-dschat-tbtn')
   assert.ok(tbtn.includes('background: transparent'), 'the toolbar button rests unfilled')
-  assert.ok(tbtn.includes('color: var(--dsw-alias-label-secondary)'), 'and quiet, like the glyphs beside it')
+  assert.ok(tbtn.includes('color: var(--dschat-tx-2)'), 'and quiet, like the glyphs beside it')
   assert.equal(
     /border:\s*1px solid var\(--dsw/.test(tbtn), false,
     'rest draws no visible border — only the open state does',
   )
   const tbtnOn = ruleOf('.dsh-dschat-tbtn-on')
-  assert.ok(tbtnOn.includes('state-business-primary'), 'the open state is the accent family')
+  assert.ok(tbtnOn.includes('var(--dschat-tint)'), 'the open state is the tint step, like the pills')
+  assert.ok(tbtnOn.includes('var(--dschat-tint-line)'), 'with the tint hairline on it')
   assert.equal(
     /button-primary-(fill|hover|dimmed)/.test(
       [tbtn, tbtnOn, ruleOf('.dsh-dschat-tbtn:hover'), ruleOf('.dsh-dschat-tbtn:disabled')].join('\n'),
@@ -973,20 +1071,37 @@ test('the primary button and the composer pills stay on the accent family', asyn
     'never the theme-inverting button-primary-* family, which goes white in dark mode',
   )
 
-  // The pills: the web app's own two-state recipe, both states by token.
-  // Sliced from the selector to the closing brace at column zero, because this
-  // rule is a two-line selector list and the single-line helper above would
-  // read the first line as if it were the whole rule.
+  /*
+   * The pills: ONE recipe for both states, sliced from the selector to the
+   * closing brace at column zero — this rule is a two-line selector list and
+   * the single-line helper above would read the first line as if it were the
+   * whole rule.
+   */
   const toggleStart = css.indexOf('.dsh-dschat-toggle.dsh-dschat-toggle-on,')
   assert.ok(toggleStart > -1, 'the on-state pill is styled')
   const toggle = css.slice(toggleStart, css.indexOf('\n}', toggleStart))
-  assert.ok(toggle.includes('--dsw-static-deepseek-50'), 'the on-state fill is the web app\'s own light blue')
-  assert.ok(toggle.includes('--dsw-static-deepseek-500'), 'and its label/border are the accent blue')
-  assert.ok(toggle.includes('--dsw-alias-state-business-primary'), 'with a token-only fallback, never a literal colour')
-  const darkStart = css.indexOf('body[data-ds-dark-theme] .dsh-dschat-toggle.dsh-dschat-toggle-on')
-  assert.ok(darkStart > -1, 'and the dark pill repeats the compound class')
-  const dark = css.slice(darkStart, css.indexOf('\n}', darkStart))
-  assert.ok(dark.includes('--dsw-static-deepseek-800'), 'the dark end of the same ramp, not the light one')
+  assert.ok(toggle.includes('background: var(--dschat-tint)'), 'the on-state fill is the tint step')
+  assert.ok(toggle.includes('border-color: var(--dschat-tint-line)'), 'and its border is the tint hairline')
+  assert.ok(toggle.includes('var(--dschat-on-accent-tint)'), 'and its label is the tint-label token')
+  assert.equal(
+    /--dsw-static-deepseek-\d+/.test(toggle), false,
+    'the pill no longer reaches past the panel palette for a raw static: that was the fourth blue',
+  )
+  /*
+   * There is deliberately NO dark branch for the pill any more.
+   *
+   * The old sheet needed two of them (the static ramp does not flip with the
+   * theme, so the light #edf3fe fill had to be re-stated as #34415b by hand,
+   * and the label had to be named twice more to survive the cascade). A rule
+   * that reads its colours from the panel palette needs neither — so a dark
+   * toggle rule reappearing here would mean somebody had bypassed the palette
+   * again.
+   */
+  assert.equal(
+    /body\[data-ds-dark-theme\][^{]*dsh-dschat-toggle-on/.test(css),
+    false,
+    'the on-pill has no theme branch: the palette tokens already carry both themes',
+  )
 })
 
 /**
@@ -1023,18 +1138,48 @@ test('a dimmed fill never carries an on-accent foreground colour', async () => {
    * rule inherits its background from the enabled rule directly above it.
    *
    * The design it implements is the web app's own: the accent circle stays the
-   * accent circle and the whole control drops to 40% opacity, so the glyph is
-   * white-on-accent at every state and the contrast argument that produced the
-   * old grey-dimmed fill no longer applies to it. What must never come back is
-   * the old shape of the fix: a `button-primary-dimmed` fill (light grey in
-   * light mode, dark grey in dark mode) under an on-accent glyph.
+   * accent circle and the label keeps the accent's ink, so the contrast argument
+   * that produced the old grey-dimmed fill no longer applies to it. What must
+   * never come back is the old shape of the fix: a `button-primary-dimmed` fill
+   * (light grey in light mode, dark grey in dark mode) under an on-accent glyph.
    */
-  const send = declarationsOnly.slice(declarationsOnly.indexOf('.dsh-dschat-send:disabled'))
+  const sendStart = declarationsOnly.search(/(^|\})\s*button\.dsh-dschat-send:disabled\s*\{/)
+  assert.ok(sendStart > -1, 'the disabled send rule is styled on its element')
+  const send = declarationsOnly.slice(declarationsOnly.indexOf('{', sendStart) + 1)
   const sendRule = send.slice(0, send.indexOf('}'))
-  assert.ok(sendRule.includes('opacity'), 'the disabled send button dims the whole control')
+  /*
+   * The disabled disc is MIXED, not faded, and that is the fix for a reported
+   * defect rather than a preference.
+   *
+   * `opacity` fades the glyph with the fill: at 0.4 the arrow over a
+   * 40%-transparent accent is the same tone as the disc under it, and the
+   * reader cannot tell a disabled send button from a broken one. Mixing the
+   * accent into the card dims the circle while the arrow keeps its full
+   * strength — so the dimming figure must NOT come back as an opacity.
+   */
+  assert.ok(sendRule.includes('color-mix'), 'the disabled disc dims by mixing toward the card surface')
+  const opacity = /(?:^|;)\s*opacity\s*:\s*([^;]+)/.exec(sendRule)
+  assert.equal(
+    Boolean(opacity) && Number.parseFloat(opacity[1]) < 1, false,
+    'and not by fading the control, which would fade the arrow with it',
+  )
   assert.equal(
     /button-primary-(dimmed|fill)/.test(sendRule), false,
-    'the disabled send button keeps the accent fill it inherits, rather than swapping in the theme-inverting primary family',
+    'nor by swapping in the theme-inverting primary family',
+  )
+  /*
+   * The arrow itself: the panel opens with `.dsh-dschat button { color: inherit }`
+   * at (0,1,1), so a single-class `.dsh-dschat-send` LOSES and the glyph is
+   * painted in the panel's inherited ink — dark on the deep blue disc, the
+   * reported 「与蓝色背景的反差不够」. The element must be named.
+   */
+  assert.ok(
+    declarationsOnly.includes('button.dsh-dschat-send {'),
+    'the enabled send rule names its element, or the blanket button rule outranks it',
+  )
+  assert.ok(
+    declarationsOnly.includes('color: var(--dschat-on-accent)'),
+    'and the arrow takes the accent ink, which flips with the accent in both themes',
   )
 })
 
@@ -1267,68 +1412,92 @@ test('dropped and pasted files are not filtered down to images', async () => {
 })
 
 /**
- * The conversation list is user-sized.
+ * The conversation list is no longer user-sized — it is user-ROOMED.
  *
- * The rail was a fixed 238px column, which is both too narrow for
- * 「DSH 插件槽位与 UI 集成方案」-length titles and impossible to shrink for a reader
- * who only wants the transcript. It is now a drag handle (plus arrow keys, since
- * a width that can only be set by dragging is a width half the readers cannot
- * set) with the width remembered per window in localStorage.
+ * The rail was a fixed 238px column with a drag handle. Both are gone: the list
+ * is a popover that hangs off its trigger, so it has no width of its own to set
+ * (the stylesheet pins it to 迁移's 348px) and no edge to drag. What replaced
+ * the handle is a MEASURED ceiling: the panel writes the trigger's real distance
+ * from the top of the body — less the popover's own 8px gap and 2px of air —
+ * onto the wrapper as `--dschat-list-avail`, and the stylesheet spends it as the
+ * popover's max-height.
  *
- * The handle's ARIA value is the assertion that matters in a static render: it
- * is the state the drag mutates, and it is what a screen reader announces.
+ * A static render cannot measure anything (there is no layout), so this asserts
+ * the CONTRACT rather than the number: the effect exists, it measures the body
+ * rather than the panel, it is re-run on layout changes, and the value is the
+ * one the stylesheet reads. The number itself is checked in a real browser —
+ * three window sizes, in scripts/dialog-preview.mjs — because that is the only
+ * place a layout number means anything.
  */
-test('the conversation list renders a drag handle at its remembered width', async () => {
-  const { DSchatPanel, renderToStaticMarkup, createElement, dir } = await loadComponents()
-  const globals = globalThis as { window?: unknown }
-  const hadWindow = 'window' in globals
-  const store = new Map<string, string>()
-  const render = (): string => renderToStaticMarkup(createElement(DSchatPanel, deps as never))
+test('the list popover takes a measured height from its trigger, not a dragged width', async () => {
+  const { dir } = await loadComponents()
+  const { readFileSync } = await import('node:fs')
   try {
-    globals.window = {
-      localStorage: {
-        getItem: (key: string) => store.get(key) ?? null,
-        setItem: (key: string, value: string) => { store.set(key, value) },
-        removeItem: (key: string) => { store.delete(key) },
-      },
-    }
+    const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+    const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+    const code = panel.replace(/\/\*[\s\S]*?\*\//g, '')
 
-    // Nothing remembered: the shipped default, and a separator the reader can
-    // grab, key or double-click.
-    const fresh = render()
-    assert.match(fresh, /dsh-dschat-rail-resize/, 'the handle is rendered')
-    assert.match(fresh, /role="separator"/, 'and it is a separator, not a decorative div')
-    assert.match(fresh, /aria-valuenow="238"/, 'at the default width')
-    assert.match(fresh, /width:238px/, 'which is what the rail is actually laid out at')
+    // No drag machinery survives: not the pointer dance, not the clamp, not the
+    // width key it persisted.
+    assert.equal(
+      /pointermove|clampRailWidth|storedRailWidth|RAIL_WIDTH|rail\.width/.test(code), false,
+      'no drag-to-resize plumbing is left',
+    )
+    assert.equal(/data-rail-drag/.test(code), false, 'and no in-flight drag marker')
 
-    // A remembered width is honoured.
-    store.set('dsh-dschat.rail.width', '310')
-    assert.match(render(), /aria-valuenow="310"/, 'a stored width is restored on the next mount')
-    assert.match(render(), /width:310px/)
-
-    // Anything outside the survivable range is clamped rather than trusted: a
-    // stored 20px would leave a rail too narrow to click, and a stored 4000px
-    // would leave no transcript at all.
-    store.set('dsh-dschat.rail.width', '20')
-    assert.match(render(), /aria-valuenow="170"/, 'a too-narrow stored width is clamped up')
-    store.set('dsh-dschat.rail.width', '4000')
-    assert.match(render(), /aria-valuenow="460"/, 'a too-wide stored width is clamped down')
-    store.set('dsh-dschat.rail.width', 'nonsense')
-    assert.match(render(), /aria-valuenow="238"/, 'an unparsable width falls back to the default')
+    // The measurement: named hook, right anchor, right units, and a real value.
+    assert.match(code, /useLayoutEffect\(/, 'the ceiling is measured in a layout effect, before paint')
+    assert.match(code, /closest\('\.dsh-dschat-body'\)/, 'measured from the body, so the header is not handed to the popover')
+    assert.equal(
+      /closest\('\.dsh-dschat'\)/.test(code), false,
+      'measuring from the panel would put the popover under the header on a short window',
+    )
+    assert.match(code, /setProperty\('--dschat-list-avail'/, 'and published as the variable the stylesheet reads')
+    assert.match(code, /typeof ResizeObserver === 'undefined'/, 'guarded for an environment without it')
+    assert.match(code, /new ResizeObserver\(measure\)/, 're-measured when layout changes, not once at mount')
+    assert.match(code, /observer\.observe\(body\)/, 'observing the body, which is the box that changes with the window')
 
     /*
-     * And the drag itself: pointer moves are tracked on the WINDOW (the pointer
-     * leaves the 6px strip immediately otherwise), the width is written once on
-     * release rather than 60×/s, and the panel blocks text selection while it
-     * is in flight.
+     * The other half of the contract: the variable is what the popover's
+     * max-height is, and the fallback only applies when it is absent. A typo in
+     * either name would silently drop the ceiling back to the panel-wide
+     * default.
+     *
+     * The 640px cap is asserted as part of the rule rather than left loose: it is
+     * the number that says "a very tall window still gets a menu, not a second
+     * page", and it was 520 until that cap turned out to be what a tall window hit
+     * first — the "有点矮" report. Changing it is a deliberate act.
      */
-    const panel = (await import('node:fs')).readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
-    assert.match(panel, /window\.addEventListener\('pointermove', move\)/, 'the drag follows the window, not the handle')
-    assert.match(panel, /writeStored\(RAIL_STORE, String\(width\)\)/, 'the width is persisted once, on release')
-    assert.match(panel, /data-rail-drag/, 'the panel marks an in-flight drag')
+    assert.match(
+      css,
+      /\.dsh-dschat-pop-wrap > \.dsh-dschat-listpop \{\s*max-height: min\(var\(--dschat-list-avail, 100vh\), 640px\)/,
+      'the stylesheet spends the measured value as the popover ceiling',
+    )
+    /*
+     * And the measurement reserves ONLY the trigger gap: the popover's own 8px
+     * between itself and the button. A second subtracted offset is slack taken
+     * out of the list a second time, which is exactly the bug this pins — the
+     * first version subtracted 10 (8 + 2) and lost the rows.
+     */
+    assert.match(code, /const TRIGGER_GAP = 8\b/, 'the only offset reserved is the popover\'s own trigger gap')
+    assert.equal(
+      /POPOVER_GAP/.test(code), false,
+      'and there is no second gutter: it would shorten the list for nothing',
+    )
+
+    /*
+     * And the two behaviours that hang off the same wrapper: the outside click
+     * that dismisses, and the row click that closes. Both are asserted in the
+     * PANEL SOURCE because a static render runs no effects; both are exercised
+     * for real by scripts/list-dismiss-check.mjs.
+     */
+    assert.match(code, /addEventListener\('pointerdown'/, 'a press outside the menu closes it')
+    assert.match(code, /listWrapRef\.current\?\.contains\(target\)/, 'and a press inside it does not')
+    const openChat = code.slice(code.indexOf('function openChat'), code.indexOf('function chatRow'))
+    assert.ok(openChat.includes('closeList()'), 'picking a conversation closes the list it was picked from')
+
     assert.equal(/toggleSide|sideColumn|data-rail=|rightbar\./.test(panel), false, 'no right-column plumbing is left')
   } finally {
-    if (!hadWindow) delete globals.window
     rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -84,7 +84,7 @@ test('Enter submits, but not while an input method owns it', async () => {
   assert.equal(submitsOnEnter({ key: 'Enter', shiftKey: true, nativeEvent: { isComposing: false } }), false)
 })
 
-test('the mounted panel neither sends on an IME Enter nor keeps the box at two lines', async (t) => {
+test('the mounted panel neither sends on an IME Enter nor keeps the box at one line', async (t) => {
   const { chromium } = await import('playwright-core')
   let browser
   try {
@@ -172,18 +172,30 @@ test('the mounted panel neither sends on an IME Enter nor keeps the box at two l
     const composerHeight = () => view.evaluate(() =>
       Math.round(document.querySelector('.dsh-dschat-input').getBoundingClientRect().height))
 
-    // The empty box is its min-height, and a long draft grows it past two lines
-    // while staying inside the cap. The min-height came down from 52px in the
-    // v0.5 composer pass, which put every control on a 30px baseline and closed
-    // the card up around its contents.
+    /*
+     * The empty box is its min-height, and a long draft grows it past THREE
+     * lines while staying inside the cap.
+     *
+     * The floor is 84px: 12px of top padding + 3 × 22.4px of line + 4px of bottom
+     * padding, rounded up so the third line's descenders are inside the box. It
+     * was 46px until the "输入框太小" report — 46 measures 1.3 lines, i.e. the
+     * second line clipped mid-descender, and a reader writing a paragraph did it
+     * through a slit. The 220px ceiling moved with it so the box still grows for
+     * roughly the same number of lines before it starts scrolling.
+     *
+     * Both are measured here rather than read from the stylesheet, because the
+     * panel writes an inline height on every draft change and the resulting
+     * HEIGHT is the thing the reader sees: a min-height that the inline value
+     * overrode would pass a CSS assertion and fail this one.
+     */
     const emptyHeight = await composerHeight()
-    assert.ok(emptyHeight >= 44 && emptyHeight <= 50, `an empty composer is ~46px tall, measured ${emptyHeight}`)
+    assert.ok(emptyHeight >= 82 && emptyHeight <= 86, `an empty composer is ~84px tall, measured ${emptyHeight}`)
 
     await view.locator('.dsh-dschat-input').fill(Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join('\n'))
     await view.waitForTimeout(150)
     const grownHeight = await composerHeight()
     assert.ok(grownHeight > emptyHeight, `a 12-line draft grows the composer (${emptyHeight} -> ${grownHeight})`)
-    assert.ok(grownHeight <= 181, `the composer never grows past its 180px cap, measured ${grownHeight}`)
+    assert.ok(grownHeight <= 221, `the composer never grows past its 220px cap, measured ${grownHeight}`)
 
     // An IME-confirming Enter: nothing may be sent and the draft must stay put.
     await view.locator('.dsh-dschat-input').fill('ni hao 你好')

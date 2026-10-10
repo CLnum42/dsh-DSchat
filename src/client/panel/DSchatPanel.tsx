@@ -16,6 +16,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -36,7 +37,7 @@ import {
 } from '../../protocol.ts'
 import type { DSchatApi } from '../api.ts'
 import {
-  CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, HistoryIcon,
+  CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, MenuIcon,
   MoreIcon, PencilIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
   SendIcon, SwapIcon, ThinkIcon, TrashIcon, WarnIcon, WebSearchIcon, WhaleMark,
 } from '../icons.tsx'
@@ -345,40 +346,81 @@ export function submitsOnEnter(event: {
   return true
 }
 
-/** Preset the rail width falls back to (px), matching the shipped stylesheet. */
-const RAIL_WIDTH_DEFAULT = 238
-/** How narrow the conversation list may be dragged (px). */
-const RAIL_WIDTH_MIN = 170
-/** How wide it may be dragged (px): past this the chat column stops being readable. */
-const RAIL_WIDTH_MAX = 460
-
 /**
- * Where the rail's width is remembered.
+ * 会话列表 open/closed state, and how the panel gets it.
  *
- * `localStorage`, not the Host: this is layout state of one browser window, the
- * same way the shell remembers its own sidebar width. A storage failure
- * (private mode, a locked profile) leaves the panel fully usable — the rail
- * simply starts at its default width on the next reload.
- */
-const RAIL_STORE = 'dsh-dschat.rail.width'
-
-/**
- * Where the rail's open/closed state is remembered.
+ * ONE key, not the two the sidebar used (`dsh-dschat.rail.width` and
+ * `dsh-dschat.rail.open`). Width is not a setting a dialog can have — it is
+ * measured from the panel, and the panel can be 300px or 1400px wide — so the
+ * width key is simply abandoned: a stale value left in a reader's localStorage
+ * is read by nothing and costs nothing, which is a better outcome than a
+ * migration that could mis-read it.
  *
- * `'0'` means collapsed; anything else (including nothing) means open, so a
- * reader who has never touched the toggle gets the conversation list. Same
- * storage rationale as the width: a window-level layout preference, and a
- * storage failure only costs the preference, never the panel.
+ * The OPEN key keeps its name on purpose. Every reader who has this panel
+ * installed already carries a '0' or a '1' under it, and reusing the key means
+ * the preference they set is the preference they keep; renaming it would
+ * silently reset the panel to its default for all of them. The name is now
+ * historical — the element it describes is no longer a rail — and that is
+ * recorded here rather than hidden behind a new key.
+ *
+ * `'0'` means the list stays closed; anything else (including nothing) starts
+ * with it open, which is what an upgrade from the sidebar version did.
  */
 const RAIL_OPEN_STORE = 'dsh-dschat.rail.open'
 
-/** Read one persisted string, or `undefined` when storage is unavailable. */
-function readStored(key: string): string | undefined {
+/**
+ * Read one persisted string, or `undefined` when it is not there.
+ *
+ * `fallback` is what a caller wants to hear when storage is UNREADABLE, which
+ * is not the same answer as "nothing stored":
+ *
+ *   · a key that is absent is the reader's own state — they have never touched
+ *     the control, and every caller here wants its documented default;
+ *   · a storage that THROWS is the document's state. It happens in a sandboxed
+ *     iframe, in some private-mode profiles, and in a cross-origin frame whose
+ *     storage is blocked — that is, in exactly the environments a plugin's UI
+ *     is most likely to be embedded in, and a panel that cannot be screenshotted
+ *     or tested because its first render depends on storage access is a panel
+ *     nobody can verify.
+ *
+ * The list defaults to OPEN when nothing is stored (an upgrade from the sidebar
+ * version keeps its list), so a frame that cannot touch storage must ask for
+ * the CLOSED state explicitly rather than inheriting "open" from a failure.
+ * That is what the URL parameter is for — see the note on the call site.
+ */
+function readStored(key: string, fallback?: string): string | undefined {
   try {
-    return window.localStorage.getItem(key) ?? undefined
+    return window.localStorage.getItem(key) ?? fallback
   } catch {
-    return undefined
+    return fallback
   }
+}
+
+/**
+ * The initial 会话列表 state for THIS document.
+ *
+ * Normally the reader's own preference, persisted under {@link RAIL_OPEN_STORE}.
+ * A `?dschat-list=open|closed` parameter overrides it, and it exists for one
+ * consumer: the design and regression scripts, which mount the real panel in a
+ * sandboxed iframe where `localStorage` throws. Those scripts need to state the
+ * starting condition the same way a reader would — and this panel already reads
+ * its URL for nothing else, so nothing here can collide with the host's routing
+ * (`searchParams` is per-document and the host never puts its own keys on a
+ * plugin's iframe).
+ *
+ * An unparseable value is ignored rather than treated as closed: a typo in a
+ * script should look like the default, not like a bug in the panel.
+ */
+function initialListOpen(): boolean {
+  try {
+    const forced = new URLSearchParams(window.location.search).get('dschat-list')
+    if (forced === 'open') return true
+    if (forced === 'closed') return false
+  } catch {
+    // No URL or no search params (a test render with a location stub): fall
+    // through to the stored preference.
+  }
+  return readStored(RAIL_OPEN_STORE, '1') !== '0'
 }
 
 /** Persist one string; a refusal is not worth interrupting the user for. */
@@ -387,22 +429,8 @@ function writeStored(key: string, value: string | undefined): void {
     if (value === undefined) window.localStorage.removeItem(key)
     else window.localStorage.setItem(key, value)
   } catch {
-    // Layout memory only: losing it costs one drag after the next reload.
+    // Layout memory only: losing it costs one toggle after the next reload.
   }
-}
-
-/** Clamp a dragged rail width into the range the layout can survive. */
-function clampRailWidth(value: number): number {
-  if (!Number.isFinite(value)) return RAIL_WIDTH_DEFAULT
-  return Math.min(RAIL_WIDTH_MAX, Math.max(RAIL_WIDTH_MIN, Math.round(value)))
-}
-
-/** The persisted rail width, or the default when nothing usable is stored. */
-function storedRailWidth(): number {
-  const stored = readStored(RAIL_STORE)
-  if (stored === undefined || stored === '') return RAIL_WIDTH_DEFAULT
-  const parsed = Number(stored)
-  return Number.isFinite(parsed) ? clampRailWidth(parsed) : RAIL_WIDTH_DEFAULT
 }
 
 /**
@@ -635,9 +663,17 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   /** The 「运行状态」 card, opened from the 「···」 menu. */
   const [statusOpen, setStatusOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
-  const [railWidth, setRailWidth] = useState<number>(() => storedRailWidth())
-  const [railDragging, setRailDragging] = useState(false)
-  const [railOpen, setRailOpen] = useState<boolean>(() => readStored(RAIL_OPEN_STORE) !== '0')
+  /**
+   * Whether 会话列表 is up.
+   *
+   * The name `railOpen` is historical — the element it describes was a left
+   * column until it became a dialog — and it is kept because the storage key it
+   * mirrors is kept (see RAIL_OPEN_STORE). Renaming the state without renaming
+   * the key would be the worse half of the migration: the saved preference
+   * would survive, and nothing in the code would explain why the two names
+   * disagree.
+   */
+  const [railOpen, setRailOpen] = useState<boolean>(initialListOpen)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [renamingId, setRenamingId] = useState<string | undefined>(undefined)
   const [renameDraft, setRenameDraft] = useState('')
@@ -845,16 +881,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    */
   const loggedInRef = useRef<boolean | null>(null)
   useEffect(() => { loggedInRef.current = state?.loggedIn ?? null }, [state?.loggedIn])
-
-  /**
-   * The rail width as the drag handler last set it.
-   *
-   * A ref as well as state because the pointer-up that PERSISTS the width runs
-   * outside React's render cycle: reading the state there would capture the
-   * value from the render the handler was created in — i.e. the width the drag
-   * started at, which is the one width the user did not choose.
-   */
-  const railWidthRef = useRef(railWidth)
 
   /*
    * Streaming-feed plumbing.
@@ -1244,71 +1270,173 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     return () => window.clearInterval(timer)
   }, [busy])
 
-  /* ------------------------------------------------------------ rail width */
+  /* ------------------------------------------------- 会话列表 (dialog) state */
 
   /**
-   * The conversation list is user-sized, by dragging its right edge.
+   * Show/hide the conversation list, remembering the choice.
    *
-   * A fixed 238px rail is wrong for both ends of this panel's use: a chat list
-   * of 「DSH 插件槽位与 UI 集成方案」-length titles is unreadable there, and a
-   * reader who only wants the transcript had no way to shrink it. The drag is a
-   * window-level pointer dance (not a mouse-move on the handle) so the pointer
-   * can leave the 6px strip — and the window — mid-drag without dropping it, and
-   * the width is persisted on pointer-up rather than on every move: a drag emits
-   * ~60 events/s and localStorage is synchronous.
+   * Opening also cancels an in-flight rename. The rename box lives INSIDE the
+   * list, so a row left in edit mode when the list closed would come back
+   * mid-edit on the next open — with a draft the reader typed minutes ago and
+   * no memory of typing. Cancelling is the only state that survives a close
+   * without lying about what happened.
    */
-  const startRailDrag = useCallback((event: { button?: number; clientX: number; preventDefault: () => void }): void => {
-    if (event.button !== undefined && event.button !== 0) return
-    event.preventDefault()
-    const startX = event.clientX
-    const startWidth = railWidthRef.current
-    let width = startWidth
-    setRailDragging(true)
-    const move = (moveEvent: PointerEvent): void => {
-      width = clampRailWidth(startWidth + (moveEvent.clientX - startX))
-      railWidthRef.current = width
-      setRailWidth(width)
-    }
-    const finish = (): void => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', finish)
-      window.removeEventListener('pointercancel', finish)
-      setRailDragging(false)
-      writeStored(RAIL_STORE, String(width))
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', finish)
-    window.addEventListener('pointercancel', finish)
-  }, [])
-
-  /** Keyboard equivalent of the drag: ← / → resize, Home restores the default. */
-  const nudgeRail = useCallback((event: { key: string; preventDefault: () => void }): void => {
-    const step = event.key === 'ArrowLeft' ? -16 : event.key === 'ArrowRight' ? 16 : 0
-    if (step === 0 && event.key !== 'Home') return
-    event.preventDefault()
-    const width = event.key === 'Home' ? RAIL_WIDTH_DEFAULT : clampRailWidth(railWidthRef.current + step)
-    railWidthRef.current = width
-    setRailWidth(width)
-    writeStored(RAIL_STORE, String(width))
-  }, [])
-
-  /* --------------------------------------------------- rail + header controls */
-
-  /** Show/hide the conversation column, remembering the choice. */
   const toggleRail = useCallback((): void => {
     setRailOpen(previous => {
       const next = !previous
       writeStored(RAIL_OPEN_STORE, next ? '1' : '0')
+      if (next) setRenamingId(undefined)
       return next
     })
   }, [])
 
   /**
+   * Close the list. The single exit for every way out — the trigger's second
+   * press, a click outside, Escape, and picking a conversation.
+   */
+  const closeList = useCallback((): void => {
+    setRailOpen(false)
+    writeStored(RAIL_OPEN_STORE, '0')
+    setRenamingId(undefined)
+  }, [])
+
+  /**
+   * How much room the list popover has, measured rather than assumed.
+   *
+   * The popover opens upward from the action row, so its ceiling is the distance
+   * from the trigger's top edge to the top of the space it opens into — a number
+   * CSS cannot work out on its own here. It cannot be a percentage: the panel is
+   * absolutely positioned, so `max-height: 100%` resolves against the trigger's
+   * box (30px), and there is no definite height anywhere above it to inherit.
+   *
+   * THE ARITHMETIC, because the two offsets are easy to count twice:
+   *
+   *   wrapTop        the trigger's top edge, measured from the BODY's top edge —
+   *                  the body is the column below the header, so the header's own
+   *                  height is accounted for and whatever the shell paints above
+   *                  the panel is irrelevant. A 560px panel measures 300px here;
+   *   - TRIGGER_GAP  the 8px the stylesheet already puts between the popover and
+   *                  its trigger (`bottom: calc(100% + 8px)`). It is part of the
+   *                  positioning, so it has to come out of the available room —
+   *                  and it is ALSO the entire gutter: subtracting one more pixel
+   *                  for air is subtracting the same 8px a second time, which is
+   *                  what a first version of this did by using 10 and what made
+   *                  the list read as 有点矮. (It also made the popover's top edge
+   *                  land 4px INSIDE the header, which the same measurement
+   *                  caught: gapBelowHeader came out negative.)
+   *
+   * So the popover's top edge lands exactly on the body's top edge — flush under
+   * the header's hairline — and every pixel that is not the trigger gap is a row
+   * the reader can see.
+   *
+   * The value lands on `.dsh-dschat-pop-wrap` as `--dschat-list-avail`, and the
+   * stylesheet spends it as the popover's max-height. It is measured on EVERY
+   * open (not once) and re-measured whenever the panel resizes: the row sits
+   * below a transcript that grows and scrolls, a queue that appears and
+   * disappears between the field and the tool row, and an attachment strip that
+   * wraps — all of which move this button. A value taken at mount would be wrong
+   * the first time a reader attached a file.
+   */
+  const listWrapRef = useRef<HTMLDivElement | null>(null)
+  useLayoutEffect(() => {
+    const wrapper = listWrapRef.current
+    /*
+     * Measured from the BODY, not from the panel.
+     *
+     * The body is the column below the header, so its top edge is the first row
+     * the popover is allowed to occupy — measuring from the panel's own top
+     * would hand the popover the 52px the header occupies, and in a short window
+     * that is exactly where it went: at a 560px panel the popover's top landed
+     * at y=2, i.e. underneath the header's hairline. `.dsh-dschat-body` is the
+     * right anchor because it is the box the transcript scrolls in, which is the
+     * space the popover actually opens into.
+     */
+    const body = wrapper?.closest('.dsh-dschat-body')
+    if (!wrapper || !(body instanceof HTMLElement)) return
+    /**
+     * The one offset that has to come out: the trigger gap the stylesheet sets.
+     *
+     * `bottom: calc(100% + 8px)` places the popover 8px above the trigger, so the
+     * room left for it is `wrapTop - 8`. Reserved as a constant rather than read
+     * back from `getComputedStyle`, because it is a literal in the same stylesheet
+     * this file ships; the two would have to be changed together either way.
+     *
+     * There is deliberately NO extra air here. The popover's top edge lands flush
+     * on the body's top edge, which is the header's bottom hairline — that is the
+     * nearest to the top the list can be while staying out of the header, and
+     * padding the difference is exactly the slack that made it read as too short.
+     */
+    const TRIGGER_GAP = 8
+    /** Never so small that the menu is a slit; 120px is about two rows. */
+    const MIN_ROOM = 120
+    const measure = (): void => {
+      const wrapTop = wrapper.getBoundingClientRect().top - body.getBoundingClientRect().top
+      const room = Math.max(MIN_ROOM, Math.round(wrapTop - TRIGGER_GAP))
+      wrapper.style.setProperty('--dschat-list-avail', `${room}px`)
+      /*
+       * The same number as a HEIGHT, and it has to be written here rather than
+       * resolved in CSS.
+       *
+       * The panel fills the room it was given instead of shrinking to its rows —
+       * see the stylesheet — but `height: 100%` cannot express that: the popover's
+       * containing block is the wrapper, and the wrapper is a shrink-to-fit flex
+       * item with no definite height, so a percentage resolves to `auto` and the
+       * rows would simply not fill. The measured number is the only definite
+       * length in this chain, so the panel hands it over.
+       */
+      wrapper.style.setProperty('--dschat-list-h', `${room}px`)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    /*
+     * The BODY is observed, not the wrapper: the wrapper is a 30px-tall flex
+     * item whose own box does not change when the composer above it grows — only
+     * its POSITION does — and the body's box changes with every layout change
+     * that can move it (the window, the queue, the phase line, the attachment
+     * strip). Observing the body catches all of them, including a window resize
+     * that leaves the wrapper's own size untouched.
+     */
+    const observer = new ResizeObserver(measure)
+    observer.observe(body)
+    return () => { observer.disconnect() }
+  }, [railOpen])
+
+  /**
+   * A click anywhere outside the popover closes it.
+   *
+   * `pointerdown`, not `click`: a menu that waits for the full press-and-release
+   * to disappear has already let the reader start a text selection under it, and
+   * every platform menu dismisses on the press.
+   *
+   * The `contains` guard is belt-and-braces — the listener is attached in an
+   * effect, which runs after the click that opened the popover has finished
+   * propagating, so it cannot see its own opening — but it also covers the
+   * presses that START inside the popover and end outside it, which the
+   * browser reports on the popover's own subtree.
+   *
+   * Listening on `document` rather than on the panel is deliberate: a click on
+   * the transcript, the header, the shell's own chrome or a spot outside the
+   * window's panel seat is all "outside this menu", and the reader means the
+   * same thing by all of them.
+   */
+  useEffect(() => {
+    if (!railOpen) return
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target
+      if (target instanceof Node && listWrapRef.current?.contains(target) === true) return
+      closeList()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => { document.removeEventListener('pointerdown', onPointerDown) }
+  }, [railOpen, closeList])
+
+  /**
    * Open the conversation-list search.
    *
-   * A collapsed rail has to come back first, and the focus has to wait for that
-   * render: the input does not exist in the document yet, so focusing it in the
-   * same tick is a no-op and the click would look like it did nothing. The
+   * "Search" means "open the list and put the cursor in its box" — there is no
+   * state left in which a search box exists but the reader cannot see it. The
+   * focus still has to wait for the render that mounts the input: focusing in
+   * the same tick is a no-op, and ⌘K would look like it did nothing. The
    * follow-up effect owns the actual focus.
    */
   const openSearch = useCallback((): void => {
@@ -1338,18 +1466,27 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    *
    * Mirrors `max-height` in styles.ts; the two must agree or the clamped height
    * and the stylesheet's own cap fight each other.
+   *
+   * Raised 180 → 220 together with the floor below, so the box keeps growing
+   * for about the same number of lines before it starts scrolling instead of
+   * gaining three lines of room and losing the range above them.
    */
-  const COMPOSER_MAX_HEIGHT = 180
+  const COMPOSER_MAX_HEIGHT = 220
 
   /**
    * Grow the composer with its content, up to the cap.
    *
    * A `rows={1}` textarea with a fixed min-height shows ~2 lines and scrolls
    * everything else out of sight, so a long prompt was written through a slit —
-   * and the stylesheet's `max-height: 180px` was dead code, because nothing ever
+   * and the stylesheet's `max-height: 220px` was dead code, because nothing ever
    * changed the element's height. Measuring `scrollHeight` is the only reliable
    * way to do it, and the height must be reset to `auto` first: measuring on top
    * of the previous (larger) height can never shrink the box back.
+   *
+   * The EMPTY box's height is not decided here at all: it is the stylesheet's
+   * `min-height`, because `scrollHeight` of an empty textarea is one line and
+   * this function would happily shrink the box back to it. See the note on
+   * `.dsh-dschat-input` for why that floor is three lines.
    */
   const resizeComposer = useCallback((): void => {
     const input = inputRef.current
@@ -2698,7 +2835,17 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
 
   return createElement(
     'div',
-    { className: 'dsh-dschat', 'data-rail-drag': railDragging ? 'true' : undefined, 'data-dsh-plugin': 'dschat' },
+    /*
+     * `data-list-open` is the panel's only observable STATE attribute, and it
+     * exists because the alternative is worse: without it, "is 会话列表 up?"
+     * can only be answered by reaching for a CSS class, which the next styling
+     * change is free to rename. It is read by the design sheet
+     * (scripts/dialog-preview.mjs) and it is what made two silent failures
+     * visible while this dialog was being built — a click that never landed,
+     * and a shared localStorage that pre-opened the dialog in a screenshot
+     * meant to show it closed. It paints nothing.
+     */
+    { className: 'dsh-dschat', 'data-dsh-plugin': 'dschat', 'data-list-open': railOpen ? '1' : '0' },
 
     /* ---------------------------------------------------------- header */
     /*
@@ -2832,7 +2979,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     createElement(
       'div',
       { className: 'dsh-dschat-body' },
-      rail(),
       createElement(
         'div',
         { className: 'dsh-dschat-chat' },
@@ -2929,122 +3075,160 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
 
   /* ------------------------------------------------------------- sections */
 
-  function rail(): ReactNode {
+  /**
+   * 会话列表: the conversation list, as a panel above its own button.
+   *
+   * It used to be a 238px left column that took its width from the chat for as
+   * long as the panel was open. Two things were wrong with that, and the reader
+   * reported the second one as a feeling — the list was always there:
+   *
+   *   · the column was paid for on EVERY screen. At the panel's usual width the
+   *     transcript got 382px of 620 (measured), so every message wrapped to make
+   *     room for a list that is consulted for one second per session;
+   *   · a list is a CHOICE, not a place. Nothing in this panel is done "in" the
+   *     list — every row is a way to leave it — so giving it permanent floor
+   *     space overstated what it is.
+   *
+   * A panel answers both: the transcript owns the full width, and the list is up
+   * exactly while the reader is choosing a conversation.
+   *
+   * ANCHORED, not centred. The first version of this was a modal dialog in the
+   * middle of the panel, and that was wrong for a reason worth writing down: a
+   * list of conversations is not a task, it is a MENU. It hangs off the control
+   * that opened it, so the reader keeps the connection between "the button I
+   * pressed" and "the thing that appeared" — and the gesture that closes it (the
+   * same button, or Escape, or picking a row) is the gesture that opened it.
+   * 迁移 has always worked this way, and the two must not disagree: they are the
+   * two controls on the same row, and one of them covering the screen while the
+   * other hangs off a button would read as two different panels.
+   *
+   * It is therefore the SAME popover as 迁移: same 348px width, same surface
+   * material, same upward direction, same wrapper (which the caller renders, so
+   * that the wrapper is exactly the trigger's own box). Upward comes from where
+   * the trigger is — the action row at the bottom of the panel — and the
+   * stylesheet states that rule once for the whole row (see the note on
+   * .dsh-dschat-pop).
+   *
+   * Returns the panel alone, NOT a wrapper around it: the caller owns the
+   * wrapper (see actions), because there the wrapper has to contain the trigger
+   * as well.
+   */
+  function sessionsPopover(): ReactNode {
     /*
-     * Collapsed means ABSENT, not narrow. A zero-width aside would still hold
-     * its 6px resize strip and its tab stops, so the panel would keep a phantom
-     * column the reader cannot see and cannot click past; dropping the subtree
-     * gives the conversation the whole width and leaves the header's history
-     * button as the single way back.
+     * Closed means ABSENT: the subtree is dropped rather than hidden, so the
+     * rows' tab stops and the search box's focus ring cannot survive a close
+     * inside a `display:none` box.
      */
     if (!railOpen) return null
     return createElement(
-      'aside',
+      'div',
       {
-        className: 'dsh-dschat-rail',
-        style: { width: `${railWidth}px` },
-        'data-resizing': railDragging ? 'true' : undefined,
-      },
-      /*
-       * The resize handle. A 6px strip straddling the rail's border, so the
-       * pointer does not have to find a 1px line; it is a real separator for
-       * assistive tech and takes arrow keys, because a width that can only be
-       * set by dragging is a width half the readers cannot set at all.
-       */
-      createElement('div', {
-        className: 'dsh-dschat-rail-resize',
-        role: 'separator',
-        'aria-orientation': 'vertical',
-        'aria-label': tr('rail.resize'),
-        'aria-valuenow': railWidth,
-        'aria-valuemin': RAIL_WIDTH_MIN,
-        'aria-valuemax': RAIL_WIDTH_MAX,
-        tabIndex: 0,
-        title: tr('rail.resize'),
-        onPointerDown: startRailDrag,
-        onKeyDown: nudgeRail,
-        onDoubleClick: () => {
-          railWidthRef.current = RAIL_WIDTH_DEFAULT
-          setRailWidth(RAIL_WIDTH_DEFAULT)
-          writeStored(RAIL_STORE, String(RAIL_WIDTH_DEFAULT))
+        /*
+         * The same panel 迁移 opens: `.dsh-dschat-pop` (348px, the panel's own
+         * surface material and elevation) plus `.dsh-dschat-pop-up`, which is
+         * the row's shared upward rule. `.dsh-dschat-listpop` is what makes it
+         * a LIST inside that material rather than a form — see the stylesheet.
+         */
+        className: 'dsh-dschat-pop dsh-dschat-pop-up dsh-dschat-listpop',
+        role: 'dialog',
+        /*
+         * Not `aria-modal`: nothing here is modal. The transcript behind it
+         * stays live, and a reader who tabs away from the list should reach
+         * the rest of the panel rather than be trapped in a menu they can
+         * already see the bottom of.
+         */
+        'aria-label': tr('action.sessions'),
+        /* Escape is the keyboard's way out, matching the trigger's second
+           press and "pick a row" as the pointer's. */
+        onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          closeList()
         },
-      }),
-      createElement(
-        'div',
-        { className: 'dsh-dschat-search' },
-        createElement(SearchIcon, {}),
-        createElement('input', {
-          ref: searchRef,
-          value: query,
-          placeholder: tr('rail.search'),
-          'aria-label': tr('rail.search'),
-          /*
-           * The ⌘K advertisement lives HERE now.
-           *
-           * It used to be the action row's 搜索 button, whose tooltip carried
-           * 「搜索会话内容（⌘K）」. That button is gone (it duplicated this box),
-           * and a shortcut nobody advertises is a shortcut nobody uses — so the
-           * sentence moved onto the box itself, which is where the feature
-           * lives and where a reader who is about to type in it will hover.
-           */
-          title: tr('rail.search.hint'),
-          onChange: (event: { target: { value: string } }) => setQuery(event.target.value),
-          onKeyDown: (event: { key: string; preventDefault: () => void }) => {
-            // Escape empties the box, so one key undoes the search without also
-            // throwing the reader's place in the list away.
-            if (event.key !== 'Escape' || query === '') return
-            event.preventDefault()
-            setQuery('')
-          },
-        }),
-        query !== '' && createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsh-dschat-search-clear',
-            title: tr('rail.search.clear'),
-            'aria-label': tr('rail.search.clear'),
-            onClick: () => { setQuery(''); searchRef.current?.focus() },
-          },
-          createElement(CloseIcon, { size: 10 }),
-        ),
-      ),
-      createElement(
-        'div',
-        { className: 'dsh-dschat-list dsh-dschat-scroll' },
-        filtered.length === 0
-          ? createElement('div', { className: 'dsh-dschat-hint-empty' },
-              chats.length === 0 ? tr('rail.empty') : tr('rail.noMatch'))
-          : filtered.map(chat => (renamingId === chat.id ? renameRow(chat) : chatRow(chat))),
-      ),
-      createElement(
-        'div',
-        { className: 'dsh-dschat-rail-foot' },
+      },
+        /*
+         * The search box, at the TOP of the list.
+         *
+         * It filters the rows directly below it, and a filter that sits under
+         * the thing it filters makes the reader look past the result to find
+         * the control.
+         */
         createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
-            style: { flex: 1, justifyContent: 'center' },
-            disabled: loggedIn !== true,
-            title: tr('action.recover.hint'),
-            onClick: () => { void recover() },
-          },
-          createElement(RefreshIcon, {}),
-          tr('action.recover'),
+          'div',
+          { className: 'dsh-dschat-search' },
+          createElement(SearchIcon, {}),
+          createElement('input', {
+            ref: searchRef,
+            value: query,
+            placeholder: tr('rail.search'),
+            'aria-label': tr('rail.search'),
+            /*
+             * The ⌘K advertisement lives HERE.
+             *
+             * It used to be the action row's 搜索 button, whose tooltip carried
+             * 「搜索会话内容（⌘K）」. That button is gone (it duplicated this box),
+             * and a shortcut nobody advertises is a shortcut nobody uses — so
+             * the sentence moved onto the box itself, which is where the feature
+             * lives and where a reader who is about to type in it will hover.
+             */
+            title: tr('rail.search.hint'),
+            onChange: (event: { target: { value: string } }) => setQuery(event.target.value),
+            onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+              // Escape empties the box, so one key undoes the search without
+              // also throwing the reader's place in the list away.
+              if (event.key !== 'Escape' || query === '') return
+              event.preventDefault()
+              setQuery('')
+            },
+          }),
+          query !== '' && createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-dschat-search-clear',
+              title: tr('rail.search.clear'),
+              'aria-label': tr('rail.search.clear'),
+              onClick: () => { setQuery(''); searchRef.current?.focus() },
+            },
+            createElement(CloseIcon, { size: 10 }),
+          ),
         ),
         createElement(
-          'button',
-          {
-            type: 'button',
-            className: clearArmed ? 'dsh-dschat-btn dsh-dschat-btn-ghost' : 'dsh-dschat-btn',
-            disabled: chats.length === 0,
-            title: tr('rail.clear'),
-            onClick: () => { void clearAll() },
-          },
-          clearArmed ? tr('rail.clearConfirm') : createElement(TrashIcon, {}),
+          'div',
+          { className: 'dsh-dschat-list dsh-dschat-listpop-list dsh-dschat-scroll' },
+          filtered.length === 0
+            ? createElement('div', { className: 'dsh-dschat-hint-empty' },
+                chats.length === 0 ? tr('rail.empty') : tr('rail.noMatch'))
+            : filtered.map(chat => (renamingId === chat.id ? renameRow(chat) : chatRow(chat))),
         ),
-      ),
+        createElement(
+          'div',
+          { className: 'dsh-dschat-listpop-foot' },
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+              style: { flex: 1, justifyContent: 'center' },
+              disabled: loggedIn !== true,
+              title: tr('action.recover.hint'),
+              onClick: () => { void recover() },
+            },
+            createElement(RefreshIcon, {}),
+            tr('action.recover'),
+          ),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: clearArmed ? 'dsh-dschat-btn dsh-dschat-btn-ghost' : 'dsh-dschat-btn',
+              disabled: chats.length === 0,
+              title: tr('rail.clear'),
+              onClick: () => { void clearAll() },
+            },
+            clearArmed ? tr('rail.clearConfirm') : createElement(TrashIcon, {}),
+          ),
+        ),
     )
   }
 
@@ -3068,6 +3252,21 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   function openChat(chat: DSchatTranscript): void {
     setViewChatId(chat.id)
     setJumpId(matchedMessageIds(chat)[0])
+    /*
+     * Picking a conversation closes the list.
+     *
+     * It has to be here, in the ONE function every row goes through, rather
+     * than on the row's click handler: a row is opened by a click and by a
+     * keyboard Enter, and a menu that stays up after the reader has chosen from
+     * it reads as "that click did nothing" — the transcript behind it has
+     * changed, but the thing they were looking at has not.
+     *
+     * This was a real defect rather than a nicety: the dismiss check
+     * (scripts/list-dismiss-check.mjs) caught the list still open after a row
+     * was picked, because the earlier sidebar version never had to close
+     * anything — it was always there.
+     */
+    closeList()
   }
 
   /**
@@ -3332,9 +3531,48 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           createElement('div', { className: 'dsh-dschat-empty-mark' }, createElement(ChatIcon, { size: 22 })),
           createElement('h3', null, tr('empty.title')),
           createElement('p', null, tr('empty.body')),
+          /*
+           * 或者试试: three things the web page can actually be asked to do —
+           * translate, summarise, polish a passage — and each one WRITES ITSELF.
+           *
+           * The page used to end on 「Enter 发送 / ⌘/ 聚焦」, which documents the
+           * keyboard instead of inviting a question, and a new reader still had
+           * no idea what this panel was for. A prompt chip is the shortest path
+           * from an empty page to a first reply: the sentence lands in the
+           * composer, focused, ready to edit or send — nothing is sent by the
+           * click itself, so a chip can never spend a turn the reader did not
+           * ask for.
+           *
+           * It also wakes the engine, exactly as clicking the field does, so the
+           * page starts while the reader is still reading the sentence.
+           */
+          createElement(
+            'div',
+            { className: 'dsh-dschat-empty-try' },
+            createElement('span', { className: 'dsh-dschat-empty-try-label' }, tr('empty.try')),
+            createElement(
+              'div',
+              { className: 'dsh-dschat-empty-try-list' },
+              ...(['empty.try.translate', 'empty.try.summarize', 'empty.try.polish'] as const).map(key =>
+                createElement(
+                  'button',
+                  {
+                    key,
+                    type: 'button',
+                    className: 'dsh-dschat-try',
+                    onClick: () => {
+                      setDraft(tr(key))
+                      void ensureReady()
+                      inputRef.current?.focus()
+                    },
+                  },
+                  tr(key),
+                )),
+            ),
+          ),
           createElement(
             'p',
-            { style: { marginTop: '8px', display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'center' } },
+            { className: 'dsh-dschat-empty-keys' },
             createElement('span', { className: 'dsh-dschat-kbd' }, 'Enter'),
             createElement('span', null, tr('action.send')),
             createElement('span', { className: 'dsh-dschat-kbd' }, '⌘/'),
@@ -4082,27 +4320,31 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   }
 
   /**
-   * The action row: the conversation's four verbs, directly above the input
-   * card — 会话列表 / 搜索 / 新对话 on the left, 「⇄ DSH 迁移」 at the right
+   * The action row: 会话列表 / 新对话 on the left, 「⇄ DSH 迁移」 at the right
    * end.
    *
-   * All four are now the same thing to look at: a 28px quiet pill with a glyph
-   * and a 13px label (`.dsh-dschat-tbtn`), which is the shape the input card's
-   * own tool row speaks one line below. The three left buttons used to be
-   * 34px glyph-only squares — the web app's own header controls, moved down
-   * with their shape intact — and that shape was the problem: a square with a
-   * glyph in it is a control you have to already know, and this row is the
-   * ONE place a reader looks for "a new chat" or "the list of chats". Naming
-   * them costs ~180px of a row that has the space, and it means the four verbs
-   * of this panel are readable without hovering anything.
+   * 会话列表 lives here rather than in the title bar, and that is a decision
+   * about WHERE ITS PANEL OPENS rather than about where the button looks best.
+   * The list is a panel that hangs upward off its trigger, exactly like 迁移 —
+   * so the trigger has to sit at the bottom of the panel, where there is a
+   * transcript above it to open into. In the header there is 52px of window
+   * chrome and nothing else, and the panel would have to open DOWNWARD over the
+   * conversation it lists. The row is also where the reader is: these are the
+   * conversation's verbs, and 「会话列表」 is one of them.
    *
-   * The wording is deliberately two characters where the tooltip is a sentence:
-   * 收起会话列表 is what the button DOES (and stays the `title`/`aria-label`),
-   * 会话列表 is what the button IS.
+   * All of them are the same thing to look at: a 28px quiet pill with a glyph
+   * and a 13px label (`.dsh-dschat-tbtn`), which is the shape the input card's
+   * own tool row speaks one line below. They used to be 34px glyph-only squares
+   * — the web app's own header controls, moved down with their shape intact —
+   * and that shape was the problem: a square with a glyph in it is a control
+   * you have to already know, and this row is the ONE place a reader looks for
+   * "a new chat" or "the list of chats". Naming them costs ~180px of a row that
+   * has the space, and it means the panel's verbs are readable without hovering
+   * anything.
    *
    * Grouping is unchanged: browsing on the left, handing the conversation off
    * at the right end, so the row still finishes on its terminal action. The
-   * engine menu is NOT here — it lives at the title bar's right end now (see
+   * engine menu is NOT here — it lives at the title bar's right end (see
    * {@link moreMenu}), because those four entries are about the panel and its
    * browser rather than about this conversation.
    */
@@ -4110,35 +4352,72 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     return createElement(
       'div',
       { className: 'dsh-dschat-actions', role: 'toolbar', 'aria-label': tr('composer.actions') },
+      /*
+       * 会话列表, and the panel it opens — ONE wrapper, exactly like 迁移.
+       *
+       * The wrapper is not decoration: `.dsh-dschat-pop` is absolutely
+       * positioned, so its containing block is the nearest positioned ancestor,
+       * and the wrapper is what makes that ancestor the trigger's own box
+       * rather than the panel. Standing the panel next to the button instead of
+       * around it is the bug the lamp's menu already paid for — see the note on
+       * the lamp wrapper — where a 230px panel opened hundreds of pixels from
+       * the dot that opened it.
+       */
       createElement(
-        'button',
-        {
-          type: 'button',
-          className: railOpen ? 'dsh-dschat-tbtn dsh-dschat-tbtn-on' : 'dsh-dschat-tbtn',
-          title: railOpen ? tr('rail.hide') : tr('rail.show'),
-          'aria-label': railOpen ? tr('rail.hide') : tr('rail.show'),
-          'aria-pressed': railOpen,
-          onClick: () => { toggleRail() },
-        },
-        createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(HistoryIcon, { size: 16 })),
-        createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('action.sessions')),
+        'div',
+        /*
+         * `listWrapRef` is what the measurement effect and the outside-click
+         * effect both hang off: it is the trigger's own box plus the popover, so
+         * "where is this button" and "did the press land inside the menu" are
+         * the same element.
+         */
+        { className: 'dsh-dschat-pop-wrap', ref: listWrapRef },
+        /*
+         * The trigger.
+         *
+         * The glyph is three rules now, not the panel-with-gutter the sidebar
+         * version used: that glyph drew a SIDE COLUMN, so it promised a sidebar
+         * while the click opened something that hangs over the transcript. See
+         * MenuIcon.
+         *
+         * `dsh-dschat-tbtn-sessions` is a MARKER class the tests and the design
+         * scripts select on, in the same spirit as `dsh-dschat-tbtn-transfer` —
+         * it carries no styling of its own.
+         */
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: railOpen
+              ? 'dsh-dschat-tbtn dsh-dschat-tbtn-on dsh-dschat-tbtn-sessions'
+              : 'dsh-dschat-tbtn dsh-dschat-tbtn-sessions',
+            title: railOpen ? tr('rail.hide') : tr('rail.show'),
+            'aria-label': tr('action.sessions'),
+            'aria-haspopup': 'dialog',
+            'aria-expanded': railOpen,
+            onClick: () => { toggleRail() },
+          },
+          createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(MenuIcon, { size: 16 })),
+          createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('action.sessions')),
+        ),
+        sessionsPopover(),
       ),
       /*
-       * 搜索 is NOT a button here any more.
+       * 搜索 is NOT a button here.
        *
-       * It was one, and it only ever did two things: bring the rail back if it
-       * was collapsed, and put the cursor in the rail's search box. With the
-       * rail open — the default — the box is already on screen a few pixels to
-       * the left, so the button was a second, wordier copy of an input the
-       * reader can simply click. That is why it did not earn its place: this row
-       * is the conversation's verbs, and "search this conversation" is not a
-       * mode the way 会话列表 / 新对话 / 迁移 are.
+       * It was one, and it only ever did two things: bring the list back if it
+       * was closed, and put the cursor in the list's search box. With the list
+       * open — the default — the box is already on screen, so the button was a
+       * second, wordier copy of an input the reader can simply click. That is
+       * why it did not earn its place: this row is the conversation's verbs, and
+       * "search this conversation" is not a mode the way 会话列表 / 新对话 / 迁移
+       * are.
        *
-       * What it uniquely provided — reaching search while the rail is HIDDEN —
-       * is ⌘K's job, and ⌘K now routes through `openSearch()` so it expands the
-       * rail first. Before that fix the shortcut wrote into a null ref whenever
-       * the rail was collapsed and did nothing at all, which is exactly why the
-       * button could not simply be deleted on its own.
+       * Its one unique offer — reaching search without opening the list first —
+       * is ⌘K's job, and ⌘K routes through `openSearch()`, which opens the list
+       * and puts the cursor in its box. Before ⌘K did that, the shortcut wrote
+       * into a null ref while the list was closed and did nothing at all, which
+       * is exactly why the button could not simply be deleted on its own.
        */
       createElement(
         'button',

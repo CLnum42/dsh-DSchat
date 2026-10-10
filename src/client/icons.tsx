@@ -126,15 +126,23 @@ export function SearchIcon({ size = 13 }: IconProps): ReactNode {
 }
 
 /**
- * The conversation-list glyph: a panel with its list gutter.
+ * 会话列表: three rules, the universal "open the list" glyph.
  *
- * A rounded rectangle and a divider — the shape the web app puts at the top of
- * its sidebar, and the one every editor uses for "show/hide the side column".
- * Drawn on the panel's own 16-box stroke grid so it sits with {@link SearchIcon}
- * and {@link PlusIcon} on the header's control rhythm.
+ * It replaced a panel-with-gutter (`HistoryIcon`), and the reason is the change
+ * the icon is reporting rather than a matter of taste: that glyph draws a SIDE
+ * COLUMN, so it promised a sidebar — and pressing it produced a dialog that
+ * covers the transcript. A glyph that draws the wrong half of the screen is
+ * worse than no glyph, because the reader has already decided what the click
+ * will do before making it. Three rules make no such promise: they say "there
+ * is a list behind this", which is exactly what is there (and what every chat
+ * app from the web app to the platforms draws for the same control).
+ *
+ * The three strokes are 11px wide on a 16-box with 3.5px of air between them —
+ * measured against {@link SearchIcon} (7px circle) and {@link MoreIcon} (three
+ * dots) in the same header, so the strip keeps one optical weight.
  */
-export function HistoryIcon({ size = 16 }: IconProps): ReactNode {
-  return svg(size, <><rect x="2.1" y="3.1" width="11.8" height="9.8" rx="2.6" /><path d="M6.2 3.1v9.8" /></>)
+export function MenuIcon({ size = 16 }: IconProps): ReactNode {
+  return svg(size, <path d="M2.6 4.4h10.8M2.6 8h10.8M2.6 11.6h10.8" />)
 }
 
 /** Heavier than {@link STROKE} on purpose: a 14px plus is a marker, not a picture. */
