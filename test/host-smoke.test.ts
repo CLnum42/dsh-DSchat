@@ -292,8 +292,16 @@ test('host half imports and registers its surfaces', async () => {
       tools.map(tool => tool.name).sort(),
       ['dschat_import', 'dschat_recover', 'dschat_send', 'dschat_status', 'dschat_stop', 'dschat_transfer'],
     )
-    assert.equal(sections.length, 1)
-    assert.match(sections[0].name, /dsh-dschat/)
+    /*
+     * No prompt section by default.
+     *
+     * The plugin used to announce itself here unconditionally — 786 characters
+     * of prose re-listing those six schemas, paid by every session and every
+     * subagent. The tools describe themselves; a deployment that wants the
+     * reminder opts in (`announceToAgent: true`), and the opt-in is asserted by
+     * `prompt-footprint.test.ts`.
+     */
+    assert.equal(sections.length, 0, 'the default configuration writes nothing to the prompt')
 
     rmSync(dataDir, { recursive: true, force: true })
   } finally {

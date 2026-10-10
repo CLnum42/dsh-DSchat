@@ -869,6 +869,16 @@ body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--
 }
 .dsh-dschat-empty h3 { margin: 0; font-size: 17px; font-weight: 600; }
 .dsh-dschat-empty p { margin: 0; max-width: 400px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
+/*
+ * The same block, worn by a conversation whose body is still in flight.
+ *
+ * It shares the layout and drops the volume: this is a status line for a
+ * conversation that exists, not the invitation to start one, and the mark is
+ * dimmed so the two cannot be mistaken for each other in a screenshot either.
+ * See the thread() branch in the panel for which one is picked.
+ */
+.dsh-dschat-loading .dsh-dschat-empty-mark { opacity: .5; }
+.dsh-dschat-loading h3 { font-size: 14px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
 .dsh-dschat-kbd {
   display: inline-flex; align-items: center; height: 19px; padding: 0 5px; border-radius: 5px;
   font-family: var(--dschat-mono); font-size: 11px; color: var(--dsw-alias-label-secondary);

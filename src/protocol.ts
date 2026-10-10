@@ -703,8 +703,16 @@ export const DSCHAT_API = {
    * only worked because `/state` carried the whole store. With summaries there
    * is nothing local to scan, and fetching 215 bodies to answer one keystroke is
    * worse than the problem being solved — so the scan happens where the data is.
+   *
+   * NAMED APART FROM `search` ON PURPOSE: that key is the WEB-SEARCH toggle
+   * (`/search`, a POST with `{ enabled }`), and an earlier revision gave this
+   * route the same key. A later key silently wins in an object literal, so
+   * `DSCHAT_API.search` resolved to the toggle and this route became
+   * unreachable: every message search was a POST-less GET to a write-guarded
+   * route, i.e. a 405 the panel reported to nobody. `route-surface.test.ts`
+   * now fails when two endpoints share a key.
    */
-  search: '/api/dsh-dschat/search-conversations',
+  searchConversations: '/api/dsh-dschat/search-conversations',
   wake: '/api/dsh-dschat/wake',
   openLogin: '/api/dsh-dschat/open-login',
   closeBrowser: '/api/dsh-dschat/close-browser',
@@ -723,6 +731,7 @@ export const DSCHAT_API = {
   send: '/api/dsh-dschat/send',
   stop: '/api/dsh-dschat/stop',
   deepThink: '/api/dsh-dschat/deep-think',
+  /** The WEB-SEARCH toggle (a POST with `{ enabled }`) — not conversation search. */
   search: '/api/dsh-dschat/search',
   transfer: '/api/dsh-dschat/transfer',
   /**

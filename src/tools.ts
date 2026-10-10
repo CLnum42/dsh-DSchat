@@ -58,7 +58,7 @@ function renderChats(store: TranscriptStore): string {
 export function dschatStatusTool(engine: DeepSeekWebEngine, store: TranscriptStore, listWorkspaces?: () => WorkspaceRef[] | undefined) {
   return defineTool({
     name: 'dschat_status',
-    description: 'Report the DeepSeek 网页端 (chat.deepseek.com) web-chat state: engine status, login state, active chat, stored transcripts, and the harness workspaces available as dschat_transfer targets. Triggers: webchat, deepseek 网页端, 网页聊天. Use before dschat_send to confirm login.',
+    description: 'Report the DeepSeek 网页端 (chat.deepseek.com) web-chat state: engine status, login state, active chat, stored transcripts, and the harness workspaces available as dschat_transfer targets. The sidebar 「Chat」 panel is this plugin. Triggers: webchat, deepseek 网页端, 网页聊天. Use before dschat_send to confirm login.',
     parameters: {},
     output: {
       schema: {

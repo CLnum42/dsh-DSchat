@@ -128,6 +128,11 @@ export interface DSchatDict {
 
   'empty.title': string
   'empty.body': string
+  /**
+   * Shown for a conversation whose body is still on its way, so a chat WITH
+   * history never renders as the empty state (see `thread()`).
+   */
+  'thread.loading': string
 
   'engine.notice.title': string
   'engine.notice.error.title': string
@@ -322,7 +327,7 @@ export const zh: DSchatDict = {
   'settings.exportDir': 'markdown 导出目录',
   'settings.distill': '迁移时蒸馏简报',
   'settings.distillModel': '蒸馏模型',
-  'settings.announce': '向 agent 公告本插件',
+  'settings.announce': '在 system prompt 里说明这组工具',
   'settings.actions': '操作',
   'settings.where': '以上参数来自 profile 的 cordis.patch.yml：在 dsh-dschat 那一行下面加 config: 块，重启 Harness 生效（这一版插件没有自带设置表单）。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
   'settings.loading': '正在读取运行参数…',
@@ -432,6 +437,8 @@ export const zh: DSchatDict = {
 
   'empty.title': '在 DSH 里直接聊 DeepSeek 网页端',
   'empty.body': '复用你的网页登录会话，不消耗 API 额度。聊完可以一键蒸馏成任务简报，在 harness 里继续开发。',
+
+  'thread.loading': '正在载入这段对话…',
 
   'composer.placeholder': '给 DeepSeek 网页端发消息…',
   'composer.notLoggedIn': '网页端需要登录 · 直接输入，登录后即可发送',
@@ -608,7 +615,7 @@ export const en: DSchatDict = {
   'settings.exportDir': 'Markdown export folder',
   'settings.distill': 'Distill on hand-off',
   'settings.distillModel': 'Distillation model',
-  'settings.announce': 'Announce to the agent',
+  'settings.announce': 'Note these tools in the system prompt',
   'settings.actions': 'Actions',
   'settings.where': 'These values come from the profile\'s cordis.patch.yml: add a config: block under the dsh-dschat row, then restart Harness. This build ships no settings form of its own. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
   'settings.loading': 'Reading runtime settings…',
@@ -703,6 +710,8 @@ export const en: DSchatDict = {
 
   'empty.title': 'Talk to DeepSeek web right inside DSH',
   'empty.body': 'Reuses your web sign-in instead of API billing. When you are done, distill the chat into a task brief and keep going in a harness session.',
+
+  'thread.loading': 'Loading this conversation…',
 
   'composer.placeholder': 'Message DeepSeek web…',
   'composer.notLoggedIn': 'Web sign-in needed · type now, it sends once you are in',

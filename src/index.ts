@@ -4,8 +4,17 @@
  * Mounts the DeepSeek web engine (a real browser at chat.deepseek.com driven
  * through its own page, persistent login profile), the /api/dsh-dschat route
  * family, the agent tools (dschat_status / dschat_send / dschat_recover /
- * dschat_import / dschat_transfer), the harness transfer (seed a new session
- * with a web transcript) and a system-prompt announcement.
+ * dschat_import / dschat_transfer) and the harness transfer (seed a new session
+ * with a web transcript).
+ *
+ * It contributes NO system-prompt text by default. The tools describe
+ * themselves, and every trigger a reader might use («网页端», «ChatGPT 模式»,
+ * «转移到 harness») already sits in the description of the tool it belongs to,
+ * which is the one place it is needed — a prose catalogue of the same six tools
+ * in every session's prompt, including every subagent's, was 786 characters of
+ * duplication that the harness's own guidance forbids ("say each fact once").
+ * `announceToAgent` keeps the old announcement available as an opt-in, scoped to
+ * the agents that can actually see the tools.
  *
  * The browser half (./client) registers a NATIVE panel through the shell's own
  * slots — `sidebar.panellist` for the nav entry and `main` for the center
@@ -63,7 +72,15 @@ export const inject = ['webServer', 'tools', 'systemPrompt', 'sessions']
 
 /** Plugin config, validated by the same-named schemastery schema. */
 export interface Config {
-  /** When true (default), a system-prompt section announces the plugin to every agent. */
+  /**
+   * Opt in to a one-line system-prompt note naming these tools.
+   *
+   * OFF by default, deliberately. The tools carry their own descriptions and
+   * trigger words, so this note is a nudge for a deployment that wants the agent
+   * reminded — not a requirement for discovery. Prompt text is paid by EVERY
+   * session and every subagent, including the ones that never touch this plugin,
+   * so the default is to say nothing and let the schemas do the talking.
+   */
   announceToAgent?: boolean
   /** Master switch for the plugin (routes, tools, prompt section). */
   enabled?: boolean
@@ -107,7 +124,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  announceToAgent: z.boolean().default(true),
+  announceToAgent: z.boolean().default(false),
   enabled: z.boolean().default(true),
   browserChannel: z.string().default('auto'),
   browserExecutablePath: z.string().default(''),
@@ -125,13 +142,26 @@ export const Config: z<Config> = z.object({
 })
 
 /** Schema default, re-read for hand-built test contexts (the loader applies them normally). */
-const DEFAULT_ANNOUNCE = true
+const DEFAULT_ANNOUNCE = false
 
-/** Order of the announcement section within the tool-guidance band. */
+/** Order of the opt-in announcement section within the tool-guidance band. */
 const SECTION_ORDER = 155
 
-/** Model-facing announcement: plugin presence, capabilities, and limits. */
-export const DSCHAT_GUIDANCE = '本机已安装 dsh-DSchat 插件（DeepSeek 网页端聊天 + 迁移到 harness）：在侧边栏「Chat」面板入口打开原生中心面板（不再是 DOM 注入的浮层）。它通过真实浏览器驱动 chat.deepseek.com，用网页登录会话与 DeepSeek 网页模型对话，无需 API 额度；支持深度思考/智能搜索开关、图片附件（拖拽或粘贴）、会话搜索与消息级操作。能力：dschat_status 查看登录/引擎/会话状态、dschat_send 通过网页端发送消息并流式获取回复（可附带本地图片路径做多模态提问）、dschat_stop 停止正在生成的回复（dschat_send 返回 BUSY 或用户要求停下时用它）、dschat_recover 把网页端会话增量同步到本地（已有的只补缺失的部分，不整体覆盖）、dschat_import 把存储的网页对话导入为 markdown 上下文、dschat_transfer 把网页对话蒸馏成可执行任务简报并迁移成 harness 会话：默认只返回预览（首条消息的完整文本，不创建任何会话），用户确认后带 confirm: true 再调用一次才真正写入，或经 targetSessionId 追加到已有会话延续同一任务。面板头部「在 Harness 中继续」提供同样的迁移（可选蒸馏简报 / 原文迁移、目标工作区、追加到已有会话），并在写入前展示可编辑的预览；蒸馏不可用时会明确提示已回退为原文。限制：首次使用需用户在弹出的浏览器窗口完成 DeepSeek 网页登录；网页端受 DeepSeek 官方风控，操作失败或页面改版时返回错误而非崩溃。用户提到「DSchat / 网页聊天 / 网页端 / ChatGPT 模式 / deepseek web / 转移到 harness」时即指本插件，请据此协作。'
+/**
+ * The opt-in one-liner. Everything it used to spell out lives where it is needed:
+ *
+ *   · what each tool does and when to use it — the tool's own description, which
+ *     the model receives whether or not this text does;
+ *   · the trigger words («网页端», «deepseek web», «转移到 harness», …) — the
+ *     `Triggers:` line of the tool they belong to;
+ *   · the sidebar panel — `dschat_status`'s description, so an agent that can
+ *     see the tools can always answer "where do I chat with the web model?".
+ *
+ * What is left is the one thing no schema says: that all of these arrive
+ * together under one name. It renders ONLY for an agent that can see the tools
+ * (see `sync`), so a restricted or preset-scoped agent pays nothing for it.
+ */
+export const DSCHAT_GUIDANCE = '用户提到「网页端 / DSchat / ChatGPT 模式 / 转移到 harness」时，指的是 dschat_* 工具（各工具说明里有触发词与用法）。'
 
 /** Resolve `$DSH_HOME` (falling back to `$HOME`) without importing the host kit. */
 function dshHome(): string {
@@ -300,7 +330,16 @@ export function apply(ctx: Context, config?: Config): void {
       disposeSection = ctx.systemPrompt.section({
         name: 'plugin:dsh-dschat',
         order: SECTION_ORDER,
-        text: DSCHAT_GUIDANCE,
+        /*
+         * Derived, not static: this text exists to explain tools, so an agent
+         * that cannot see them gets an empty string — and the assembler drops
+         * empty sections outright, which makes it genuinely free rather than
+         * "free except for a blank line". It is the shape the harness documents
+         * for tool guidance (`text({ scope })` with `ctx.tools.get(name, scope)`),
+         * so a `tools.restrict()` that hides `dschat_status` also retires the
+         * sentence that talks about it.
+         */
+        text: ({ scope }) => (ctx.tools.get('dschat_status', scope) === undefined ? '' : DSCHAT_GUIDANCE),
       })
     }
     disposeRoutes = ctx.effect(

@@ -905,6 +905,40 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   /* ------------------------------------------------------------ data feed */
 
   /**
+   * Every conversation body this panel has fetched, keyed by id, with the
+   * message count it was fetched AT.
+   *
+   * Why a cache beside the state: `/chat?id=` and the `/state` poll are two
+   * requests in flight at once, and they cross in exactly one place — a
+   * conversation the panel has never seen. `refreshState` is what introduces one
+   * (「新对话」, a recover, another window, the engine storing the first message
+   * of a brand-new chat), and the body request the selection effect fires is
+   * answered FIRST routinely. Applying it was a `chats.map` over a list that did
+   * not carry the chat yet, i.e. a silent no-op, so nothing marked it loaded —
+   * and every later poll then replaced its messages with `[]` while the /tail
+   * feed kept putting the ANSWER back into the empty body. That is the whole
+   * reported trio: the question never appeared, the transcript blinked between
+   * the answer and the empty state once per poll, and a conversation with
+   * history rendered as the brand-new-conversation page.
+   *
+   * The COUNT is what makes a cached body usable rather than merely present: a
+   * body that no longer agrees with the summary is not applied, it is refetched.
+   */
+  const bodiesRef = useRef(new Map<string, { messages: DSchatMessage[]; count: number }>())
+
+  /**
+   * The conversation the panel means to display, as the body fetcher needs it.
+   *
+   * `refreshState` has to know which conversation is on screen to decide what
+   * still needs a body, and it must not re-subscribe the poll loop on every
+   * switch (the loop is keyed on `refreshState`). The state variable is mirrored
+   * here for that read; it is written on commit, which is always before the next
+   * response lands.
+   */
+  const viewChatIdRef = useRef<string | undefined>(undefined)
+  useEffect(() => { viewChatIdRef.current = viewChatId }, [viewChatId])
+
+  /**
    * Fetch and apply the authoritative snapshot right now.
    *
    * Shared by the slow poll, the end of a turn and the two places a new chat
@@ -918,43 +952,73 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       if (snapshot.ok !== true) return
       const next = snapshot as unknown as DSchatView
       /*
-       * The summaries replace the list, but a body already fetched is KEPT: the
-       * poll runs every 1.5 s and re-fetching the open conversation on each tick
-       * would put back the traffic this change removes. `messageCount` is the
-       * host's, so a conversation that grew while its body was not loaded is
-       * still reported honestly by the row.
+       * Which conversation the snapshot leaves on screen. A selection the reader
+       * made that the snapshot still carries is kept; otherwise the host's
+       * active conversation (or the newest) wins. Decided here rather than inside
+       * a `setViewChatId` updater because the body check below needs the same
+       * answer.
        */
+      const current = viewChatIdRef.current
+      const viewId = current !== undefined && next.chats.some(chat => chat.id === current)
+        ? current
+        : next.activeChatId ?? next.chats[0]?.id
       /*
-       * A loaded body is kept ONLY while it still agrees with the host's count.
+       * Which bodies this snapshot invalidates, decided against the snapshot the
+       * panel is HOLDING (`stateRef`) rather than inside the updater: the same
+       * comparison runs in both places, and a side effect in a state updater runs
+       * twice under StrictMode.
        *
        * The count is the one thing `/state` still knows about a conversation's
        * contents, which makes it the staleness oracle: a body of 4 messages
        * against a summary of 5 means the conversation grew without this panel
        * (the reader's own send, an import, a recover, another window), and
        * keeping the 4 would silently show a transcript that is missing a turn.
-       * The re-fetch is queued below rather than here so the whole comparison
-       * happens against one snapshot.
+       * A conversation with no body at all is fetched only while it is the one
+       * on screen — the point of summaries is that the rest of the history is
+       * never pulled in.
        */
-      const stale: string[] = []
+      const pending: string[] = []
       const held = stateRef.current
+      const bodies = bodiesRef.current
       for (const chat of next.chats) {
         const previous = held?.chats.find(candidate => candidate.id === chat.id)
-        if (previous?.loaded === true && previous.messages.length !== chat.messageCount) stale.push(chat.id)
+        const live = previous?.loaded === true ? previous.messages : undefined
+        const cached = bodies.get(chat.id)
+        const body = live
+          ?? (cached !== undefined && cached.count === chat.messageCount ? cached.messages : undefined)
+        if (body !== undefined && body.length !== chat.messageCount) pending.push(chat.id)
+        else if (body === undefined && chat.id === viewId && chat.messageCount > 0) pending.push(chat.id)
       }
       setState(previousView => ({
         ...next,
         chats: next.chats.map(chat => {
           const previous = previousView?.chats.find(candidate => candidate.id === chat.id)
-          return previous === undefined || previous.loaded !== true
-            ? { ...chat, messages: [] }
-            : { ...chat, messages: previous.messages, loaded: true }
+          /*
+           * A body the panel holds is KEPT: re-fetching the open conversation on
+           * every tick would put back the traffic the summaries removed. The
+           * cache covers the body whose chat the snapshot had not introduced yet
+           * — the case where the fetch resolved first (see `bodiesRef`).
+           */
+          const live = previous?.loaded === true ? previous.messages : undefined
+          const cached = bodies.get(chat.id)
+          const body = live
+            ?? (cached !== undefined && cached.count === chat.messageCount ? cached.messages : undefined)
+          if (body !== undefined) return { ...chat, messages: body, loaded: true }
+          /*
+           * No authoritative body. A conversation with something already on
+           * screen keeps it: the answer the tail feed just appended is real, and
+           * blinking it away IS the flicker this path exists to remove. It stays
+           * `loaded: false` so the fetch queued above — or the selection effect —
+           * is still what makes it authoritative.
+           */
+          if (previous !== undefined && previous.messages.length > 0) {
+            return { ...chat, messages: previous.messages, loaded: false }
+          }
+          return { ...chat, messages: [] }
         }),
       }))
-      for (const id of stale) void ensureBody(id, true)
-      setViewChatId(previous => {
-        if (previous !== undefined && next.chats.some(chat => chat.id === previous)) return previous
-        return next.activeChatId ?? next.chats[0]?.id
-      })
+      for (const id of pending) void ensureBody(id, true)
+      setViewChatId(viewId)
     } catch {
       // A transient failure keeps the previous snapshot on screen; the poll
       // loop retries on its own.
@@ -975,7 +1039,9 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (chatId === undefined) return
     const current = stateRef.current?.chats.find(chat => chat.id === chatId)
     // `force` is for the caller that KNOWS the body moved on — the send path,
-    // and the staleness check in `refreshState`.
+    // and the staleness check in `refreshState`. Without it a loaded body is left
+    // alone, which is what keeps the 1.5 s poll off the wire for the open
+    // conversation.
     if (!force && current?.loaded === true) return
     if (bodyRequests.current.has(chatId)) return bodyRequests.current.get(chatId)
     const request = (async () => {
@@ -983,9 +1049,21 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         const answer = await api.chat(chatId)
         if (answer.ok !== true || answer.chat === undefined) return
         const messages = answer.chat.messages
+        /*
+         * Cached as well as applied, because the two can disagree about whether
+         * the conversation exists yet: the selection effect fires on the tick the
+         * panel selects a chat the snapshot has not introduced (`refreshState` is
+         * what introduces it, and its response is still in flight), and applying
+         * a body to a list without that chat is a no-op. The cache is what
+         * carries it across; `refreshState` applies it the moment the summary
+         * arrives — see `bodiesRef`.
+         */
+        bodiesRef.current.set(chatId, { messages, count: messages.length })
         setState(previous => previous === null ? previous : {
           ...previous,
-          chats: previous.chats.map(chat => (chat.id === chatId ? { ...chat, messages, loaded: true } : chat)),
+          chats: previous.chats.map(chat => (chat.id === chatId
+            ? { ...chat, messages, messageCount: messages.length, loaded: true }
+            : chat)),
         })
       } catch {
         // A body that will not load leaves the summary on screen; opening the
@@ -3201,6 +3279,35 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * diffing into it. `thread-inner` then holds only what this render built,
      * whatever the stored ids happen to be.
      */
+    /*
+     * A conversation whose body is still on its way is NOT an empty one.
+     *
+     * `messages.length === 0` is true for both, which is why opening a chat with
+     * history used to render 「在 DSH 里直接聊 DeepSeek 网页端」 for the length of
+     * the round trip — the empty state IS the brand-new-conversation page, so a
+     * click on a stored conversation looked like it had thrown the reader into a
+     * fresh chat. `loaded` is exactly the flag that tells them apart (see
+     * `DSchatChatView`): unloaded with a non-zero summary count and nothing on
+     * screen yet is "coming"; unloaded with a zero count is genuinely new.
+     *
+     * Messages already on screen outrank the placeholder: a body the tail feed
+     * has begun is real content, and covering it with a loading row would be the
+     * same blink in a new costume.
+     */
+    if (viewChat !== undefined && viewChat.messages.length === 0
+      && viewChat.loaded !== true && viewChat.messageCount > 0) {
+      return createElement(
+        Fragment,
+        { key: 'loading' },
+        createElement(
+          'div',
+          { className: 'dsh-dschat-empty dsh-dschat-loading' },
+          createElement('div', { className: 'dsh-dschat-empty-mark' }, createElement(ChatIcon, { size: 22 })),
+          createElement('h3', null, tr('thread.loading')),
+        ),
+        engineNotice(),
+      )
+    }
     if (viewChat === undefined || viewChat.messages.length === 0) {
       return createElement(
         Fragment,

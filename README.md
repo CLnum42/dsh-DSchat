@@ -113,7 +113,7 @@ profile 的 `cordis.patch.yml` —— 在 `dschat` 那一行（`name: 'dsh-dscha
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 插件总开关 |
-| `announceToAgent` | `true` | 是否在 system prompt 里公告可用工具 |
+| `announceToAgent` | `false` | 是否在 system prompt 里加一行说明这组工具。默认关闭：工具的 description 已自带触发词与用法，而提示词由每个会话、每个子 agent 共同承担 |
 | `browserChannel` | `auto` | `chrome` / `msedge` / `chromium` / `auto` |
 | `browserExecutablePath` | 空 | 自备 Chromium 时可执行文件路径 |
 | `browserProxy` | `direct` | `direct` 或代理地址 |
@@ -283,7 +283,7 @@ renders no form for it. Configuration lives in the profile's `cordis.patch.yml` 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch for the plugin |
-| `announceToAgent` | `true` | Announce the available tools in the system prompt |
+| `announceToAgent` | `false` | Add one line naming these tools to the system prompt. Off by default: each tool's own description already carries its trigger words and usage, and prompt text is paid by every session and every subagent |
 | `browserChannel` | `auto` | `chrome` / `msedge` / `chromium` / `auto` |
 | `browserExecutablePath` | empty | Path to your own Chromium build |
 | `browserProxy` | `direct` | `direct` or a proxy URL |

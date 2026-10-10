@@ -7,6 +7,74 @@ All notable changes to dsh-DSchat are recorded here. The format follows
 Versioning note: `0.5.1` and `0.6.0` are the first two releases cut from a
 committed tree — everything before them shipped as `0.4.2` and earlier.
 
+## [0.6.1] — 2026-10-10
+
+Three defects reported against 0.6.0, and one prompt-cost decision. The panel
+fixes need a page refresh; the prompt change takes effect on restart (the host
+half assembles the prompt).
+
+### Changed
+- **The plugin no longer writes 786 characters into every system prompt.**
+  `announceToAgent` defaulted to true, so every session — and every subagent, and
+  every session in unrelated workspaces — carried a prose catalogue of the six
+  `dschat_*` tools. Measured against the schemas the model already receives
+  (4,626 characters), that was +17% of pure duplication: the tool inventory is
+  the tools' own descriptions, the trigger words («网页端», «deepseek web»,
+  «转移到 harness») are each tool's `Triggers:` line, and the login requirement,
+  the "no API billing" note and the transfer's preview-then-confirm semantics are
+  all already in the description of the tool they belong to. The harness's own
+  guidance is explicit — say each fact once, do not repeat the tool definition in
+  a system-prompt section — and no other installed plugin announces itself:
+  `dsh-better-sidebar` contributes context per action via `agent.inject()`, and
+  the rest contribute none. Default is now `false`; the opt-in text is one line,
+  derived from tool visibility (`ctx.tools.get('dschat_status', scope)` returning
+  `''` for an agent that cannot see the tools, which the assembler drops
+  entirely). The one fact no schema carried — that the sidebar 「Chat」 panel is
+  this plugin — moved into `dschat_status`'s description, where it costs nothing
+  extra and disappears with the tool.
+
+### Fixed
+- **A new conversation's first exchange showed the answer and not the question.**
+  `/state` carries summaries and `/chat?id=` carries one conversation's body, so
+  selecting a conversation is two requests in flight at once. `refreshState` is
+  what INTRODUCES a conversation the panel has never seen (「新对话」, a recover,
+  another window) and the body request is answered first routinely — measured on
+  a 222-conversation store, `/chat` answers in ~0.8 ms against `/state`'s
+  ~3 ms. Applying that body to a list that did not carry the chat yet was a
+  silent `chats.map` no-op, so nothing marked the conversation loaded, and every
+  later poll replaced its messages with `[]` again. Only the /tail feed could put
+  anything in it, and the tail carries the ANSWER: the transcript showed a reply
+  with no question above it. Bodies now go through a count-checked cache, so a
+  body that arrives before its summary is applied the moment the summary lands,
+  and a conversation with no authoritative body is fetched when it is the one on
+  screen.
+- **A conversation with history rendered as a brand-new one.** The same empty
+  body made the transcript fall into the empty branch — which IS the
+  new-conversation page — once per poll, between the answer and the blank state.
+  That blink was the reported 「一闪一闪」 and the 「突然回到新对话」. A
+  conversation whose body is still on its way now says so (「正在载入这段对话…」)
+  instead of offering to start a conversation, and a body already on screen is
+  never replaced by that placeholder.
+- **Searching inside a conversation never worked.** `DSCHAT_API` carried the key
+  `search` twice — once for `GET /search-conversations`, once for the web-search
+  TOGGLE — and a later key silently wins in an object literal, so the constant
+  resolved to the toggle: every message search was a GET against a write-guarded
+  route, a 405 the filter swallowed. The keys are now `searchConversations` and
+  `search`, and `route-surface.test.ts` fails when two endpoints share a name or
+  when a constant points at a path the host does not register.
+
+### Added
+- `test/new-chat-body.test.ts` — the snapshot/body race, driven with the real
+  ordering and a MutationObserver, so "the page blinks" is measured rather than
+  sampled.
+- `test/route-surface.test.ts` — the route table against the host's registered
+  paths, plus a source-level duplicate-key check (a repeated key is gone by the
+  time the object exists, which is why the type system never saw it).
+- `test/prompt-footprint.test.ts` — the DEFAULT configuration contributes no
+  prompt text; the opt-in is capped at 200 characters so the catalogue cannot
+  creep back unnoticed; and it renders empty for an agent the tools are hidden
+  from. `host-smoke`'s "one section by default" assertion became "none".
+
 ## [0.6.0] — 2026-10-10
 
 The release the review called "the road to shippable": the data plane, the

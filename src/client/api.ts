@@ -267,7 +267,7 @@ export class DSchatApi {
    */
   searchConversations(q: string): Promise<EndpointResult<{ ok: boolean; ids?: string[] }>> {
     return request<{ ok: boolean; ids?: string[] }>(
-      `${DSCHAT_API.search}?q=${encodeURIComponent(q)}`, undefined, TIMEOUT.poll,
+      `${DSCHAT_API.searchConversations}?q=${encodeURIComponent(q)}`, undefined, TIMEOUT.poll,
     )
   }
 
