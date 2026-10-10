@@ -20,7 +20,7 @@ import type { DSchatApi } from '../api.ts'
 import { CheckIcon, CloseIcon } from '../icons.tsx'
 
 /** Resolved host settings as the context route reports them. */
-interface SettingsView {
+export interface SettingsView {
   browserChannel: string
   browserExecutablePath: string
   browserProxy: string
@@ -51,6 +51,8 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
   const [state, setState] = useState<DSchatState | null>(null)
   const [settings, setSettings] = useState<SettingsView | null>(null)
   const [failed, setFailed] = useState<string | undefined>(undefined)
+  /** The outcome of the last 「复制诊断」, shown under the button. */
+  const [diag, setDiag] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -79,10 +81,64 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
   const openLogin = useCallback((): void => { void api.openLogin().catch(() => undefined) }, [api])
   const closeBrowser = useCallback((): void => { void api.closeBrowser().catch(() => undefined) }, [api])
 
+
   const phase = state === null
     ? 'stopped'
     : phaseOf({ engine: state.engine, loggedIn: state.loggedIn, busy: state.busy, chats: state.chats })
   const loggedIn = state?.loggedIn ?? null
+
+  /**
+   * The report the 「复制诊断」 button copies, assembled at click time.
+   *
+   * Thin wrapper over {@link buildDiagnosticReport} so the text itself stays a
+   * pure function — it is the deliverable of this card, and a deliverable that
+   * can only be produced by clicking is one that cannot be checked.
+   */
+  const diagnosticText = useCallback(async (): Promise<string> => {
+    const probe = await api.probePage().catch(error => ({ ok: false, error: String(error) }))
+    return buildDiagnosticReport({
+      version: state?.version,
+      build: state?.build,
+      phase,
+      engine: state?.engine,
+      engineError: state?.engineError,
+      loggedIn: state?.loggedIn ?? null,
+      busy: state?.busy,
+      deepThink: state?.deepThink,
+      search: state?.search,
+      pageUrl: state?.pageUrl,
+      lastError: state?.lastError,
+      lastErrorCode: state?.lastErrorCode,
+      storeWarning: state?.storeWarning,
+      chats: state?.chats.length ?? 0,
+      settings,
+      probe,
+      userAgent: typeof navigator === 'undefined' ? undefined : navigator.userAgent,
+    })
+  }, [api, state, settings, phase])
+
+  /**
+   * Copy the diagnostics, and SAY whether it worked.
+   *
+   * The panel's other copy actions report 「已复制」 whatever happens, which is
+   * how a reader ends up pasting an empty clipboard into an issue. `writeText`
+   * rejects when the document is not focused or the permission is denied, so the
+   * outcome is checked, and a failure still leaves the text in the console
+   * rather than losing it.
+   */
+  const copyDiagnostics = useCallback((): void => {
+    void (async () => {
+      const text = await diagnosticText()
+      try {
+        await navigator.clipboard.writeText(text)
+        setDiag('copied')
+      } catch {
+        console.log(text)
+        setDiag('failed')
+      }
+      window.setTimeout(() => { setDiag('idle') }, 4_000)
+    })()
+  }, [diagnosticText])
 
   const statusText = ((): string => {
     switch (phase) {
@@ -135,6 +191,13 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
     ),
 
     createElement('section', { className: 'dsh-dschat-setcard' },
+      createElement('h2', null, tr('settings.build')),
+      row(tr('settings.version'),
+        state?.version === undefined || state.version === '' ? tr('settings.unknown') : state.version, true),
+      row(tr('settings.built'), state?.build === undefined || state.build === '' ? tr('settings.unknown') : state.build, true),
+    ),
+
+    createElement('section', { className: 'dsh-dschat-setcard' },
       createElement('h2', null, tr('settings.runtime')),
       settings === null
         ? createElement('p', { className: 'dsh-dschat-hintline' }, failed ?? tr('settings.loading'))
@@ -168,8 +231,80 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
           disabled: (state?.engine ?? 'stopped') === 'stopped',
           onClick: closeBrowser,
         }, tr('action.closeBrowser')),
+        /*
+         * 「复制诊断」 — the reader's one-click answer to "what do I send you?".
+         *
+         * It includes the live `probe-page` output, which is the difference
+         * between a report someone can act on and one that says the page might
+         * have changed.
+         */
+        createElement('button', {
+          type: 'button',
+          className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+          onClick: copyDiagnostics,
+        }, tr('status.diag.copy')),
       ),
-      createElement('p', { className: 'dsh-dschat-sethint' }, tr('status.where')),
+      createElement('p', { className: 'dsh-dschat-sethint' },
+        diag === 'copied' ? tr('status.diag.copied')
+          : diag === 'failed' ? tr('status.diag.failed')
+            : tr('status.where')),
     ),
   )
+}
+
+/** The fields {@link buildDiagnosticReport} reads, all optional but the phase. */
+export interface DiagnosticInput {
+  version?: string | undefined
+  build?: string | undefined
+  phase: string
+  engine?: string | undefined
+  engineError?: string | undefined
+  loggedIn: boolean | null
+  busy?: boolean | undefined
+  deepThink?: boolean | undefined
+  search?: boolean | undefined
+  pageUrl?: string | undefined
+  lastError?: string | undefined
+  lastErrorCode?: string | undefined
+  storeWarning?: string | undefined
+  chats: number
+  settings: SettingsView | null
+  /** The `/probe-page` answer, verbatim (an object, or an error object). */
+  probe: unknown
+  userAgent?: string | undefined
+}
+
+/**
+ * The diagnostic report, as plain text.
+ *
+ * Plain text rather than JSON because it is read by a human first and pasted
+ * into an issue second; every line is `label: value`, and nothing is omitted for
+ * looking unimportant — the whole point is that one copy-paste carries enough
+ * state for someone else to reason about a failure they cannot reproduce.
+ */
+export function buildDiagnosticReport(input: DiagnosticInput): string {
+  const dash = (value: string | undefined): string => (value === undefined || value === '' ? '-' : value)
+  return [
+    `dsh-DSchat ${dash(input.version)}`,
+    `build: ${dash(input.build)}`,
+    `phase: ${input.phase}${input.engineError === undefined ? '' : ` — ${input.engineError}`}`,
+    `engine: ${dash(input.engine)} | loggedIn: ${String(input.loggedIn)} | busy: ${String(input.busy ?? false)}`,
+    `deepThink: ${String(input.deepThink ?? false)} | search: ${String(input.search ?? false)}`,
+    `pageUrl: ${dash(input.pageUrl)}`,
+    `lastError: ${dash(input.lastError)}${input.lastErrorCode === undefined ? '' : ` [${input.lastErrorCode}]`}`,
+    `storeWarning: ${dash(input.storeWarning)}`,
+    `chats: ${String(input.chats)}`,
+    `host: ${dash(input.userAgent)}`,
+    input.settings === null
+      ? 'settings: (not loaded)'
+      : [
+          `dataDir: ${input.settings.dataDir}`,
+          `profileDir: ${input.settings.profileDir}`,
+          `exportDir: ${input.settings.exportDir}`,
+          `channel: ${input.settings.browserChannel} | headless: ${String(input.settings.browserHeadless)} | proxy: ${input.settings.browserProxy}`,
+          `replyTimeoutMs: ${String(input.settings.replyTimeoutMs)} | distill: ${String(input.settings.transferDistill)} (${input.settings.transferProvider || 'auto'}/${input.settings.transferModel || 'auto'})`,
+          `announceToAgent: ${String(input.settings.announceToAgent)}`,
+        ].join('\n'),
+    `probe: ${JSON.stringify(input.probe)}`,
+  ].join('\n')
 }

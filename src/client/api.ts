@@ -428,4 +428,16 @@ export class DSchatApi {
   recover(chat: { title?: string; sessionId?: string }): Promise<EndpointResult<ApiRecoverResult>> {
     return request<ApiRecoverResult>(DSCHAT_API.recover, chat, TIMEOUT.webList)
   }
+
+  /**
+   * What the live page actually contains, for a failed recover.
+   *
+   * The route has existed since the first release and was reachable only with
+   * curl: a failed sync reported "页面可能已改版" and left the reader with nothing
+   * to act on. It backs the status card's 「复制诊断」, which is where someone
+   * reporting a problem can get the evidence in one click.
+   */
+  probePage(): Promise<EndpointResult<{ ok: boolean; probe?: Record<string, unknown> }>> {
+    return request<{ ok: boolean; probe?: Record<string, unknown> }>(DSCHAT_API.probePage, undefined, TIMEOUT.webList)
+  }
 }

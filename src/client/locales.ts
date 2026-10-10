@@ -21,6 +21,10 @@ export interface DSchatDict {
   'settings.page': string
   'settings.lastError': string
   'settings.runtime': string
+  'settings.build': string
+  'settings.version': string
+  'settings.built': string
+  'settings.unknown': string
   'settings.channel': string
   'settings.headless': string
   'settings.proxy': string
@@ -41,6 +45,9 @@ export interface DSchatDict {
   'status.title': string
   'status.description': string
   'status.where': string
+  'status.diag.copy': string
+  'status.diag.copied': string
+  'status.diag.failed': string
   'status.stopped': string
   'status.launching': string
   'status.needLogin': string
@@ -123,6 +130,11 @@ export interface DSchatDict {
   'empty.body': string
 
   'engine.notice.title': string
+  'engine.notice.error.title': string
+  'engine.notice.offline.title': string
+  'engine.notice.offline.body': string
+  'engine.notice.login.title': string
+  'engine.notice.login.body': string
   'engine.notice.retry': string
   'engine.notice.retrying': string
   'engine.notice.unreachable': string
@@ -269,6 +281,16 @@ export interface DSchatDict {
   'error.PAGE_CHANGED': string
   'error.TIMEOUT': string
   'error.NETWORK': string
+  'error.BUSY': string
+  'error.LOOPBACK': string
+  'error.METHOD': string
+  'error.ORIGIN': string
+  'error.CSRF': string
+  'error.PATH': string
+  'error.BAD_REQUEST': string
+  'error.TOO_LARGE': string
+  'error.NOT_FOUND': string
+  'error.INTERNAL': string
 }
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
@@ -286,6 +308,10 @@ export const zh: DSchatDict = {
   'settings.page': '当前页面',
   'settings.lastError': '最近错误',
   'settings.runtime': '运行参数',
+  'settings.build': '构建',
+  'settings.version': '版本',
+  'settings.built': '构建时间',
+  'settings.unknown': '未知',
   'settings.channel': '浏览器渠道',
   'settings.headless': '聊天时无头',
   'settings.proxy': '代理',
@@ -306,6 +332,9 @@ export const zh: DSchatDict = {
   'status.title': '运行状态',
   'status.description': 'DeepSeek 网页端引擎的实时状态与解析后的运行参数（只读）。',
   'status.where': '以上参数来自 profile 的 cordis.patch.yml：在 dsh-dschat 那一行下面加 config: 块，重启 Harness 生效（这一版插件没有自带设置表单）。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
+  'status.diag.copy': '复制诊断',
+  'status.diag.copied': '已复制到剪贴板，直接贴进问题反馈即可',
+  'status.diag.failed': '复制失败（剪贴板不可用）：诊断内容已打印到控制台，可从那里复制',
   'status.stopped': '未启动',
   'status.launching': '正在启动浏览器',
   'status.needLogin': '未登录',
@@ -389,6 +418,11 @@ export const zh: DSchatDict = {
   'settings.no': '否',
 
   'engine.notice.title': '网页端没有就绪',
+  'engine.notice.error.title': '网页端连接出错',
+  'engine.notice.offline.title': '网页端还没连上',
+  'engine.notice.offline.body': '发消息前需要在后台把 chat.deepseek.com 拉起来（会复用已登录的浏览器 profile，通常几秒）。',
+  'engine.notice.login.title': '还没有登录 DeepSeek 网页端',
+  'engine.notice.login.body': '登录窗口会复用已保存的 profile；登录一次之后就不再需要。',
   'engine.notice.retry': '重试启动网页端',
   'engine.notice.retrying': '正在启动…',
   'engine.notice.unreachable': '本机引擎没有响应启动请求（/wake 无应答），消息没有发出去。请检查网络后重试。',
@@ -533,6 +567,16 @@ export const zh: DSchatDict = {
   'error.PAGE_CHANGED': '网页端页面结构疑似改版，请升级插件',
   'error.TIMEOUT': '生成超时，可重试',
   'error.NETWORK': '网络或浏览器错误，请检查后重试',
+  'error.BUSY': '上一条回复还在生成，请等它结束或点「停止」后再试',
+  'error.LOOPBACK': '面板没有连上本机插件服务（请求不是从本机发出的）',
+  'error.METHOD': '请求方式不对：属插件内部错误，请刷新面板后重试',
+  'error.ORIGIN': '请求来源不被信任，已被拒绝（跨站请求）',
+  'error.CSRF': '安全令牌已失效，请刷新面板后重试',
+  'error.PATH': '这个路径不在插件允许的目录内（附件目录或配置的导出目录）',
+  'error.BAD_REQUEST': '请求缺少必要字段或格式不对',
+  'error.TOO_LARGE': '数据太大，超出上限',
+  'error.NOT_FOUND': '找不到对应的记录（可能已被删除）',
+  'error.INTERNAL': '插件内部错误，详情见「运行状态」里的诊断',
 }
 
 /** English dictionary, checked complete against the zh key set. */
@@ -550,6 +594,10 @@ export const en: DSchatDict = {
   'settings.page': 'Current page',
   'settings.lastError': 'Last error',
   'settings.runtime': 'Runtime',
+  'settings.build': 'Build',
+  'settings.version': 'Version',
+  'settings.built': 'Built at',
+  'settings.unknown': 'unknown',
   'settings.channel': 'Browser channel',
   'settings.headless': 'Headless while chatting',
   'settings.proxy': 'Proxy',
@@ -570,6 +618,9 @@ export const en: DSchatDict = {
   'status.title': 'Runtime status',
   'status.description': 'Live state of the DeepSeek web engine plus the resolved runtime settings (read-only).',
   'status.where': 'These values come from the profile\'s cordis.patch.yml: add a config: block under the dsh-dschat row, then restart Harness. This build ships no settings form of its own. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
+  'status.diag.copy': 'Copy diagnostics',
+  'status.diag.copied': 'Copied — paste it into the issue as it is',
+  'status.diag.failed': 'Copy failed (clipboard unavailable): the diagnostics were logged to the console instead',
   'status.stopped': 'Not started',
   'status.launching': 'Starting browser',
   'status.needLogin': 'Not signed in',
@@ -638,6 +689,11 @@ export const en: DSchatDict = {
   'settings.no': 'no',
 
   'engine.notice.title': 'The web engine is not ready',
+  'engine.notice.error.title': 'The web engine reported an error',
+  'engine.notice.offline.title': 'The web page is not running',
+  'engine.notice.offline.body': 'Sending a message starts chat.deepseek.com in the background first, reusing the signed-in browser profile. It usually takes a few seconds.',
+  'engine.notice.login.title': 'Not signed in to DeepSeek web',
+  'engine.notice.login.body': 'The sign-in window reuses the saved browser profile, so this is needed only once.',
   'engine.notice.retry': 'Retry starting the web engine',
   'engine.notice.retrying': 'Starting…',
   'engine.notice.unreachable': 'The local engine did not answer the start request (/wake), so the message was not sent. Check your connection and retry.',
@@ -782,4 +838,14 @@ export const en: DSchatDict = {
   'error.PAGE_CHANGED': 'The web page structure changed — upgrade this plugin',
   'error.TIMEOUT': 'Generation timed out — try again',
   'error.NETWORK': 'Network or browser error — check and retry',
+  'error.BUSY': 'The previous reply is still generating — wait for it or press Stop',
+  'error.LOOPBACK': 'The panel could not reach the local plugin service: the request did not come from this machine',
+  'error.METHOD': 'Wrong request method — an internal plugin error; reload the panel and retry',
+  'error.ORIGIN': 'The request came from an untrusted origin and was refused',
+  'error.CSRF': 'The security token expired — reload the panel and retry',
+  'error.PATH': 'That path is outside the directories this plugin may write to',
+  'error.BAD_REQUEST': 'The request was missing a required field or was malformed',
+  'error.TOO_LARGE': 'The data was larger than the allowed limit',
+  'error.NOT_FOUND': 'No such record — it may have been deleted',
+  'error.INTERNAL': 'Internal plugin error — open the diagnostics in the status card for the detail',
 }

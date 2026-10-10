@@ -202,6 +202,12 @@ async function bundle(dir) {
         state: async () => ({
           ok: true, deepThink: true, search: true,
           engine: 'ready', loggedIn: true, busy: false,
+          /*
+           * The running build's identity, as /state reports it. The status card
+           * shows it verbatim, so the shot proves the rows exist AND that they
+           * print the value rather than a placeholder.
+           */
+          version: '0.5.1', build: '2026-10-10T10:27:53.040Z',
           ...window.__state,
         }),
         tail: async () => ok({ busy: window.__state.busy === true, streaming: window.__state.streaming === true }),
@@ -1262,12 +1268,23 @@ try {
     if (item) item.click()
   })
   await view.waitForTimeout(400)
-  report.probes.statusCard = await view.evaluate(() => ({
-    open: document.querySelector('.dsh-dschat-modal') !== null,
-    rows: document.querySelectorAll('.dsh-dschat-modal .dsh-dschat-setrow').length,
-    actions: [...document.querySelectorAll('.dsh-dschat-modal .dsh-dschat-setactions button')].map(button => button.textContent),
-    title: document.querySelector('.dsh-dschat-modal h1')?.textContent ?? null,
-  }))
+  report.probes.statusCard = await view.evaluate(() => {
+    const text = (selector) => document.querySelector(selector)?.textContent ?? null
+    const rows = [...document.querySelectorAll('.dsh-dschat-modal .dsh-dschat-setrow')]
+    return {
+      open: document.querySelector('.dsh-dschat-modal') !== null,
+      rows: rows.length,
+      actions: [...document.querySelectorAll('.dsh-dschat-modal .dsh-dschat-setactions button')].map(button => button.textContent),
+      title: document.querySelector('.dsh-dschat-modal h1')?.textContent ?? null,
+      /* The build identity rows, by label — a row that exists but is empty is
+         the same defect as a missing one. */
+      buildRows: rows
+        .filter(row => /版本|构建|Version|Built/.test(row.querySelector('.dsh-dschat-setlabel')?.textContent ?? ''))
+        .map(row => `${row.querySelector('.dsh-dschat-setlabel')?.textContent}=${row.querySelector('.dsh-dschat-setvalue')?.textContent ?? ''}`),
+      headings: [...document.querySelectorAll('.dsh-dschat-modal h2')].map(node => node.textContent),
+      diagButton: text('.dsh-dschat-modal .dsh-dschat-sethint'),
+    }
+  })
   await shot('16-status-card', { clip: { x: 300, y: 100, width: 680, height: 620 } })
   await view.evaluate(() => { document.body.dataset.dsDarkTheme = 'true' })
   await view.waitForTimeout(150)
@@ -1281,6 +1298,47 @@ try {
   })
   await shot('16b-status-card-dark', { clip: { x: 300, y: 100, width: 680, height: 620 } })
   await view.evaluate(() => { delete document.body.dataset.dsDarkTheme })
+  await view.keyboard.press('Escape')
+  await view.waitForTimeout(200)
+
+  /*
+   * ---- 16c/16d: the two QUIET states now name themselves ----
+   *
+   * A stopped engine and a signed-out browser used to be a colour on a 7px lamp
+   * with the explanation in a tooltip. Both are rendered here over a NON-EMPTY
+   * conversation, which is the case that matters: with messages on screen the
+   * reader has something to send and no way to know why nothing happens.
+   */
+  /*
+   * `loggedIn: null`, which is what a stopped engine really reports: with no
+   * page there is nothing to judge, and the panel's phase is then 'stopped'
+   * rather than 'need-login' (see `phaseOf`).
+   */
+  await mount({ engine: 'stopped', loggedIn: null, busy: false, streaming: false, chats: streamingChats, activeChatId: 'chat-a' })
+  await view.waitForTimeout(300)
+  report.probes.offlineNotice = await view.evaluate(() => {
+    const notice = document.querySelector('.dsh-dschat-notice')
+    return {
+      title: notice?.querySelector('strong')?.textContent ?? null,
+      body: notice?.querySelector('p')?.textContent ?? null,
+      buttons: [...(notice?.querySelectorAll('button') ?? [])].map(button => button.textContent),
+    }
+  })
+  await shot('16c-notice-offline', { clip: { x: 260, y: 300, width: 1020, height: 420 } })
+
+  await mount({ engine: 'ready', loggedIn: false, busy: false, streaming: false, chats: streamingChats, activeChatId: 'chat-a' })
+  await view.waitForTimeout(300)
+  report.probes.loginNotice = await view.evaluate(() => {
+    const notice = document.querySelector('.dsh-dschat-notice')
+    return {
+      title: notice?.querySelector('strong')?.textContent ?? null,
+      buttons: [...(notice?.querySelectorAll('button') ?? [])].map(button => button.textContent),
+    }
+  })
+  await shot('16d-notice-login', { clip: { x: 260, y: 300, width: 1020, height: 420 } })
+
+  // Back to a healthy panel for the scenes that follow.
+  await mount({ ...fixture })
 
   /*
    * ---- 17..20: the question navigator and the 「↓ 最新」 pill ----

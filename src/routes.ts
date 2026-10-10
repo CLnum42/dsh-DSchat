@@ -30,7 +30,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { DeepSeekWebEngine } from './engine/engine.ts'
 import type { TranscriptStore } from './store.ts'
-import type { DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
+import type { DSchatApiCode, DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
 import { exportTranscriptFile, previewHarnessTransfer, transferToHarnessSession } from './transfer.ts'
 import type { DistillConfig } from './transfer.ts'
 import { ATTACHMENT_DIR, SAFE_EXTENSION, attachmentDir, isInsideDirectory, isSameOrInsideDirectory } from './attachments.ts'
@@ -367,6 +367,19 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
+ * One FAILED route answer.
+ *
+ * Every failure goes through here so it cannot forget its `code`: the panel
+ * needs the code to render a sentence in the reader's own language, and a route
+ * that answers with only a Chinese string is a route that prints Chinese into an
+ * English interface. `error` stays as the technical detail beside the code (see
+ * {@link DSchatApiCode}).
+ */
+function failure(res: ServerResponse, status: number, code: DSchatApiCode, error: string): void {
+  writeJson(res, status, { ok: false, code, error })
+}
+
+/**
  * Validate the message list a `/restore` caller hands over.
  *
  * 「撤销」 re-imports the conversation the panel still holds, so this body is
@@ -550,6 +563,14 @@ export interface DSchatRoutesDeps {
   ctx: Context
   engine: DeepSeekWebEngine
   store: TranscriptStore
+  /**
+   * The running bundle's version and build time (injected at build time).
+   *
+   * Reported through `/state` so the panel's status card can answer "which build
+   * is this?" — a question `package.json`, the git tag and the newest tarball
+   * each answer differently.
+   */
+  build: { version: string; build: string }
   distill: DistillConfig
   /**
    * Where 「导出 markdown」 writes when the caller names no directory.
@@ -571,7 +592,7 @@ type RouteAccess = 'read' | 'write'
 
 /** Build every /api/dsh-dschat route. */
 export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
-  const { ctx, engine, store, distill, hostContext, exportDir } = deps
+  const { ctx, engine, store, build, distill, hostContext, exportDir } = deps
 
   /*
    * One CSRF token per plugin run.
@@ -596,27 +617,27 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
    */
   const guard = (req: IncomingMessage, res: ServerResponse, access: RouteAccess = 'read'): boolean => {
     if (!isLoopbackRequest(req)) {
-      writeJson(res, 403, { ok: false, error: 'loopback only' })
+      failure(res, 403, 'LOOPBACK', 'loopback only')
       return false
     }
     if (access === 'write') {
       if (methodOf(req) !== 'POST') {
-        writeJson(res, 405, { ok: false, code: 'METHOD', error: '该操作只接受 POST 请求' })
+        failure(res, 405, 'METHOD', '该操作只接受 POST 请求')
         return false
       }
       if (!isSameOriginRequest(req)) {
-        writeJson(res, 403, { ok: false, code: 'ORIGIN', error: '跨站请求被拒绝（Origin/Sec-Fetch-Site 不匹配）' })
+        failure(res, 403, 'ORIGIN', '跨站请求被拒绝（Origin/Sec-Fetch-Site 不匹配）')
         return false
       }
       if (headerValue(req, CSRF_HEADER) !== csrfToken) {
-        writeJson(res, 403, { ok: false, code: 'CSRF', error: '缺少或无效的 CSRF 令牌，请刷新面板' })
+        failure(res, 403, 'CSRF', '缺少或无效的 CSRF 令牌，请刷新面板')
         return false
       }
       return true
     }
     const method = methodOf(req)
     if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
-      writeJson(res, 405, { ok: false, code: 'METHOD', error: '该接口只接受 GET 请求' })
+      failure(res, 405, 'METHOD', '该接口只接受 GET 请求')
       return false
     }
     return true
@@ -645,6 +666,10 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       // A store that failed to load or save: the panel says so once instead of
       // letting the history look quietly empty.
       storeWarning: store.storeWarning(),
+      // Constant for the life of the process, and the only honest answer to
+      // "which build is running?" — see the build-time defines.
+      version: build.version,
+      build: build.build,
       activeChatId: store.activeChat()?.id,
       chats: store.list(),
     }
@@ -836,20 +861,14 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
          * toast and the reader still has the text on screen to copy out.
          */
         if (body === undefined) {
-          writeJson(res, 413, {
-            ok: false,
-            error: `撤销失败：对话数据无法读取（超过 ${Math.round(MAX_RESTORE_BODY_BYTES / (1024 * 1024))} MiB 或格式损坏），已保留当前内容。`,
-          })
+          failure(res, 413, 'TOO_LARGE', `撤销失败：对话数据无法读取（超过 ${Math.round(MAX_RESTORE_BODY_BYTES / (1024 * 1024))} MiB 或格式损坏），已保留当前内容。`)
           return
         }
         const restored = sanitizeRestoreMessages(body['messages'])
         if (restored.messages.length === 0) {
-          writeJson(res, 400, {
-            ok: false,
-            error: restored.dropped > 0
-              ? `撤销失败：${String(restored.dropped)} 条消息结构不合法，没有可恢复的内容。`
-              : '撤销失败：没有可恢复的消息。',
-          })
+          failure(res, 400, 'BAD_REQUEST', restored.dropped > 0
+            ? `撤销失败：${String(restored.dropped)} 条消息结构不合法，没有可恢复的内容。`
+            : '撤销失败：没有可恢复的消息。')
           return
         }
         // The web session id travels with the undo too, so the restored
@@ -884,12 +903,12 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const body = await readJsonBody(req, MAX_ATTACHMENT_BODY_BYTES)
         const data = typeof body?.['data'] === 'string' ? body['data'] : ''
         if (data === '') {
-          writeJson(res, 400, { ok: false, error: 'empty attachment body（文件数据为空或超过 24 MiB）' })
+          failure(res, 400, 'BAD_REQUEST', 'empty attachment body（文件数据为空或超过 24 MiB）')
           return
         }
         const bytes = Buffer.from(data, 'base64')
         if (bytes.length === 0) {
-          writeJson(res, 400, { ok: false, error: 'attachment is not valid base64' })
+          failure(res, 400, 'BAD_REQUEST', 'attachment is not valid base64')
           return
         }
         const dir = join(store.dataDir, ATTACHMENT_DIR)
@@ -901,7 +920,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           writeFileSync(path, bytes, { mode: 0o600 })
           writeJson(res, 200, { ok: true, path, bytes: bytes.length, name })
         } catch (error) {
-          writeJson(res, 500, { ok: false, error: `写入附件失败：${String(error)}` })
+          failure(res, 500, 'INTERNAL', `写入附件失败：${String(error)}`)
         }
       },
     },
@@ -928,7 +947,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         if (!guard(req, res)) return
         const requested = new URL(req.url ?? '/', 'http://x').searchParams.get('path') ?? ''
         if (requested === '') {
-          writeJson(res, 400, { ok: false, error: '缺少 path 参数' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 path 参数')
           return
         }
         const dir = resolve(join(store.dataDir, ATTACHMENT_DIR))
@@ -938,7 +957,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         // file from a directory, a pruned path, or anything else that is not
         // there, because it fails for all three.
         if (!absolute.startsWith(`${dir}/`)) {
-          writeJson(res, 404, { ok: false, error: '附件不在附件目录内' })
+          failure(res, 404, 'PATH', '附件不在附件目录内')
           return
         }
         const file = basename(absolute)
@@ -957,7 +976,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         try {
           bytes = readFileSync(absolute)
         } catch {
-          writeJson(res, 404, { ok: false, error: '附件不存在' })
+          failure(res, 404, 'NOT_FOUND', '附件不存在')
           return
         }
         /*
@@ -993,7 +1012,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const body = await readJsonBody(req)
         const text = stringField(body, 'text')
         if (text === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 text 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 text 字段')
           return
         }
         // GUI sends resolve immediately; the reply streams in the background
@@ -1017,11 +1036,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           const dir = attachmentDir(store.dataDir)
           const outside = images.filter(path => !isInsideDirectory(dir, path))
           if (outside.length > 0) {
-            writeJson(res, 403, {
-              ok: false,
-              code: 'PATH',
-              error: `附件路径不在附件目录内：${outside.slice(0, 3).join('、')}`,
-            })
+            failure(res, 403, 'PATH', `附件路径不在附件目录内：${outside.slice(0, 3).join('、')}`)
             return
           }
         }
@@ -1046,7 +1061,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const body = await readJsonBody(req)
         const enabled = typeof body?.['enabled'] === 'boolean' ? body['enabled'] : undefined
         if (enabled === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 enabled 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 enabled 字段')
           return
         }
         const result = await engine.setDeepThink(enabled)
@@ -1061,7 +1076,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const body = await readJsonBody(req)
         const enabled = typeof body?.['enabled'] === 'boolean' ? body['enabled'] : undefined
         if (enabled === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 enabled 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 enabled 字段')
           return
         }
         const result = await engine.setSearch(enabled)
@@ -1090,7 +1105,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const mode = body?.['mode'] === 'raw' ? 'raw' : body?.['mode'] === 'distill' ? 'distill' : undefined
         const transcript: DSchatTranscript | undefined = chatId === undefined ? undefined : store.getChat(chatId)
         if (transcript === undefined) {
-          writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+          failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
           return
         }
         try {
@@ -1098,7 +1113,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           const draft = await previewHarnessTransfer(ctx, { transcript, cwd, workspace, targetSessionId }, distill, mode)
           writeJson(res, 200, { ok: true, ...draft })
         } catch (error) {
-          writeJson(res, 500, { ok: false, error: String(error) })
+          failure(res, 500, 'INTERNAL', String(error))
         }
       },
     },
@@ -1122,7 +1137,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const seedMarkdown = stringField(body, 'markdown')
         const transcript: DSchatTranscript | undefined = chatId === undefined ? undefined : store.getChat(chatId)
         if (transcript === undefined) {
-          writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+          failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
           return
         }
         try {
@@ -1146,7 +1161,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
             workspaceId: attachedWorkspaceId,
           })
         } catch (error) {
-          writeJson(res, 500, { ok: false, error: String(error) })
+          failure(res, 500, 'INTERNAL', String(error))
         }
       },
     },
@@ -1176,24 +1191,20 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const allowedDir = resolve(exportDir())
         const requestedDir = stringField(body, 'cwd')
         if (requestedDir !== undefined && !isSameOrInsideDirectory(allowedDir, requestedDir)) {
-          writeJson(res, 403, {
-            ok: false,
-            code: 'PATH',
-            error: `导出目录必须在 ${allowedDir} 内（可在插件配置的 exportDir 中修改）`,
-          })
+          failure(res, 403, 'PATH', `导出目录必须在 ${allowedDir} 内（可在插件配置的 exportDir 中修改）`)
           return
         }
         const cwd = requestedDir ?? allowedDir
         const transcript: DSchatTranscript | undefined = chatId === undefined ? undefined : store.getChat(chatId)
         if (transcript === undefined) {
-          writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+          failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
           return
         }
         try {
           const { filePath } = exportTranscriptFile({ transcript, cwd })
           writeJson(res, 200, { ok: true, filePath, dir: cwd })
         } catch (error) {
-          writeJson(res, 500, { ok: false, error: String(error) })
+          failure(res, 500, 'INTERNAL', String(error))
         }
       },
     },
@@ -1223,7 +1234,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const title = stringField(body, 'title')
         const sessionId = stringField(body, 'sessionId')
         if (title === undefined && sessionId === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 title 或 sessionId 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 title 或 sessionId 字段')
           return
         }
         const result = await engine.recoverWebConversation({
@@ -1255,11 +1266,11 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const chatId = stringField(body, 'chatId')
         const title = stringField(body, 'title')
         if (chatId === undefined || title === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 chatId 或 title 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 或 title 字段')
           return
         }
         const renamed = store.renameChat(chatId, title)
-        if (renamed === undefined) writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+        if (renamed === undefined) failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
         else writeJson(res, 200, { ok: true })
       },
     },
@@ -1271,11 +1282,11 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const body = await readJsonBody(req)
         const chatId = stringField(body, 'chatId')
         if (chatId === undefined) {
-          writeJson(res, 400, { ok: false, error: '缺少 chatId 字段' })
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 字段')
           return
         }
         const deleted = store.deleteChat(chatId)
-        if (!deleted) writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+        if (!deleted) failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
         else writeJson(res, 200, { ok: true })
       },
     },

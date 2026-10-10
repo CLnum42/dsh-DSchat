@@ -30,6 +30,23 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(root, 'lib')
 const watch = process.argv.includes('--watch')
 
+/**
+ * The version and build time, baked into both bundles.
+ *
+ * "Which version am I actually running?" had four different answers on this
+ * machine (package.json, the git tag, the newest tarball, and whatever
+ * uncommitted tree the profile had linked). The one answer that is always right
+ * is the one baked into the running bundle, so the status card reports it —
+ * and a build time, because a rebuilt-but-unchanged version is exactly the case
+ * where version alone cannot tell two builds apart.
+ */
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const BUILD_TIME = new Date().toISOString()
+const DEFINE = {
+  __DSCHAT_VERSION__: JSON.stringify(String(pkg.version)),
+  __DSCHAT_BUILD__: JSON.stringify(BUILD_TIME),
+}
+
 /** Package name — also the Client module id the loader keys the factory by. */
 const PKG = 'dsh-dschat'
 
@@ -73,6 +90,7 @@ const common = {
   minify: false,
   target: ['node22'],
   legalComments: 'none',
+  define: DEFINE,
 }
 
 /**
@@ -143,7 +161,7 @@ async function buildHost() {
 
 await buildHost()
 await buildClient()
-console.log('[dsh-dschat] built lib/index.js and lib/client.js')
+console.log(`[dsh-dschat] built lib/index.js and lib/client.js (v${String(pkg.version)}, ${BUILD_TIME})`)
 
 if (watch) {
   const { context } = await import('esbuild')

@@ -34,6 +34,27 @@ import { dschatImportTool, dschatRecoverTool, dschatSendTool, dschatStatusTool, 
 import type { WorkspaceRef } from './tools.ts'
 import type { DistillConfig } from './transfer.ts'
 
+/**
+ * The version and build time of the bundle that is RUNNING.
+ *
+ * "Which version am I on?" had four answers on this machine — `package.json`,
+ * the git tag, the newest tarball, and whatever uncommitted tree the profile had
+ * linked — and none of them described the loaded code. These are substituted by
+ * `scripts/build.mjs` (`define`), so the status card can report the one answer
+ * that is always right.
+ *
+ * `typeof`, not a bare read: the test harness bundles this entry WITHOUT those
+ * defines, and reading an undeclared identifier would throw at import time
+ * there. `typeof` on an undeclared name is defined to answer 'undefined', so a
+ * raw bundle reports an empty version instead of failing to load.
+ */
+declare const __DSCHAT_VERSION__: string | undefined
+declare const __DSCHAT_BUILD__: string | undefined
+const BUILD = {
+  version: typeof __DSCHAT_VERSION__ === 'string' ? __DSCHAT_VERSION__ : '',
+  build: typeof __DSCHAT_BUILD__ === 'string' ? __DSCHAT_BUILD__ : '',
+}
+
 /** Stable cordis plugin name. */
 export const name = 'dschat'
 
@@ -245,6 +266,7 @@ export function apply(ctx: Context, config?: Config): void {
     ctx,
     engine,
     store,
+    build: BUILD,
     distill: distillConfigOf(resolve()),
     exportDir: () => resolveExportDir(resolve().exportDir),
     hostContext,

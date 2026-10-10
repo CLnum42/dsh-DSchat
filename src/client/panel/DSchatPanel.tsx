@@ -49,6 +49,51 @@ function fmt(template: string, values: Record<string, string>): string {
 }
 
 /**
+ * The reader-facing sentence for one FAILED api call.
+ *
+ * Every route answers a failure with a structured `code` plus a technical
+ * Chinese detail. The code is what makes the same failure read as English in an
+ * English interface — the detail is only the fallback, because this panel has no
+ * way to translate a sentence the host composed.
+ *
+ * The localized sentence WINS over the detail, deliberately: mixing them
+ * (`"Path not allowed: 附件路径不在附件目录内：/etc/hosts"`) puts host-language
+ * text back into the toast, which is the bug being fixed. The detail is not lost
+ * — it is in the response, in the host's own console output, and in 运行状态 →
+ * 复制诊断, which is where someone debugging a path or a field actually looks.
+ *
+ * @param result - the failed response (its `code` is the part that localizes).
+ * @param fallback - what to say when there is neither a known code nor a detail.
+ * @param tr - locale accessor, already bound to the plugin namespace.
+ */
+export function explain(
+  result: { code?: string; error?: string } | undefined,
+  fallback: string,
+  tr: (key: string, values?: Record<string, string>) => string,
+): string {
+  switch (result?.code) {
+    case 'NEED_LOGIN': return tr('error.NEED_LOGIN')
+    case 'PAGE_CHANGED': return tr('error.PAGE_CHANGED')
+    case 'TIMEOUT': return tr('error.TIMEOUT')
+    case 'NETWORK': return tr('error.NETWORK')
+    case 'BUSY': return tr('error.BUSY')
+    case 'LOOPBACK': return tr('error.LOOPBACK')
+    case 'METHOD': return tr('error.METHOD')
+    case 'ORIGIN': return tr('error.ORIGIN')
+    case 'CSRF': return tr('error.CSRF')
+    case 'PATH': return tr('error.PATH')
+    case 'BAD_REQUEST': return tr('error.BAD_REQUEST')
+    case 'TOO_LARGE': return tr('error.TOO_LARGE')
+    case 'NOT_FOUND': return tr('error.NOT_FOUND')
+    case 'INTERNAL': return tr('error.INTERNAL')
+    default: {
+      const detail = result?.error
+      return detail !== undefined && detail !== '' ? detail : fallback
+    }
+  }
+}
+
+/**
  * True for a file the composer will try to attach.
  *
  * Anything but a directory counts: the page's own file input is the only
@@ -1560,7 +1605,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
             return { ok: false, reason: 'failed' }
           }
           wakeFailedAtRef.current = Date.now() + WAKE_RETRY_COOLDOWN_MS
-          setLaunchError(woken.error ?? tr('toast.wake.failed'))
+          setLaunchError(explain(woken, tr('toast.wake.failed'), tr))
           return { ok: false, reason: 'failed' }
         }
         if (woken.loggedIn === true) {
@@ -1631,7 +1676,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const result = await api.send(lastUser.content, lastUser.attachments).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       pendingAnchorRef.current = undefined
-      toast(result.error ?? '', { error: true })
+      toast(explain(result, '', tr), { error: true })
     } else void refreshState()
   }, [chats, viewChatId, busy, api, toast, refreshState])
 
@@ -1739,7 +1784,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
        * the transcript, so the anchor is exactly what the reader wants — the
        * question at the top, with the retry the toast offers landing under it.
        */
-      toast(result.error ?? tr('toast.send.failed'), {
+      toast(explain(result, tr('toast.send.failed'), tr), {
         error: true,
         action: { label: tr('msg.retry'), run: () => { void retry() } },
       })
@@ -1750,7 +1795,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * come up", which is a different sentence and is already on screen.
      */
     pendingAnchorRef.current = undefined
-    toast(result.error ?? tr('toast.send.failed'), { error: true })
+    toast(explain(result, tr('toast.send.failed'), tr), { error: true })
     return 'failed'
   }, [api, ensureReady, refreshState, retry, toast, tr])
 
@@ -1861,7 +1906,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         // back to the newest KNOWN chat until then, which looks like the click
         // did nothing.
         void refreshState()
-      } else toast(result.error ?? tr('send.newChat'), { error: true })
+      } else toast(explain(result, tr('send.newChat'), tr), { error: true })
     } catch (error) {
       toast(String(error), { error: true })
     }
@@ -1873,7 +1918,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const result = await api.setDeepThink(next).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       setDeepThink(!next)
-      toast(result.error ?? tr('send.toggle'), { error: true })
+      toast(explain(result, tr('send.toggle'), tr), { error: true })
     }
   }, [deepThink, api, toast])
 
@@ -1883,13 +1928,13 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const result = await api.setSearch(next).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       setSearch(!next)
-      toast(result.error ?? tr('send.toggle'), { error: true })
+      toast(explain(result, tr('send.toggle'), tr), { error: true })
     }
   }, [search, api, toast])
 
   const openLogin = useCallback(async (): Promise<void> => {
     const result = await api.openLogin().catch(() => undefined)
-    if (result !== undefined && result.ok !== true) toast(result.error ?? tr('send.openLogin'), { error: true })
+    if (result !== undefined && result.ok !== true) toast(explain(result, tr('send.openLogin'), tr), { error: true })
   }, [api, toast])
 
   const copyText = useCallback(async (text: string, message: string): Promise<void> => {
@@ -1905,7 +1950,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const index = chats.findIndex(item => item.id === chat.id)
     const result = await api.deleteChat(chat.id).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
-      toast(tr('toast.delete.failed', { error: result.error ?? '' }), { error: true })
+      toast(tr('toast.delete.failed', { error: explain(result, '', tr) }), { error: true })
       return
     }
     deletedRef.current.set(chat.id, { chat, index })
@@ -1930,7 +1975,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               // The entry is put BACK: a failed undo must not also lose the only
               // copy of the conversation still on this side of the wire.
               deletedRef.current.set(chat.id, entry)
-              toast(tr('toast.delete.failed', { error: restored.error ?? '' }), { error: true })
+              toast(tr('toast.delete.failed', { error: explain(restored, '', tr) }), { error: true })
               return
             }
             toast(tr('toast.restored'))
@@ -1950,7 +1995,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     }
     setClearArmed(false)
     const result = await api.clearChats().catch(() => undefined)
-    if (result !== undefined && result.ok !== true) toast(tr('toast.clear.failed', { error: result.error ?? '' }), { error: true })
+    if (result !== undefined && result.ok !== true) toast(tr('toast.clear.failed', { error: explain(result, '', tr) }), { error: true })
     else toast(tr('toast.clear.done'))
   }, [clearArmed, api, toast, tr])
 
@@ -1990,7 +2035,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     try {
       const result = await api.recover({ title: chat.title, sessionId }).catch(() => undefined)
       if (result === undefined || result.ok !== true) {
-        toast(result?.error ?? tr('toast.recover.failed', { list: chat.title }), { error: true })
+        toast(explain(result, tr('toast.recover.failed', { list: chat.title }), tr), { error: true })
         return
       }
       void refreshState()
@@ -2009,7 +2054,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const recover = useCallback(async (): Promise<void> => {
     const listed = await api.webChats().catch(() => undefined)
     if (listed === undefined || listed.ok !== true) {
-      toast(listed?.error ?? tr('send.recoverList'), { error: true })
+      toast(explain(listed, tr('send.recoverList'), tr), { error: true })
       return
     }
     if (listed.missing.length === 0) {
@@ -2051,7 +2096,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         ...(item.sessionId === undefined ? {} : { sessionId: item.sessionId }),
       }).catch(() => undefined)
       if (result === undefined || result.ok !== true) {
-        failures.push(`${item.title}${tr('send.join')}${result?.error ?? tr('send.unknown')}`)
+        failures.push(`${item.title}${tr('send.join')}${explain(result, tr('send.unknown'), tr)}`)
         continue
       }
       recovered += 1
@@ -2078,7 +2123,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     setRenamingId(undefined)
     if (title === '' || title === chat.title) return
     const result = await api.renameChat(chat.id, title).catch(() => undefined)
-    if (result !== undefined && result.ok !== true) toast(tr('toast.rename.failed', { error: result.error ?? '' }), { error: true })
+    if (result !== undefined && result.ok !== true) toast(tr('toast.rename.failed', { error: explain(result, '', tr) }), { error: true })
     else toast(tr('toast.rename.done'))
   }, [renameDraft, api, toast, tr])
 
@@ -2093,7 +2138,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      */
     const result = await api.exportFile(viewChat.id).catch(() => undefined)
     if (result === undefined || result.ok !== true || result.filePath === undefined) {
-      toast(tr('toast.export.failed', { error: result?.error ?? '' }), { error: true })
+      toast(tr('toast.export.failed', { error: explain(result, '', tr) }), { error: true })
       return
     }
     toast(tr('toast.export.done', {
@@ -2124,7 +2169,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       )
       if (result.ok !== true || typeof result.markdown !== 'string') {
         setStage(0)
-        toast(tr('toast.transfer.failed', { error: result.error ?? '' }), {
+        toast(tr('toast.transfer.failed', { error: explain(result, '', tr) }), {
           error: true,
           action: { label: tr('toast.transfer.retry'), run: () => { void loadTransferPreview() } },
         })
@@ -2170,7 +2215,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       )
       if (result.ok !== true || result.sessionId === undefined) {
         setStage(0)
-        toast(tr('toast.transfer.failed', { error: result.error ?? '' }), {
+        toast(tr('toast.transfer.failed', { error: explain(result, '', tr) }), {
           error: true,
           action: { label: tr('toast.transfer.retry'), run: () => { void runTransfer() } },
         })
@@ -2361,7 +2406,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           data: payload.data,
         })
         if (result.ok !== true || result.path === undefined) {
-          toast(tr('toast.attach.failed', { error: result.error ?? '' }), { error: true })
+          toast(tr('toast.attach.failed', { error: explain(result, '', tr) }), { error: true })
           continue
         }
         /*
@@ -2914,37 +2959,97 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * It is rendered at the END of the thread (both in an empty conversation and
    * under the last message), which is where the next thing is about to happen.
    */
+  /**
+   * The states that stand between the reader and a reply, each with the action
+   * that fixes it.
+   *
+   * This used to be ONE state: a failed launch. Everything else was a colour on
+   * a 7px lamp with the explanation in its tooltip — so an engine that had
+   * stopped, and a browser sitting on the sign-in page, both looked like a panel
+   * that simply did nothing, with no way forward except guessing that the
+   * composer was clickable. Each state now names itself and offers its action.
+   *
+   * The two "quiet" states (stopped, signed out) are shown only when the
+   * conversation has messages: with an empty panel the composer's own invitation
+   * and the empty state already say what to do, and a card on top of them would
+   * be noise. A failure and an engine ERROR always show — those are never the
+   * resting state.
+   */
+  function engineNoticeOf(): { key: string; title: string; body: string; actions: ReactNode } | undefined {
+    const retry = createElement('button', {
+      type: 'button',
+      className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+      disabled: waking,
+      onClick: () => { void retryEngine() },
+    }, waking ? tr('engine.notice.retrying') : tr('engine.notice.retry'))
+    const login = createElement('button', {
+      type: 'button',
+      className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+      onClick: () => { void openLogin() },
+    }, tr('action.openLogin'))
+    const status = createElement('button', {
+      type: 'button',
+      className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+      onClick: () => setStatusOpen(true),
+    }, tr('status.title'))
+
+    if (launchError !== undefined) {
+      return { key: 'launch', title: tr('engine.notice.title'), body: launchError, actions: createElement(Fragment, null, retry, login) }
+    }
+    /*
+     * Dispatched on the PHASE, not on `engineLive`.
+     *
+     * `engineLive` is false for the sign-in state as well as for a stopped
+     * engine, so testing it first made "the browser is up and waiting for you to
+     * sign in" render as "the web page is not running" — with a retry button
+     * that cannot possibly help. The phase is the panel's own single derived
+     * truth about the engine, and each of its values has exactly one cause.
+     */
+    switch (phase) {
+      case 'error':
+        return {
+          key: 'error',
+          title: tr('engine.notice.error.title'),
+          body: state?.engineError ?? '',
+          actions: createElement(Fragment, null, retry, status),
+        }
+      case 'need-login':
+        return {
+          key: 'login',
+          title: tr('engine.notice.login.title'),
+          body: tr('engine.notice.login.body'),
+          actions: createElement(Fragment, null, login, retry),
+        }
+      case 'stopped': {
+        // The resting state, and only worth a card when there is a conversation
+        // to send into: an empty panel already invites the reader to type.
+        if ((viewChat?.messages.length ?? 0) === 0) return undefined
+        return { key: 'offline', title: tr('engine.notice.offline.title'), body: tr('engine.notice.offline.body'), actions: retry }
+      }
+      default:
+        // launching / ready / thinking / streaming: nothing is in the way.
+        return undefined
+    }
+  }
+
   function engineNotice(): ReactNode {
-    if (launchError === undefined) return null
+    const notice = engineNoticeOf()
+    if (notice === undefined) return null
     return createElement(
       'div',
-      { className: 'dsh-dschat-notice', key: 'engine-notice', role: 'status' },
+      { className: 'dsh-dschat-notice', key: `engine-notice-${notice.key}`, role: 'status' },
       createElement('span', { className: 'dsh-dschat-notice-mark' }, createElement(WarnIcon, {})),
       createElement(
         'div',
         { className: 'dsh-dschat-notice-body' },
-        createElement('strong', null, tr('engine.notice.title')),
-        createElement('p', null, launchError),
+        createElement('strong', null, notice.title),
+        notice.body === '' ? null : createElement('p', null, notice.body),
         /*
          * The actions sit UNDER the sentence, in a row: the sentence is what the
          * reader has to read before choosing, and at panel widths a column of
          * buttons beside it squeezes both.
          */
-        createElement(
-          'div',
-          { className: 'dsh-dschat-notice-actions' },
-          createElement('button', {
-            type: 'button',
-            className: 'dsh-dschat-btn dsh-dschat-btn-primary',
-            disabled: waking,
-            onClick: () => { void retryEngine() },
-          }, waking ? tr('engine.notice.retrying') : tr('engine.notice.retry')),
-          createElement('button', {
-            type: 'button',
-            className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
-            onClick: () => { void openLogin() },
-          }, tr('action.openLogin')),
-        ),
+        createElement('div', { className: 'dsh-dschat-notice-actions' }, notice.actions),
       ),
     )
   }

@@ -144,6 +144,40 @@ export interface RecoverResult {
  */
 export type DSchatErrorCode = 'NEED_LOGIN' | 'PAGE_CHANGED' | 'TIMEOUT' | 'NETWORK' | 'BUSY'
 
+/**
+ * Every structured code a `/api/dsh-dschat` route can fail with.
+ *
+ * A superset of the engine's codes, because the routes fail for reasons the
+ * engine never sees. Every failure carries one so the PANEL can render its own
+ * localized sentence (`tr('error.' + code)`) instead of printing the host's
+ * Chinese detail into an English interface — which is what it used to do for
+ * every one of these, since only five of the routes answered with a code at all.
+ *
+ * `error` still travels beside the code: it is the specific, technical detail
+ * (which path, which field, what the OS said), used as the fallback when a code
+ * has no sentence yet and read by the agent tools, which have no dictionary.
+ */
+export type DSchatApiCode =
+  | DSchatErrorCode
+  /** The route's own trust fence refused the request (not from this machine). */
+  | 'LOOPBACK'
+  /** A destructive route was reached with the wrong HTTP method. */
+  | 'METHOD'
+  /** Cross-origin request: `Origin`/`Sec-Fetch-Site` did not name this server. */
+  | 'ORIGIN'
+  /** Missing or stale `x-dschat-token`. */
+  | 'CSRF'
+  /** A path outside the directory the route is allowed to touch. */
+  | 'PATH'
+  /** A required field is missing or malformed. */
+  | 'BAD_REQUEST'
+  /** The request body was too large to read. */
+  | 'TOO_LARGE'
+  /** The named conversation / attachment / session does not exist. */
+  | 'NOT_FOUND'
+  /** A host-side failure with no better classification (a write, an export). */
+  | 'INTERNAL'
+
 /** Coarse engine state for the panel. */
 export type EngineState = 'stopped' | 'launching' | 'ready' | 'error'
 
@@ -201,6 +235,10 @@ export interface DSchatState {
    * see the routes module header for why the fence needs it.
    */
   readonly csrfToken?: string
+  /** The RUNNING bundle's version (injected at build time; '' in a raw bundle). */
+  readonly version?: string
+  /** ISO timestamp of that build. */
+  readonly build?: string
 }
 
 /**
