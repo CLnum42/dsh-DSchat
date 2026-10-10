@@ -212,25 +212,56 @@ function inline(text: string, keyBase = 'i', options: MarkdownOptions = {}): Rea
   return nodes
 }
 
+/**
+ * The renderer's own surface copy, in ONE object.
+ *
+ * Threaded rather than looked up: `renderMarkdown` is a pure function (and is
+ * exercised as one by the tests), so it cannot reach a locale service — and the
+ * few strings down here are the ones a reader actually hovers («复制回复»,
+ * «点击收起思考过程»). The panel passes `tr`-resolved values; the defaults exist
+ * for the tests and for any embedder that only wants the markup.
+ */
+export interface MarkdownCopy {
+  /** Label of every copy control (code blocks, the reply). */
+  readonly copy?: string
+  /** Tooltip of an expanded reasoning body, which has no summary line left. */
+  readonly collapseHint?: string
+  /** Summary label for a `<details>` block the web page wrote without one. */
+  readonly details?: string
+  /** Language label of a fenced block that declared none. */
+  readonly language?: string
+}
+
+/** Fill in the fallbacks of a {@link MarkdownCopy}. */
+function surfaceCopy(copy: MarkdownCopy | string | undefined): Required<MarkdownCopy> {
+  const given = typeof copy === "string" ? { copy } : (copy ?? {})
+  return {
+    copy: given.copy ?? "copy",
+    collapseHint: given.collapseHint ?? "Click to collapse the reasoning",
+    details: given.details ?? "details",
+    language: given.language ?? "text",
+  }
+}
+
 /** One fenced code block, with the language label and a copy action. */
-function codeBlock(language: string, body: string, key: string, options: MarkdownOptions, copyLabel: string): ReactNode {
+function codeBlock(language: string, body: string, key: string, options: MarkdownOptions, copy: Required<MarkdownCopy>): ReactNode {
   return createElement(
     'div',
     { key, className: 'dsh-dschat-code' },
     createElement(
       'div',
       { className: 'dsh-dschat-code-bar' },
-      createElement('span', null, language === '' ? 'text' : language),
+      createElement('span', null, language === '' ? copy.language : language),
       createElement('span', { className: 'dsh-dschat-spacer' }),
       createElement(
         'button',
         {
           type: 'button',
           className: 'dsh-dschat-code-copy',
-          title: copyLabel,
+          title: copy.copy,
           onClick: () => { options.onCopyCode?.(body) },
         },
-        copyLabel,
+        copy.copy,
       ),
     ),
     createElement('pre', null, createElement('code', null, body)),
@@ -263,7 +294,8 @@ function isDelimiterRow(line: string): boolean {
 }
 
 /** Render one block of markdown text into React nodes. */
-export function renderMarkdown(source: string, options: MarkdownOptions = {}, copyLabel = 'copy'): ReactNode[] {
+export function renderMarkdown(source: string, options: MarkdownOptions = {}, copy?: MarkdownCopy | string): ReactNode[] {
+  const surface = surfaceCopy(copy)
   const raw = source.replace(/\r\n/g, '\n').trim()
   if (raw === '') return []
   const blocks: ReactNode[] = []
@@ -289,7 +321,7 @@ export function renderMarkdown(source: string, options: MarkdownOptions = {}, co
         index++
       }
       index++
-      push(codeBlock(language, body.join('\n'), `code${blockIndex}`, options, copyLabel))
+      push(codeBlock(language, body.join('\n'), `code${blockIndex}`, options, surface))
       continue
     }
 
@@ -341,7 +373,7 @@ export function renderMarkdown(source: string, options: MarkdownOptions = {}, co
         quote.push(lines[index].trim().replace(/^>\s?/, ''))
         index++
       }
-      push(createElement('blockquote', { key: `q${blockIndex}` }, ...renderMarkdown(quote.join('\n'), options, copyLabel)))
+      push(createElement('blockquote', { key: `q${blockIndex}` }, ...renderMarkdown(quote.join('\n'), options, surface)))
       continue
     }
 
@@ -378,9 +410,9 @@ export function renderMarkdown(source: string, options: MarkdownOptions = {}, co
       blocks.push(createElement('div', { key: `d${blockIndex++}` },
         createElement(Thinking, {
           source: body.join('\n'),
-          label: summary ?? 'details',
+          label: summary ?? surface.details,
           options,
-          ...(copyLabel === undefined ? {} : { copyLabel }),
+          copy: surface,
         })))
       continue
     }
@@ -510,9 +542,6 @@ function thinkingIsLive(thinkingMs: number | undefined, streaming: boolean | und
   return thinkingMs === undefined && streaming === true
 }
 
-/** Tooltip on an expanded reasoning body: the summary line is gone, so say how to get it back. */
-const COLLAPSE_HINT = '点击收起思考过程'
-
 /**
  * Should this click on an expanded reasoning body fold it back?
  *
@@ -593,16 +622,18 @@ function collapseFromBodyClick(target: EventTarget | null): boolean {
  *   collapse is that nothing opens without the reader's click, and a static
  *   render cannot click.
  */
-export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, streaming, liveLabel, defaultOpen = false }: {
+export function Thinking({ source, label, options = {}, copy, thinkingMs, streaming, liveLabel, defaultOpen = false }: {
   source: string
   label: string
   options?: MarkdownOptions
-  copyLabel?: string
+  /** Surface copy: the copy label, the collapse tooltip, the `<details>` fallback. */
+  copy?: MarkdownCopy
   thinkingMs?: number
   streaming?: boolean
   liveLabel?: string
   defaultOpen?: boolean
 }): ReactNode {
+  const surface = surfaceCopy(copy)
   const live = thinkingIsLive(thinkingMs, streaming)
   /*
    * COLLAPSED, always, from the first render.
@@ -673,7 +704,7 @@ export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, s
              */
             role: 'button',
             tabIndex: 0,
-            title: COLLAPSE_HINT,
+            title: surface.collapseHint,
             'aria-expanded': true,
             onClick: (event: { target: EventTarget | null }) => {
               if (collapseFromBodyClick(event.target)) setOpen(false)
@@ -686,7 +717,7 @@ export function Thinking({ source, label, options = {}, copyLabel, thinkingMs, s
               setOpen(false)
             },
           },
-          ...renderMarkdown(source, options, copyLabel ?? 'copy'),
+          ...renderMarkdown(source, options, copy),
         )
       : createElement(
           'button',
@@ -796,7 +827,7 @@ export function SourceList({ sources, heading, options = {} }: {
 }
 
 /** The markdown component used by the transcript. */
-export function Markdown({ source, onCopyCode, onOpenLink, sources, sourcesLabel, copyLabel }: {
+export function Markdown({ source, onCopyCode, onOpenLink, sources, sourcesLabel, copy }: {
   source: string
   onCopyCode?: (code: string) => void
   /** Where a link click should go; see {@link MarkdownOptions.onOpenLink}. */
@@ -805,7 +836,8 @@ export function Markdown({ source, onCopyCode, onOpenLink, sources, sourcesLabel
   sources?: readonly DSchatSource[]
   /** Heading for the source list; absent = do not render the list. */
   sourcesLabel?: string
-  copyLabel?: string
+  /** Surface copy: the copy label plus the two labels the renderer falls back on. */
+  copy?: MarkdownCopy
 }): ReactNode {
   const options: MarkdownOptions = {}
   if (onCopyCode !== undefined) options.onCopyCode = onCopyCode
@@ -815,7 +847,7 @@ export function Markdown({ source, onCopyCode, onOpenLink, sources, sourcesLabel
   return createElement(
     'div',
     null,
-    ...renderMarkdown(source, options, copyLabel ?? 'copy'),
+    ...renderMarkdown(source, options, copy),
     table === undefined || sourcesLabel === undefined
       ? null
       : createElement(SourceList, { sources: table, heading: sourcesLabel, options }),

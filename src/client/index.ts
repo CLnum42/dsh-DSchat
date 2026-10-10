@@ -10,10 +10,17 @@
  *
  * It deliberately registers NOTHING into `settings.section`. DSchat used to own
  * a page there, and it was the wrong place for it twice over: nothing on that
- * page could be edited (the plugin's knobs live in its Config, which the shell
- * already renders on the Plugins page), and the reader who wants to know why the
- * web page is not answering is looking at this panel, not at Settings. The
- * status card it held is now 「运行状态」 in the panel's own 「···」 menu.
+ * page could be edited, and the reader who wants to know why the web page is not
+ * answering is looking at this panel, not at Settings. The status card it held
+ * is now 「运行状态」 in the panel's own 「···」 menu.
+ *
+ * Where the knobs actually live: the profile's `cordis.patch.yml` (`config:`
+ * under the dschat row), applied on restart. An earlier version of this comment
+ * claimed the shell "already renders" a Config form for the plugin on the
+ * Plugins page — it does NOT. This plugin registers no config page, so
+ * `plugins.row.config` has no occupant and the Plugins page shows no form. A
+ * native config page is planned (the host offers both `plugins.bundle.config`
+ * and `ctx.configForms`); until it exists, editing YAML is the only way.
  *
  * Failure policy: a mount problem is logged, never thrown — the shell fails the
  * whole boot when a plugin apply throws, and an external plugin must not take

@@ -389,6 +389,38 @@ export function thoughtLabel(
 const TAIL_AFTER_SEND_MS = 8_000
 
 /**
+ * Breathing room above a question the panel has just anchored (px).
+ *
+ * The scroll target is the row's own top edge, and a row begins with its head
+ * line (「你 · 14:07」) — flush against the top of the box that head is inside a
+ * hairline the reader cannot tell from a clipped line. 12px is the same gap the
+ * thread's own padding uses at the other end, so an anchored question and a
+ * pinned transcript start their content the same distance down.
+ */
+const ANCHOR_TOP_GAP = 12
+
+/**
+ * How far the transcript may sit from the anchored position before the panel
+ * decides the READER moved it (px).
+ *
+ * Wide enough to absorb the difference between the position the effect asked
+ * for and the one the browser landed on, narrow enough that a deliberate drag
+ * off the question releases the anchor almost immediately — a reader who stays
+ * put must never be mistaken for one who scrolled away, because that mistake
+ * drops the anchor and pins the viewport back to the bottom mid-answer.
+ */
+const ANCHOR_DRIFT_PX = 32
+
+/**
+ * How long a programmatic jump may keep the auto-scroll out of the way (ms).
+ *
+ * Comfortably longer than a Chromium smooth scroll over a long transcript, and
+ * short enough that a reader who starts scrolling mid-jump gets the normal
+ * behaviour back immediately afterwards.
+ */
+const JUMP_SETTLE_MS = 900
+
+/**
  * How long a FAILED engine start suppresses the next automatic one (ms).
  *
  * The composer starts the web page by itself — a click in it, a keystroke in it,
@@ -559,6 +591,22 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const [jumpId, setJumpId] = useState<string | undefined>(undefined)
   /** The row currently wearing the search-landing mark (cleared on a timer). */
   const [flashId, setFlashId] = useState<string | undefined>(undefined)
+  /*
+   * The 「↓ 最新」 pill's visibility.
+   *
+   * `pinnedRef` cannot drive this: it is a ref (writing it does not re-render),
+   * and the pill has to appear the moment the reader scrolls away from the end
+   * and disappear the moment they come back.
+   */
+  const [atBottom, setAtBottom] = useState(true)
+  /** True while the transcript actually overflows — the navigator only exists then. */
+  const [threadScrolls, setThreadScrolls] = useState(false)
+  /** Which question the navigator marks as current (an index into `questions`). */
+  const [navIndex, setNavIndex] = useState(0)
+  /** The navigator's expanded state: ticks alone, or the whole question list. */
+  const [navOpen, setNavOpen] = useState(false)
+  /** The rail row currently syncing from the web, if any (spins its own button). */
+  const [syncId, setSyncId] = useState<string | undefined>(undefined)
   const [deepThink, setDeepThink] = useState(false)
   const [search, setSearch] = useState(false)
   const [now, setNow] = useState(() => Date.now())
@@ -586,6 +634,24 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const [targetSessionId, setTargetSessionId] = useState<string | undefined>(undefined)
   const [stage, setStage] = useState(0)          // 0 idle, 1..3 running, 4 done
   const [transferring, setTransferring] = useState(false)
+  /**
+   * The hand-off text the host built, held between 预览 and 确认写入.
+   *
+   * Nothing has been written while this is set: the reader is looking at the
+   * exact bytes that would become the new session's first message, and may edit
+   * them. `distilled: false` is the case that matters — distillation is LOSSY,
+   * and its failure mode is to replay the raw log instead, which used to arrive
+   * as the same success toast as a real brief.
+   */
+  const [preview, setPreview] = useState<{
+    distilled: boolean
+    fallback: boolean
+    fallbackReason?: string
+    chars: number
+  } | undefined>(undefined)
+  /** The editable draft of that text (确认 sends THIS, not the original). */
+  const [previewDraft, setPreviewDraft] = useState('')
+  const [previewing, setPreviewing] = useState(false)
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; path: string; title: string }>>([])
   const [cwd, setCwd] = useState<string | undefined>(undefined)
 
@@ -608,6 +674,72 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const lampPopRef = useRef<HTMLDivElement | null>(null)
   const morePopRef = useRef<HTMLDivElement | null>(null)
   const pinnedRef = useRef(true)
+  /*
+   * The question the viewport is ANCHORED to, if any (see the scroll effect).
+   *
+   * `pinnedRef` and this are the two scroll modes and they are mutually
+   * exclusive in practice: pinned keeps the newest line visible, anchored keeps
+   * one question's head at the top of the viewport while its answer grows below.
+   * A send sets the anchor; switching conversations, a navigator or 「↓ 最新」
+   * jump, or a scroll the reader did by hand clears it.
+   */
+  const anchorIdRef = useRef<string | undefined>(undefined)
+  /**
+   * Where the last programmatic scroll actually left the transcript.
+   *
+   * The scroll handler's "did the reader move it?" test compares the live
+   * position against THIS, not against a freshly measured row. Re-measuring was
+   * the bug behind 「发出去了却看不到自己刚问的那句」: a scroll is CLAMPED at
+   * `scrollHeight - clientHeight`, so when the answer below the new question is
+   * still shorter than the viewport the browser lands somewhere the effect never
+   * asked for, the handler reads that as the reader's own doing, drops the
+   * anchor and pins the viewport back to the BOTTOM of the previous answer —
+   * exactly the view the anchor exists to replace.
+   */
+  const anchorAppliedTopRef = useRef<number | undefined>(undefined)
+  /*
+   * A send that has not produced a message yet.
+   *
+   * The anchor cannot be taken at send time: the user message only exists in
+   * the transcript after the next snapshot, so the id to anchor to is not
+   * knowable yet. This says "anchor the row that grows the transcript PAST this
+   * many user messages", and the scroll effect consumes it.
+   *
+   * It is a COUNT rather than a flag because a poll can land between the send
+   * and the message it appended: the transcript on screen is then still the old
+   * one, whose last user row is the PREVIOUS question — and anchoring to that is
+   * literally the reported symptom (「第一条问题留在顶端」). A count only
+   * satisfies itself on a row that was not there before the send.
+   *
+   * `true` is the one case with no new row to wait for: 「重试」 re-asks a
+   * question that is already in the transcript, so the view should go to the
+   * exchange it is retrying.
+   */
+  const pendingAnchorRef = useRef<number | true | undefined>(undefined)
+  /**
+   * How many user messages the transcript held when the anchor was last taken.
+   *
+   * Consecutive sends in one conversation have to raise the bar, not clear it:
+   * cleared, the second send's pending count would sit below the rows already on
+   * screen and satisfy itself against the FIRST question.
+   */
+  const anchorFloorRef = useRef(0)
+  /*
+   * Until when a programmatic jump owns the viewport.
+   *
+   * A smooth scroll takes a few hundred milliseconds, and during them the
+   * transcript is still at its old position — so the FIRST scroll event of a
+   * jump reports "still at the end", and the next `/state` tick (every 100ms
+   * while a reply is streaming) would pin the reader straight back to the
+   * bottom. That is not hypothetical: it is exactly what made a navigator click
+   * do nothing at all while an answer was arriving. While this deadline is in
+   * the future both the pin and the 「↓ 最新」 pill stand down and let the jump
+   * finish.
+   */
+  const jumpUntilRef = useRef(0)
+  /** Where the jump in flight is heading, so it can hand the viewport back the
+   *  moment it arrives rather than at the end of the safety window. */
+  const jumpTargetRef = useRef<number | undefined>(undefined)
   const prevChatRef = useRef<string | undefined>(undefined)
   const toastSeq = useRef(0)
   const deletedRef = useRef<Map<string, { chat: DSchatTranscript; index: number }>>(new Map())
@@ -1035,6 +1167,23 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    */
   const canSend = draft.trim() !== '' || images.length > 0
 
+  /*
+   * The conversation's questions, in order.
+   *
+   * A user message IS a question here: the web keeps one user turn per question,
+   * so this list is exactly "what was asked" — the navigator's rows, and the set
+   * of messages a send may anchor to.
+   */
+  const questions = useMemo(
+    () => (viewChat?.messages ?? [])
+      .filter(message => message.role === 'user')
+      .map(message => ({
+        id: message.id,
+        text: message.content.trim() === '' ? tr('qnav.attachment') : message.content,
+      })),
+    [viewChat, tr],
+  )
+
   const filtered = useMemo(() => {
     if (query.trim() === '') return chats
     const needle = query.trim().toLowerCase()
@@ -1073,6 +1222,53 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   // falls back to the newest chat, so it — not the raw id — is the truth).
   useEffect(() => { tailChatRef.current = viewChat?.id }, [viewChat?.id])
 
+  /**
+   * One message's top edge, measured inside the scroll box.
+   *
+   * `offsetTop` would be wrong here: it is relative to the nearest POSITIONED
+   * ancestor, not to the scroller, and every message row is itself
+   * `position: relative` (the hover toolbar rides it). Rect arithmetic against
+   * the scroll box is the honest measure at any nesting depth.
+   *
+   * @param list - the scroll box.
+   * @param element - the row to measure.
+   */
+  const contentTop = useCallback((list: HTMLElement, element: Element): number => {
+    return element.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop
+  }, [])
+
+  /**
+   * Put a question's head at the top of the viewport.
+   *
+   * This is the whole of the 「新提问置顶」 behaviour: after a send, the question
+   * the reader just asked becomes the top of the visible conversation, so the
+   * answer streams into the space BELOW it. Reading an answer from its first
+   * line no longer costs a scroll — and, just as important, arriving tokens no
+   * longer push the text being read up the screen.
+   *
+   * @param id - the user message to align.
+   * @param behavior - 'smooth' for a navigator click, instant for a send.
+   * @returns true when the row was found and the scroll applied.
+   */
+  const alignQuestion = useCallback((id: string, behavior: ScrollBehavior = 'auto'): boolean => {
+    const list = listRef.current
+    if (list === null) return false
+    const target = list.querySelector(`[data-message-id="${id}"]`)
+    if (target === null) return false
+    const top = Math.max(0, contentTop(list, target) - ANCHOR_TOP_GAP)
+    if (behavior === 'smooth') jumpTargetRef.current = top
+    list.scrollTo({ top, behavior })
+    /*
+     * What the browser will actually apply: the requested top, clamped to the
+     * scrollable range. Recorded for the scroll handler rather than re-measured
+     * there — see `anchorAppliedTopRef`.
+     */
+    if (behavior === 'auto') {
+      anchorAppliedTopRef.current = Math.min(top, Math.max(0, list.scrollHeight - list.clientHeight))
+    }
+    return true
+  }, [contentTop])
+
   useEffect(() => {
     const list = listRef.current
     if (list === null) return
@@ -1097,7 +1293,49 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     }
     const switched = prevChatRef.current !== viewChatId
     prevChatRef.current = viewChatId
-    if (switched || pinnedRef.current) list.scrollTop = list.scrollHeight
+    if (switched) {
+      // A different conversation has no anchor: it opens at its end, as before.
+      // This runs BEFORE the pending send is consumed, because a send can BE
+      // what switched the conversation (the first message of a brand-new chat):
+      // clearing afterwards threw away the anchor the reader had just asked for.
+      anchorIdRef.current = undefined
+      anchorAppliedTopRef.current = undefined
+      pendingAnchorRef.current = undefined
+    }
+    /*
+     * Consume a pending send.
+     *
+     * The message the reader just wrote only exists once the snapshot carrying
+     * it arrives — and the snapshot that arrives FIRST is regularly the OLD one,
+     * because `/state` was already in flight when the send landed. So the anchor
+     * is only taken from a user row that grew the transcript past the count the
+     * send recorded; anything else is a previous question, and anchoring to one
+     * of those is the reported 「新提问没有置顶」 bug.
+     */
+    const pendingAnchor = pendingAnchorRef.current
+    if (pendingAnchor !== undefined) {
+      const users = list.querySelectorAll('[data-role="user"]')
+      const last = users[users.length - 1]
+      const isNew = last !== undefined
+        && (pendingAnchor === true || users.length > Math.max(pendingAnchor, anchorFloorRef.current))
+      if (isNew) {
+        pendingAnchorRef.current = undefined
+        anchorIdRef.current = last.getAttribute('data-message-id') ?? undefined
+        anchorFloorRef.current = users.length
+      }
+    }
+    if (anchorIdRef.current !== undefined) {
+      // Instant on purpose: this runs on every streamed token, and a smooth
+      // scroll per token would never settle.
+      if (alignQuestion(anchorIdRef.current)) return
+      // The anchor's row is gone (a recover replaced the transcript): fall back
+      // to following the end rather than leaving the reader parked.
+      anchorIdRef.current = undefined
+      anchorAppliedTopRef.current = undefined
+    }
+    if (switched || (pinnedRef.current && Date.now() >= jumpUntilRef.current)) {
+      list.scrollTop = list.scrollHeight
+    }
     /*
      * `launchError` is a dependency because the notice it renders lands at the
      * BOTTOM of the transcript: a failure that appears below the fold is a
@@ -1105,13 +1343,130 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * answers. Arriving here also means the reader was already pinned to the
      * end — a reader who scrolled up to read is not yanked away by it.
      */
-  }, [state, viewChatId, jumpId, launchError])
+  }, [state, viewChatId, jumpId, launchError, alignQuestion])
 
+  /**
+   * Everything the transcript's scroll position has to keep true.
+   *
+   * Three readers, one handler: a single scroll event has to answer all three
+   * questions at once, and three listeners would only add three chances to
+   * disagree.
+   *
+   *   · 跟随最新 — are we close enough to the end that the next token may move
+   *     the viewport? (`pinnedRef`, plus the 「↓ 最新」 pill's state.)
+   *   · 锚点让位 — did the reader take the wheel? An anchor that survived a
+   *     manual scroll would yank them back on the next token, which is exactly
+   *     the behaviour the anchor exists to remove.
+   *   · 导航当前条 — which question is the top of the viewport inside?
+   *
+   * The anchor test is "is the view where WE put it", and it is answered against
+   * `anchorAppliedTopRef` — the position our own scroll recorded — rather than by
+   * measuring the row again. Re-measuring looks equivalent and is not: a scroll
+   * is clamped at the end of the content, so a question whose answer is still
+   * shorter than the viewport leaves the transcript at a position the effect
+   * never asked for, which the old test read as 'the reader moved it', dropped
+   * the anchor and pinned the viewport to the BOTTOM of the previous answer.
+   * Anything further than the tolerance below is the reader's own doing, and the
+   * anchor steps aside rather than fighting them for the viewport.
+   */
   const onThreadScroll = useCallback((): void => {
     const list = listRef.current
     if (list === null) return
-    pinnedRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 96
+    const gap = list.scrollHeight - list.scrollTop - list.clientHeight
+    /*
+     * Hand the viewport back the moment a jump lands. The deadline below is only
+     * the safety net for one that never arrives (an interrupted animation, a
+     * row that vanished mid-flight).
+     */
+    const target = jumpTargetRef.current
+    if (target !== undefined && Math.abs(list.scrollTop - target) <= 2) {
+      jumpTargetRef.current = undefined
+      jumpUntilRef.current = 0
+    }
+    // A jump in flight is not "the reader sitting at the end" even though the
+    // transcript has not moved yet — see `jumpUntilRef`.
+    const pinned = gap < 96 && Date.now() >= jumpUntilRef.current
+    pinnedRef.current = pinned
+    setAtBottom(current => (current === pinned ? current : pinned))
+    const scrolls = list.scrollHeight > list.clientHeight + 24
+    setThreadScrolls(current => (current === scrolls ? current : scrolls))
+    const anchor = anchorIdRef.current
+    if (anchor !== undefined) {
+      const applied = anchorAppliedTopRef.current
+      if (list.querySelector(`[data-message-id="${anchor}"]`) === null) {
+        // The anchor's row is gone (a recover replaced the transcript).
+        anchorIdRef.current = undefined
+        anchorAppliedTopRef.current = undefined
+      } else if (applied !== undefined && Math.abs(list.scrollTop - applied) > ANCHOR_DRIFT_PX) {
+        // The reader scrolled away from the anchor we set.
+        anchorIdRef.current = undefined
+        anchorAppliedTopRef.current = undefined
+      }
+    }
+    /*
+     * The navigator's current row: the LAST question whose head has already
+     * reached the top of the viewport, i.e. the one the reader is inside. Its
+     * rows are the same `[data-role="user"]` nodes the thread renders, so the
+     * index lines up with `questions` by construction (both are the user
+     * messages, in order).
+     */
+    const rows = list.querySelectorAll('[data-role="user"]')
+    if (rows.length > 0) {
+      let index = 0
+      for (let i = 0; i < rows.length; i += 1) {
+        if (contentTop(list, rows[i]) - list.scrollTop <= 24) index = i
+      }
+      setNavIndex(current => (current === index ? current : index))
+    }
+  }, [contentTop])
+
+  /** The 「↓ 最新」 pill: hand the viewport back to the newest line. */
+  const jumpToLatest = useCallback((): void => {
+    const list = listRef.current
+    if (list === null) return
+    anchorIdRef.current = undefined
+    anchorAppliedTopRef.current = undefined
+    pinnedRef.current = true
+    jumpUntilRef.current = Date.now() + JUMP_SETTLE_MS
+    jumpTargetRef.current = Math.max(0, list.scrollHeight - list.clientHeight)
+    setAtBottom(true)
+    list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' })
   }, [])
+
+  /**
+   * A navigator click: jump to one question, and let the reader see it land.
+   *
+   * No anchor is taken. Anchoring exists to stop the NEXT tick from re-pinning
+   * the viewport, and a jump already clears `pinnedRef` — while a smooth scroll
+   * would trip the scroll handler's "the reader moved it" test on its first
+   * frame and drop the anchor again. A jump is a one-shot move; an answer
+   * growing further down the transcript does not move the rows above it either
+   * way.
+   */
+  const jumpToQuestion = useCallback((id: string): void => {
+    anchorIdRef.current = undefined
+    anchorAppliedTopRef.current = undefined
+    pinnedRef.current = false
+    jumpUntilRef.current = Date.now() + JUMP_SETTLE_MS
+    setAtBottom(false)
+    if (alignQuestion(id, 'smooth')) setFlashId(id)
+    else setJumpId(id)
+  }, [alignQuestion])
+
+  /**
+   * Keep `threadScrolls` honest when the transcript changes without a scroll.
+   *
+   * Every scroll event refreshes it, but a conversation that is swapped in for a
+   * SHORTER one never fires one: the panel would keep the navigator on screen
+   * (and keep the reading column narrowed for it) over a transcript that fits.
+   * One boolean per snapshot is the whole cost.
+   */
+  useEffect(() => {
+    const list = listRef.current
+    if (list === null) return
+    const scrolls = list.scrollHeight > list.clientHeight + 24
+    setThreadScrolls(current => (current === scrolls ? current : scrolls))
+  }, [state, viewChatId])
 
   /**
    * Retire the search-landing mark.
@@ -1266,10 +1621,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const lastUser = [...chat.messages].reverse().find(message => message.role === 'user')
     if (lastUser === undefined) return
     pinnedRef.current = true
+    /*
+     * Retry re-asks a question that is already in the transcript, so the anchor
+     * is taken from the existing last user row rather than from a new one — the
+     * reader is retrying THAT exchange and should be looking at it.
+     */
+    pendingAnchorRef.current = true
     tailUntilRef.current = Date.now() + TAIL_AFTER_SEND_MS
     const result = await api.send(lastUser.content, lastUser.attachments).catch(() => undefined)
-    if (result !== undefined && result.ok !== true) toast(result.error ?? '', { error: true })
-    else void refreshState()
+    if (result !== undefined && result.ok !== true) {
+      pendingAnchorRef.current = undefined
+      toast(result.error ?? '', { error: true })
+    } else void refreshState()
   }, [chats, viewChatId, busy, api, toast, refreshState])
 
   /**
@@ -1327,6 +1690,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       if (ready.ok !== true) return 'failed'
     }
     pinnedRef.current = true
+    /*
+     * Ask the scroll effect to anchor the question this send is about to append.
+     *
+     * The message does not exist yet — it lands in the transcript on a LATER
+     * snapshot than the one the panel is holding — so the anchor is taken
+     * there, from the first user row that grows the transcript past the count
+     * recorded here. That count is measured in the DOM rather than read off the
+     * snapshot: it is the same list the effect counts, so a poll that was
+     * already in flight cannot make the two disagree. See the effect's "consume
+     * a pending send" block.
+     */
+    pendingAnchorRef.current = listRef.current?.querySelectorAll('[data-role="user"]').length ?? 0
     // Start tailing now rather than when /state next reports busy: the gap
     // between Enter and the first token is exactly when a stalled panel looks
     // broken. The deadline expires on its own, so a send that fails cannot
@@ -1339,6 +1714,10 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     try {
       result = await api.send(text, paths.length > 0 ? paths : undefined)
     } catch (error) {
+      // Nothing reached the page, so there is no question to anchor to; a
+      // pending flag left standing would anchor the NEXT render to whatever
+      // user message happened to be last.
+      pendingAnchorRef.current = undefined
       toast(String(error), { error: true })
       return 'failed'
     }
@@ -1349,8 +1728,17 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       void refreshState()
       return 'sent'
     }
-    if (result.code === 'BUSY') return 'busy'
+    if (result.code === 'BUSY') {
+      // The queue owns this message now; its own send raises the flag again.
+      pendingAnchorRef.current = undefined
+      return 'busy'
+    }
     if (result.stored === true) {
+      /*
+       * `pendingAnchorRef` is deliberately LEFT SET: the message really is in
+       * the transcript, so the anchor is exactly what the reader wants — the
+       * question at the top, with the retry the toast offers landing under it.
+       */
       toast(result.error ?? tr('toast.send.failed'), {
         error: true,
         action: { label: tr('msg.retry'), run: () => { void retry() } },
@@ -1361,6 +1749,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * A send-level failure gets a toast: the notice covers "the page would not
      * come up", which is a different sentence and is already on screen.
      */
+    pendingAnchorRef.current = undefined
     toast(result.error ?? tr('toast.send.failed'), { error: true })
     return 'failed'
   }, [api, ensureReady, refreshState, retry, toast, tr])
@@ -1472,7 +1861,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         // back to the newest KNOWN chat until then, which looks like the click
         // did nothing.
         void refreshState()
-      } else toast(result.error ?? 'new chat failed', { error: true })
+      } else toast(result.error ?? tr('send.newChat'), { error: true })
     } catch (error) {
       toast(String(error), { error: true })
     }
@@ -1484,7 +1873,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const result = await api.setDeepThink(next).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       setDeepThink(!next)
-      toast(result.error ?? 'toggle failed', { error: true })
+      toast(result.error ?? tr('send.toggle'), { error: true })
     }
   }, [deepThink, api, toast])
 
@@ -1494,13 +1883,13 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const result = await api.setSearch(next).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       setSearch(!next)
-      toast(result.error ?? 'toggle failed', { error: true })
+      toast(result.error ?? tr('send.toggle'), { error: true })
     }
   }, [search, api, toast])
 
   const openLogin = useCallback(async (): Promise<void> => {
     const result = await api.openLogin().catch(() => undefined)
-    if (result !== undefined && result.ok !== true) toast(result.error ?? 'open login failed', { error: true })
+    if (result !== undefined && result.ok !== true) toast(result.error ?? tr('send.openLogin'), { error: true })
   }, [api, toast])
 
   const copyText = useCallback(async (text: string, message: string): Promise<void> => {
@@ -1565,10 +1954,62 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     else toast(tr('toast.clear.done'))
   }, [clearArmed, api, toast, tr])
 
+  /**
+   * What a sync changed, in the reader's terms — and only the parts that
+   * happened: 「新增 0 条」 is noise, and a merge that found nothing new is a
+   * perfectly normal outcome that should not read like a report.
+   *
+   * @param counts - the merge counters, from one sync or summed over many.
+   */
+  const syncDetail = useCallback((counts: {
+    added?: number
+    completed?: number
+    replaced?: number
+    kept?: number
+  }): string => {
+    return [
+      (counts.added ?? 0) > 0 ? tr('toast.recover.added', { count: String(counts.added) }) : '',
+      (counts.completed ?? 0) > 0 ? tr('toast.recover.completed', { count: String(counts.completed) }) : '',
+      (counts.replaced ?? 0) > 0 ? tr('toast.recover.replaced', { count: String(counts.replaced) }) : '',
+      (counts.kept ?? 0) > 0 ? tr('toast.recover.kept', { count: String(counts.kept) }) : '',
+    ].filter(part => part !== '').join(' · ')
+  }, [tr])
+
+  /**
+   * Sync ONE conversation the rail already holds.
+   *
+   * The rail's own button only offers conversations the store has never seen,
+   * so this is how a transcript that has since been continued on the web catches
+   * up. It is a merge, so what it usually reports is 「新增 2 条」 rather than a
+   * rewritten transcript.
+   */
+  const syncChat = useCallback(async (chat: DSchatTranscript): Promise<void> => {
+    const sessionId = chat.webSessionId
+    if (sessionId === undefined) return
+    setSyncId(chat.id)
+    try {
+      const result = await api.recover({ title: chat.title, sessionId }).catch(() => undefined)
+      if (result === undefined || result.ok !== true) {
+        toast(result?.error ?? tr('toast.recover.failed', { list: chat.title }), { error: true })
+        return
+      }
+      void refreshState()
+      const detail = syncDetail(result)
+      toast(
+        detail === ''
+          ? tr('toast.sync.uptodate', { title: chat.title })
+          : `${tr('toast.sync.done', { title: chat.title })}${tr('send.join')}${detail}`,
+        { ttl: 6_000 },
+      )
+    } finally {
+      setSyncId(undefined)
+    }
+  }, [api, refreshState, syncDetail, toast, tr])
+
   const recover = useCallback(async (): Promise<void> => {
     const listed = await api.webChats().catch(() => undefined)
     if (listed === undefined || listed.ok !== true) {
-      toast(listed?.error ?? 'recover failed', { error: true })
+      toast(listed?.error ?? tr('send.recoverList'), { error: true })
       return
     }
     if (listed.missing.length === 0) {
@@ -1576,17 +2017,21 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       return
     }
     /*
-     * Recovering is a read per conversation (the page's own history endpoint),
-     * so the old one-toast-per-title stream is replaced by one progress toast
-     * plus one summary. A conversation that already had a short transcript is
-     * refreshed in place rather than skipped, which is what makes a second
-     * click able to repair an earlier incomplete import.
+     * Syncing is a read per conversation (the page's own history endpoint), so
+     * the old one-toast-per-title stream is replaced by one progress toast plus
+     * one summary. A conversation the panel already holds is MERGED rather than
+     * replaced — see TranscriptStore.mergeHistory — which is what lets a second
+     * click repair an earlier incomplete import without rewriting the messages
+     * the reader already has.
      */
     const total = listed.missing.length
     let done = 0
     let recovered = 0
-    let refreshed = 0
     let messages = 0
+    let added = 0
+    let completed = 0
+    let replaced = 0
+    let kept = 0
     let lastProgressAt = 0
     const failures: string[] = []
     for (const item of listed.missing) {
@@ -1606,23 +2051,27 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         ...(item.sessionId === undefined ? {} : { sessionId: item.sessionId }),
       }).catch(() => undefined)
       if (result === undefined || result.ok !== true) {
-        failures.push(`${item.title}：${result?.error ?? '未知错误'}`)
+        failures.push(`${item.title}${tr('send.join')}${result?.error ?? tr('send.unknown')}`)
         continue
       }
       recovered += 1
-      if (result.updated === true) refreshed += 1
       messages += result.messageCount ?? 0
+      added += result.added ?? 0
+      completed += result.completed ?? 0
+      replaced += result.replaced ?? 0
+      kept += result.kept ?? 0
     }
     toast(tr('toast.recover.summary', {
       count: String(recovered),
       total: String(total),
       messages: String(messages),
-      refreshed: String(refreshed),
     }))
+    const detail = syncDetail({ added, completed, replaced, kept })
+    if (detail !== '') toast(detail, { ttl: 8_000 })
     if (failures.length > 0) {
-      toast(tr('toast.recover.failed', { list: failures.slice(0, 3).join('；') }), { error: true, ttl: 12_000 })
+      toast(tr('toast.recover.failed', { list: failures.slice(0, 3).join(tr('send.join')) }), { error: true, ttl: 12_000 })
     }
-  }, [api, toast, tr])
+  }, [api, toast, tr, syncDetail])
 
   const commitRename = useCallback(async (chat: DSchatTranscript): Promise<void> => {
     const title = renameDraft.trim().replace(/\s+/g, ' ')
@@ -1652,10 +2101,64 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     }))
   }, [viewChat, api, toast, tr])
 
+  /**
+   * Step one of the hand-off: build the text and SHOW it. Writes nothing.
+   *
+   * The transfer used to be one click that wrote immediately, and the case that
+   * made that wrong is that distillation can fail: the host then silently
+   * replays the whole raw conversation (10–18k characters of log) and the panel
+   * showed the same 「已创建会话」 toast as for a real brief. The reader had no
+   * way to tell the two apart, and no chance to look before a session existed.
+   */
+  const loadTransferPreview = useCallback(async (): Promise<void> => {
+    if (viewChat === undefined || previewing) return
+    setPreviewing(true)
+    setStage(1)
+    try {
+      const result = await api.transferPreview(
+        viewChat.id,
+        cwd,
+        transferMode,
+        transferTarget === 'new' ? targetWorkspaceId : undefined,
+        transferTarget === 'continue' ? continueTargetId : undefined,
+      )
+      if (result.ok !== true || typeof result.markdown !== 'string') {
+        setStage(0)
+        toast(tr('toast.transfer.failed', { error: result.error ?? '' }), {
+          error: true,
+          action: { label: tr('toast.transfer.retry'), run: () => { void loadTransferPreview() } },
+        })
+        return
+      }
+      setPreview({
+        distilled: result.distilled === true,
+        fallback: result.fallback === true,
+        ...(result.fallbackReason === undefined ? {} : { fallbackReason: result.fallbackReason }),
+        chars: result.markdown.length,
+      })
+      setPreviewDraft(result.markdown)
+      // The preview is not one of the progress steps; the rail belongs to the
+      // write, which has not started.
+      setStage(0)
+    } catch (error) {
+      setStage(0)
+      toast(tr('toast.transfer.failed', { error: String(error) }), { error: true })
+    } finally {
+      setPreviewing(false)
+    }
+  }, [viewChat, previewing, api, cwd, transferMode, transferTarget, targetWorkspaceId, continueTargetId, toast, tr])
+
+  /**
+   * Step two: write exactly what the reader confirmed.
+   *
+   * The draft travels over the wire, so an edit is what lands — the host does
+   * not re-distill (which would both discard the edit and pay for the model calls
+   * a second time).
+   */
   const runTransfer = useCallback(async (): Promise<void> => {
     if (viewChat === undefined || transferring) return
     setTransferring(true)
-    setStage(1)
+    setStage(2)
     try {
       const result = await api.transfer(
         viewChat.id,
@@ -1663,6 +2166,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         transferMode,
         transferTarget === 'new' ? targetWorkspaceId : undefined,
         transferTarget === 'continue' ? continueTargetId : undefined,
+        { markdown: previewDraft, distilled: preview?.distilled === true },
       )
       if (result.ok !== true || result.sessionId === undefined) {
         setStage(0)
@@ -1676,6 +2180,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       setStage(result.continued === true ? 2 : 3)
       if (result.duplicate === true) toast(tr('toast.transfer.duplicate'))
       else if (result.continued === true) toast(tr('toast.transfer.continued'))
+      /*
+       * A hand-off that had to fall back is TOLD APART from a distilled one.
+       *
+       * `distilled` comes from the host's own report, so this is the reader's
+       * only honest answer to "did I get a brief or the whole log?" — the thing
+       * the panel used to leave to a single success sentence for both.
+       */
+      else if (transferMode === 'distill' && result.distilled !== true) toast(tr('toast.transfer.fallback'), { ttl: 12_000 })
       else toast(tr('toast.transfer.done'), { action: { label: tr('toast.open'), run: () => { void openSession(sessionId) } } })
       /*
        * Land the user in the session they just created — the whole point of the
@@ -1692,14 +2204,24 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         const opened = await Promise.resolve(openSession(sessionId)).catch(() => false)
         if (opened === false) toast(tr('toast.open.failed'), { error: true })
       })()
-      window.setTimeout(() => { setTransferOpen(false); setStage(0) }, 600)
+      window.setTimeout(() => { setTransferOpen(false); setStage(0); setPreview(undefined) }, 600)
     } catch (error) {
       setStage(0)
       toast(tr('toast.transfer.failed', { error: String(error) }), { error: true })
     } finally {
       setTransferring(false)
     }
-  }, [viewChat, transferring, api, cwd, transferMode, transferTarget, targetWorkspaceId, continueTargetId, openSession, toast, tr])
+  }, [viewChat, transferring, api, cwd, transferMode, transferTarget, targetWorkspaceId, continueTargetId, previewDraft, preview, openSession, toast, tr])
+
+  /*
+   * A preview describes ONE set of choices.
+   *
+   * Changing the mode, the destination, the target session or the conversation
+   * makes it describe something the reader is no longer about to do, and
+   * confirming it would write text they did not choose. Cleared rather than kept
+   * so the button always leads back through 预览.
+   */
+  useEffect(() => { setPreview(undefined); setPreviewDraft('') }, [viewChat?.id, transferMode, transferTarget, targetWorkspaceId, continueTargetId])
 
   const createTargetWorkspace = useCallback(async (): Promise<void> => {
     try {
@@ -1828,11 +2350,11 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     try {
       for (const file of batch) {
         if (file.size > MAX_ATTACH_BYTES) {
-          toast(tr('toast.attach.tooBig', { name: file.name === '' ? 'file' : file.name, limit: MAX_ATTACH_LABEL }), { error: true })
+          toast(tr('toast.attach.tooBig', { name: file.name === '' ? tr('attach.name.unnamed') : file.name, limit: MAX_ATTACH_LABEL }), { error: true })
           continue
         }
         const payload = await fileToBase64(file)
-        const sentName = file.name === '' ? 'pasted-file' : file.name
+        const sentName = file.name === '' ? tr('attach.name.pasted') : file.name
         const result = await api.attach({
           name: sentName,
           mediaType: payload.mediaType,
@@ -2058,10 +2580,38 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       createElement(
         'div',
         { className: 'dsh-dschat-chat' },
+        /*
+         * The visible transcript, as a BOX.
+         *
+         * The navigator and the 「↓ 最新」 pill are positioned against this
+         * wrapper rather than against the chat column, because the chat column
+         * also holds the composer: centring the ticks in it would drag them
+         * down towards the input, and pinning the pill to its bottom would put
+         * the pill on top of the composer. See the stylesheet's threadbox rule.
+         */
         createElement(
           'div',
-          { className: 'dsh-dschat-thread dsh-dschat-scroll', ref: listRef, onScroll: onThreadScroll },
-          createElement('div', { className: 'dsh-dschat-thread-inner' }, thread()),
+          { className: 'dsh-dschat-threadbox' },
+          createElement(
+            'div',
+            {
+              className: 'dsh-dschat-thread dsh-dschat-scroll',
+              ref: listRef,
+              onScroll: onThreadScroll,
+              /*
+               * The navigator needs a column of its own, and it must be a COLUMN
+               * rather than an overlay: a 34px capsule floating over a 320px
+               * panel sits on top of the text. The flag is on the scroller so
+               * the padding lands on the inner reading column, where the
+               * messages are — padding on the scroller itself would move the
+               * scrollbar.
+               */
+              'data-nav': questions.length >= 2 && threadScrolls ? 'true' : undefined,
+            },
+            createElement('div', { className: 'dsh-dschat-thread-inner' }, thread()),
+          ),
+          questionNav(),
+          latestPill(),
         ),
         composer(),
         phaseRail(),
@@ -2285,6 +2835,29 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       createElement(
         'div',
         { className: 'dsh-dschat-item-acts' },
+        /*
+         * 「从网页同步」, per row.
+         *
+         * The rail's own sync button only pulls in conversations the store has
+         * never seen (that is what "missing" means to it), so without this the
+         * incremental merge would be unreachable for a conversation that has
+         * been synced once and then continued on the web — which is the normal
+         * way a reader uses this panel. It only appears on rows that know their
+         * web session id: a conversation with no id has no web counterpart to
+         * read.
+         */
+        chat.webSessionId === undefined ? null : createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dschat-mini',
+            title: tr('item.sync'),
+            'aria-label': tr('item.sync'),
+            disabled: syncId !== undefined,
+            onClick: () => { void syncChat(chat) },
+          },
+          syncId === chat.id ? createElement('span', { className: 'dsh-dschat-spin' }) : createElement(RefreshIcon, {}),
+        ),
         createElement(
           'button',
           {
@@ -2459,6 +3032,20 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       onCopyCode: (code: string) => { void copyText(code, tr('toast.codeCopied')) },
       onOpenLink: openExternalLink,
     })
+    /**
+     * Surface copy for every markdown surface in this message.
+     *
+     * The renderer is a pure function, so the strings a reader hovers — the
+     * copy label, the reasoning body's collapse tooltip, the fallback summary
+     * of a `<details>` block the web page wrote without one — come in as data.
+     * A Chinese tooltip in the English UI was the leak this closes.
+     */
+    const markdownCopy = {
+      copy: tr('msg.copy'),
+      collapseHint: tr('msg.think.collapse'),
+      details: tr('msg.details'),
+      language: tr('msg.code.language'),
+    }
     /*
      * Quote is only offered once there is something to quote. While a reasoner
      * is still thinking the answer half does not exist yet, and a quote marker
@@ -2553,12 +3140,12 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               ...(message.thinkingMs === undefined ? {} : { thinkingMs: message.thinkingMs }),
               ...(message.streaming === undefined ? {} : { streaming: message.streaming }),
               liveLabel: tr('msg.thought.prefix'),
-              copyLabel: tr('msg.copy'),
+              copy: markdownCopy,
               options: markdownOptions(),
             }),
             createElement(Markdown, {
               source: reply,
-              copyLabel: tr('msg.copy'),
+              copy: markdownCopy,
               ...markdownOptions(),
               /*
                * The citation table goes over on EVERY tick, streaming or not:
@@ -2641,6 +3228,106 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       isUser
         ? createElement('div', { className: 'dsh-dschat-msg-line' }, body, acts)
         : createElement(Fragment, null, body, acts),
+    )
+  }
+
+  /**
+   * The right-edge question navigator.
+   *
+   * Collapsed it is a column of ticks — one per question, the current one
+   * wider and in the accent colour; hovered (or focused) it becomes the whole
+   * question list, one row per question, and a click jumps to it. That is
+   * chat.deepseek.com's own interaction, measured off the live page: a 34px
+   * fixed capsule, 8×2px 4px-radius ticks on a 30px pitch, and a 12px accent
+   * tick marking where the reader is.
+   *
+   * It is ONE list in the DOM in both states. The stylesheet hides the number
+   * and the text (and shrinks the rows to their tick) while collapsed, which
+   * keeps the tab order, the hover targets and the labels identical whichever
+   * shape it is in — a second, "tick-only" list would have to be kept in sync
+   * with this one forever.
+   *
+   * The rows are buttons rather than a list of anchors: they scroll a box, they
+   * do not navigate, and `aria-current` is what tells a screen reader which
+   * question the reader is looking at.
+   */
+  function questionNav(): ReactNode {
+    if (questions.length < 2 || !threadScrolls) return null
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-navwrap' },
+      createElement(
+        'nav',
+        {
+          className: 'dsh-dschat-nav',
+          // The count lives here (and in the tooltip) rather than in a header
+          // line: a header would push every row down the moment the pointer
+          // arrived, which is exactly when it must not move. See the stylesheet.
+          'aria-label': fmt(tr('qnav.title'), { count: String(questions.length) }),
+          title: fmt(tr('qnav.title'), { count: String(questions.length) }),
+          'data-open': navOpen ? 'true' : undefined,
+          // Hover opens the list; leaving closes it. Both the panel and the
+          // pointer are cheap here because the node only exists while there is
+          // something to navigate.
+          onMouseEnter: () => setNavOpen(true),
+          onMouseLeave: () => setNavOpen(false),
+          // Keyboard parity: focusing anything inside opens it (a keyboard user
+          // cannot hover), and Escape closes it again.
+          onFocus: () => setNavOpen(true),
+          onBlur: (event: { currentTarget: EventTarget & Node; relatedTarget: EventTarget | null }) => {
+            if (event.relatedTarget !== null && event.currentTarget.contains(event.relatedTarget as Node)) return
+            setNavOpen(false)
+          },
+          onKeyDown: (event: { key: string }) => { if (event.key === 'Escape') setNavOpen(false) },
+        },
+        createElement(
+          'div',
+          { className: 'dsh-dschat-nav-list' },
+          questions.map((question, index) => createElement(
+            'button',
+            {
+              key: question.id,
+              type: 'button',
+              className: 'dsh-dschat-nav-item',
+              'data-active': index === navIndex ? 'true' : undefined,
+              'aria-current': index === navIndex ? 'true' : undefined,
+              'aria-label': fmt(tr('qnav.item'), { index: String(index + 1), text: question.text }),
+              title: question.text,
+              onClick: () => jumpToQuestion(question.id),
+            },
+            createElement('span', { className: 'dsh-dschat-nav-idx', 'aria-hidden': 'true' }, String(index + 1)),
+            createElement('span', { className: 'dsh-dschat-nav-text' }, question.text),
+            createElement('i', { className: 'dsh-dschat-nav-tick', 'aria-hidden': 'true' }),
+          )),
+        ),
+      ),
+    )
+  }
+
+  /**
+   * 「↓ 最新」: the way back to the end of the conversation.
+   *
+   * Anchoring a question to the top is what makes an answer readable from its
+   * first line, and it is also what can leave a long answer's tail below the
+   * fold with nothing on screen that goes back to it. This pill is that way
+   * back, and it exists ONLY while the reader is not already at the end — an
+   * offer, not permanent chrome.
+   */
+  function latestPill(): ReactNode {
+    if (atBottom) return null
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-latestwrap' },
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-dschat-latest',
+          title: tr('qnav.latest.hint'),
+          onClick: jumpToLatest,
+        },
+        tr('qnav.latest'),
+      ),
     )
   }
 
@@ -3327,8 +4014,42 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
             createElement('option', { value: '' }, tr('transfer.ungrouped')),
             workspaces.map(workspace => createElement('option', { key: workspace.id, value: workspace.id },
               `${workspace.title} — ${workspace.path}`)),
-            createElement('option', { value: '__new__' }, `＋ ${tr('transfer.workspace.new')}`),
+            createElement('option', { value: '__new__' }, tr('transfer.workspace.new')),
           ),
+        ),
+
+        /*
+         * The hand-off preview: the exact first message, before it exists.
+         *
+         * Editable on purpose — the reader may want to trim a paragraph, add a
+         * line of their own, or (seeing the fallback notice) switch to 原文迁移
+         * knowingly rather than discovering afterwards that a 15k-character log
+         * was written in place of a brief.
+         */
+        preview !== undefined && createElement('div', { className: 'dsh-dschat-field' },
+          createElement('label', null, tr('transfer.preview')),
+          createElement('p', {
+            className: 'dsh-dschat-hintline dsh-dschat-preview-note',
+            'data-tone': preview.distilled ? 'ok' : 'warn',
+          }, preview.distilled ? tr('transfer.preview.distilled') : tr('transfer.preview.raw')),
+          preview.fallback && preview.fallbackReason !== undefined
+            ? createElement('p', {
+              className: 'dsh-dschat-hintline dsh-dschat-preview-note',
+              'data-tone': 'warn',
+            }, preview.fallbackReason)
+            : null,
+          createElement('textarea', {
+            className: 'dsh-dschat-input dsh-dschat-preview',
+            value: previewDraft,
+            spellCheck: false,
+            'aria-label': tr('transfer.preview'),
+            onChange: (event: { target: { value: string } }) => setPreviewDraft(event.target.value),
+          }),
+          createElement('p', { className: 'dsh-dschat-hintline dsh-dschat-preview-meta' },
+            // Through `fmt`, like every other counted string in this panel: the
+            // placeholder substitution is the panel's own, not the host's.
+            fmt(tr('transfer.preview.chars'), { count: String(previewDraft.length) }),
+            previewDraft.length !== preview.chars ? tr('transfer.preview.edited') : ''),
         ),
 
         stage > 0 && createElement(
@@ -3350,13 +4071,31 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         ),
 
         createElement('div', { className: 'dsh-dschat-pop-foot' },
-          createElement('button', {
+          preview === undefined
+            ? createElement('button', {
+              type: 'button',
+              className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+              disabled: previewing || transferring || viewChat === undefined,
+              onClick: () => { void loadTransferPreview() },
+            }, previewing
+              ? tr('transfer.preview.building')
+              : (transferTarget === 'continue' ? tr('transfer.target.continue') : tr('action.startTransfer')))
+            : createElement('button', {
+              type: 'button',
+              className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+              disabled: transferring || previewDraft.trim() === '',
+              onClick: () => { void runTransfer() },
+            }, tr('transfer.confirm')),
+          // Rebuilding is the escape hatch for "the preview is stale but I have
+          // not changed a setting" — the effect only clears one on a real change.
+          preview !== undefined && createElement('button', {
             type: 'button',
-            className: 'dsh-dschat-btn dsh-dschat-btn-primary',
-            disabled: transferring,
-            onClick: () => { void runTransfer() },
-          }, transferTarget === 'continue' ? tr('transfer.target.continue') : tr('action.startTransfer')),
-          createElement('span', { className: 'dsh-dschat-hintline', style: { margin: 0 } }, note),
+            className: 'dsh-dschat-btn',
+            disabled: transferring || previewing,
+            onClick: () => { setPreview(undefined); setPreviewDraft(''); void loadTransferPreview() },
+          }, tr('transfer.preview.rebuild')),
+          createElement('span', { className: 'dsh-dschat-hintline', style: { margin: 0 } },
+            preview === undefined ? note : tr('transfer.preview.note')),
         ),
       ),
     )

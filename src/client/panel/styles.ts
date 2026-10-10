@@ -216,14 +216,15 @@ export const PANEL_CSS = `
  * place anyone looks for 「新对话」 or 「会话列表」. Naming them costs about
  * 180px of a row that has the space.
  *
- * The hairline on top is what separates the row from the transcript: it acts on
- * the conversation above, so it belongs to it, but it must not read as part of
- * the last message.
+ * There is NO hairline on top of it any more. There used to be, to separate the
+ * row from the transcript — but the card's own border sits eight pixels below,
+ * so the pair read as two rules around nothing, and the row already acts on the
+ * conversation above it through its own hover surfaces and its position. Space
+ * separates them; a second line only made the composer look like two boxes.
  */
 .dsh-dschat-actions {
   display: flex; align-items: center; gap: 4px;
-  padding: 6px 0 8px; margin-bottom: 2px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  padding: 4px 0 8px;
 }
 /*
  * The row's buttons — and the 「···」 at the title bar's right end, which is the
@@ -246,7 +247,7 @@ export const PANEL_CSS = `
  */
 .dsh-dschat-tbtn {
   display: inline-flex; align-items: center; gap: 6px; flex: none;
-  height: 28px; padding: 0 9px; border-radius: var(--dschat-radius-sm);
+  height: 30px; padding: 0 11px; border-radius: 999px;
   border: 1px solid transparent; background: transparent; cursor: pointer;
   white-space: nowrap; font-size: 13px; color: var(--dsw-alias-label-secondary);
 }
@@ -408,7 +409,16 @@ export const PANEL_CSS = `
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dschat-item[data-active] .dsh-dschat-item-title { font-weight: 600; }
-.dsh-dschat-item-meta { font-size: 11px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
+/*
+ * One line, always. The row's action buttons appear on hover and take ~70px out
+ * of the title column, and this line used to WRAP when that happened — the row
+ * grew by a line every time the pointer crossed it, which moved every row below
+ * it. Truncating is the same information in a stable box.
+ */
+.dsh-dschat-item-meta {
+  font-size: 11px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .dsh-dschat-item-acts { display: none; gap: 2px; flex: none; }
 .dsh-dschat-item:hover .dsh-dschat-item-acts { display: flex; }
 .dsh-dschat-mini {
@@ -423,9 +433,121 @@ export const PANEL_CSS = `
 }
 .dsh-dschat-hint-empty { padding: 14px 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 
+/* ---------- question navigator (right edge) ---------- */
+/*
+ * The column the transcript and its two floating pieces share.
+ *
+ * The navigator and the 「↓ 最新」 pill are positioned against THIS box rather
+ * than against the chat column: the chat column also holds the composer and the
+ * phase line, so centring the navigator in it would drag the ticks down towards
+ * the input, and pinning the pill to its bottom would put the pill ON the
+ * composer. An explicit wrapper makes "the visible transcript" a box that can be
+ * measured, which is what both of them actually mean.
+ */
+.dsh-dschat-threadbox { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; }
+/*
+ * 提问导航: the conversation's questions, one tick each.
+ *
+ * Collapsed it is the page's own capsule — 34px wide, 16px radius, a translucent
+ * surface with a hairline, vertically centred against the transcript — because
+ * that is the shape DeepSeek's own page uses for the same control and a reader
+ * who knows the page should not have to learn a second one. Ticks are 8x2px with
+ * a 4px radius on a 30px pitch, the current one 12x3px in the accent colour;
+ * hovering a tick widens it, exactly as the page does.
+ *
+ * Expanded (data-open) the SAME list becomes a 268px card: the number and the
+ * question text appear, and the ticks move to the right edge. One list in the
+ * DOM, two layouts — a second tick-only list would have to be kept in sync with
+ * this one forever, and would take the tab stops with it.
+ *
+ * The rows are 30px in BOTH states, and there is no header, and both of those
+ * are load-bearing rather than stylistic. Growing the rows — or revealing a line
+ * of chrome above them — moves every row down at the exact moment the pointer
+ * arrives, so the row the reader aimed at slides out from under the cursor and
+ * the click lands on whatever took its place. The page's own control has the
+ * same property, measured: its ticks sit on the same 30px pitch before and after
+ * it opens. So this list only ever grows SIDEWAYS, and the tick the pointer is
+ * on stays exactly where it was. (The count moved to the nav element's aria-label and
+ * its tooltip.)
+ */
+.dsh-dschat-navwrap { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); z-index: 6; }
+.dsh-dschat-nav {
+  display: flex; flex-direction: column;
+  width: 34px; padding: 14px 0; border-radius: 16px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 84%, transparent);
+  backdrop-filter: blur(8px);
+  transition: width .16s ease;
+}
+.dsh-dschat-nav-list { display: flex; flex-direction: column; }
+.dsh-dschat-nav-item {
+  display: flex; align-items: center; width: 100%; height: 30px; padding: 0;
+  border: none; border-radius: 8px; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12px; color: var(--dsw-alias-label-tertiary); text-align: left;
+}
+.dsh-dschat-nav-idx, .dsh-dschat-nav-text { display: none; }
+.dsh-dschat-nav-tick {
+  display: block; width: 8px; height: 2px; margin: 0 auto; border-radius: 4px;
+  background: var(--dsw-alias-border-l3);
+}
+.dsh-dschat-nav-item:hover .dsh-dschat-nav-tick { width: 16px; background: var(--dsw-alias-label-secondary); }
+.dsh-dschat-nav-item:focus-visible { outline: none; }
+.dsh-dschat-nav-item:focus-visible .dsh-dschat-nav-tick { width: 16px; background: var(--dsw-alias-label-primary); }
+.dsh-dschat-nav-item[data-active='true'] .dsh-dschat-nav-tick {
+  width: 12px; height: 3px; background: var(--dsw-alias-state-business-primary);
+}
+/* The expanded card. */
+.dsh-dschat-nav[data-open='true'] {
+  width: 268px; padding: 6px;
+  background: var(--dschat-surface);
+  box-shadow: 0 10px 30px #0000002e, 0 2px 6px #00000014;
+}
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-item { padding: 0 8px; gap: 8px; }
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-idx {
+  display: block; flex: none; width: 14px; text-align: right;
+  font-size: 10px; font-variant-numeric: tabular-nums;
+}
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-text {
+  display: block; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-tick { margin: 0; flex: none; }
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-item:hover {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.dsh-dschat-nav[data-open='true'] .dsh-dschat-nav-item[data-active='true'] {
+  color: var(--dsw-alias-label-primary); font-weight: 500;
+}
+body[data-ds-dark-theme] .dsh-dschat-nav { background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 92%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-dschat-nav { transition: none; }
+}
+/*
+ * 预留右侧留白: while the navigator is on screen the reading column keeps a
+ * column-shaped hole on its right. Overlaying the ticks on the text was the
+ * first draft and it is not survivable on a 400px-wide panel — the capsule sat
+ * on the last three characters of every line.
+ */
+.dsh-dschat-thread[data-nav='true'] .dsh-dschat-thread-inner { padding-right: 58px; }
+/*
+ * 「↓ 最新」: the way back to the end.
+ *
+ * Shown only while the reader is NOT at the end, and floating a little above the
+ * composer so it never covers the control it sits next to.
+ */
+.dsh-dschat-latestwrap { position: absolute; right: 22px; bottom: 14px; z-index: 5; }
+.dsh-dschat-latest {
+  display: inline-flex; align-items: center; height: 30px; padding: 0 13px;
+  border-radius: 999px; cursor: pointer; font: inherit; font-size: 12.5px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dschat-surface); color: var(--dsw-alias-label-secondary);
+  box-shadow: 0 4px 14px #00000024;
+}
+.dsh-dschat-latest:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+
 /* ---------- chat column ---------- */
 .dsh-dschat-chat { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.dsh-dschat-thread { flex: 1; min-height: 0; overflow: auto; padding: 22px 0 8px; }
+.dsh-dschat-thread { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 22px 0 8px; }
 .dsh-dschat-thread-inner {
   max-width: 760px; margin: 0 auto; padding: 0 26px;
   display: flex; flex-direction: column; gap: 20px;
@@ -757,16 +879,22 @@ export const PANEL_CSS = `
 .dsh-dschat-composer { flex: none; padding: 8px 26px 4px; }
 .dsh-dschat-composer-inner { max-width: 760px; margin: 0 auto; }
 /*
- * The input card, measured off the live page: 24px radius, '#0000001a' hairline,
- * and a two-part shadow that is almost nothing — rgba(0,0,0,.02) 0 4px 12px plus
- * a hint of blue underneath. The panel's own scale tops out at 20px
- * ('--dschat-radius-xl'), so the radius is written out rather than clamped: at
- * this size the difference between 20 and 24 is visible on a card this wide, and
- * matching the page is the whole point of the exercise.
+ * The input card: the panel's own radius scale, the page's hairline, and a
+ * two-part shadow that is almost nothing — rgba(0,0,0,.02) 0 4px 12px plus a
+ * hint of blue underneath.
+ *
+ * The radius used to be the page's 24px, written out because the panel's own
+ * scale tops out at 20px ('--dschat-radius-xl'). That was the wrong trade for
+ * THIS panel: the card is the one surface in the composer, and a radius no other
+ * box on screen shares made it read as a widget borrowed from somewhere else —
+ * most visibly against the 8px conversation rows a few pixels to its left and
+ * the action row directly above it, whose controls are pills. One radius family
+ * is what "the same interface" looks like, so the card now sits ON the scale
+ * rather than beside it.
  */
 .dsh-dschat-card {
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 24px;
+  border-radius: var(--dschat-radius-xl);
   background: var(--dsw-alias-bg-layer-1);
   box-shadow: 0 4px 12px #00000005, 0 2px 4px #4868b203;
   transition: border-color .12s ease, background-color .12s ease;
@@ -787,7 +915,13 @@ body[data-ds-dark-theme] .dsh-dschat-card {
   border-color: var(--dsw-alias-border-l3);
   box-shadow: none;
 }
-.dsh-dschat-card:focus-within { border-color: var(--dsw-alias-border-l3); }
+.dsh-dschat-card:focus-within {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 42%, var(--dsw-alias-border-l2));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+}
+body[data-ds-dark-theme] .dsh-dschat-card:focus-within {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, var(--dsw-alias-border-l3));
+}
 .dsh-dschat-card.dsh-dschat-dragging {
   border-color: var(--dsw-alias-state-business-primary);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
@@ -865,7 +999,7 @@ body[data-ds-dark-theme] .dsh-dschat-card {
 .dsh-dschat-input {
   display: block; width: 100%; resize: none; border: none; outline: none; background: transparent;
   font: inherit; font-size: 14px; line-height: 1.6; color: var(--dsw-alias-label-primary);
-  padding: 12px 14px 4px; min-height: 52px; max-height: 180px; overflow-y: auto;
+  padding: 12px 14px 4px; min-height: 46px; max-height: 180px; overflow-y: auto;
 }
 .dsh-dschat-input::placeholder { color: var(--dsw-alias-label-tertiary); }
 /*
@@ -925,24 +1059,29 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
 .dsh-dschat-queue-item button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dsh-dschat-queue-note { padding-left: 2px; font-size: 11.5px; color: var(--dsw-alias-label-tertiary); }
 /*
- * The composer's tool row, on the page's own metrics: 12px of padding on every
- * side, a 4px gap between controls, and 34px-tall controls in it. 'flex-wrap' is
- * off deliberately — the row's contents are fixed (two pills, a paperclip, the
- * send circle) and wrapping the send button onto a second line on a narrow panel
- * would be worse than letting the spacer collapse.
+ * The composer's tool row: a 4px gap between controls and 30px-tall controls in
+ * it — the SAME height and the same pill/circle shapes as the action row eight
+ * pixels above, which is the whole point (the page's own 34px was a second
+ * scale living inside one composer). The padding is 8/10/10 rather than a flat
+ * 12 so the card, which no longer needs to look like a search bar, closes up
+ * around its contents.
+ *
+ * 'flex-wrap' is off deliberately — the row's contents are fixed (two pills, a
+ * paperclip, the send circle) and wrapping the send button onto a second line
+ * on a narrow panel would be worse than letting the spacer collapse.
  */
-.dsh-dschat-tools { display: flex; align-items: center; gap: 4px; padding: 12px; }
+.dsh-dschat-tools { display: flex; align-items: center; gap: 4px; padding: 8px 10px 10px; }
 /* The Finder input is clicked from the tool row; it must never take layout. */
 .dsh-dschat-fileinput { display: none; }
 /*
- * 附件: a 34px glyph button, exactly like the pills beside it.
+ * 附件: a 30px glyph circle, exactly as tall as the pills beside it.
  *
  * No label. The web app's own attach control is a bare paperclip in this row,
  * and at panel widths the two pills plus a labelled upload button plus the send
  * circle do not fit; the tooltip and the chips above carry the words.
  */
 .dsh-dschat-attach {
-  width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
   border: none; border-radius: 50%; background: transparent; cursor: pointer;
   color: var(--dsw-alias-label-secondary);
 }
@@ -951,8 +1090,14 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
 /*
  * The composer's 深度思考 / 智能搜索 pills.
  *
- * Measured on the live page rather than guessed: 34px tall, 18px radius, 10px
+ * Measured on the live page rather than guessed — 34px tall, 18px radius, 10px
  * of side padding, a 4px gap between the glyph and the label, '13px/500' text,
+ * and, the part that makes them recognisable, a neutral outline when off and the
+ * accent wash when on — and then moved onto THIS panel's baseline: 30px tall and
+ * fully round, so the pills, the action row above them, the attach circle and
+ * the send circle are one family of controls instead of three.
+ *
+ * The page's own colours, kept:
  * and — the part that makes them recognisable — a NEUTRAL outline when off and
  * the accent wash when on:
  *
@@ -978,8 +1123,8 @@ body[data-ds-dark-theme] .dsh-dschat-card[data-engine="off"] {
  * that one is meant to be a raised, tinted object.
  */
 .dsh-dschat-toggle {
-  display: inline-flex; align-items: center; gap: 4px; height: 34px; padding: 0 10px;
-  border-radius: 18px; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px;
+  border-radius: 999px; cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500;
   border: 1px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
@@ -1098,7 +1243,7 @@ body[data-ds-dark-theme] .dsh-dschat-toggle:hover { background: var(--dsw-alias-
  * keeps its edge in the one theme where a dimmed accent has nothing to sit on.
  */
 .dsh-dschat-send {
-  width: 34px; height: 34px; flex: none; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
+  width: 30px; height: 30px; flex: none; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
   border: none; background: var(--dsw-alias-state-business-primary);
   color: var(--dsw-alias-label-primary-inverted);
 }
@@ -1113,7 +1258,7 @@ body[data-ds-dark-theme] .dsh-dschat-send:disabled {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent);
 }
 .dsh-dschat-stop {
-  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
   border-radius: 999px; cursor: pointer; font-size: 13px;
   border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-1);
 }
@@ -1268,6 +1413,41 @@ body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dsw-alias-bo
   display: flex; align-items: center; gap: 6px; font-size: 11px;
   color: var(--dsw-alias-label-tertiary); margin: -2px 0 10px;
 }
+/*
+ * A hint that is not decoration.
+ *
+ * The hand-off preview says which of two very different things is about to be
+ * written — a distilled brief, or the whole raw conversation after a silent
+ * fallback — and the second one has to be visible at a glance rather than read
+ * as another grey footnote.
+ */
+.dsh-dschat-hintline[data-tone="warn"] {
+  color: var(--dsw-alias-state-warn-primary, var(--dsw-alias-label-secondary));
+}
+/*
+ * The first message a transfer will write, shown (and editable) BEFORE any
+ * session exists.
+ *
+ * A boxed, fixed-height scroller rather than the composer's own input style:
+ * this text is routinely thousands of characters, and letting it grow would
+ * push the confirmation button off the dialog.
+ */
+.dsh-dschat-preview {
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: var(--dschat-radius-sm);
+  padding: 8px 10px; min-height: 96px; max-height: 220px; overflow-y: auto;
+  font-size: 12px; line-height: 1.55; white-space: pre-wrap;
+}
+/*
+ * The line under the preview box.
+ *
+ * The shared hint line tucks itself up against the field above it (-2px), which
+ * is right for a label-over-input pair and wrong here: the box has a real
+ * border, so the count sat ON it.
+ */
+.dsh-dschat-preview-meta { margin: 6px 0 10px; }
+.dsh-dschat-preview-note { align-items: flex-start; line-height: 1.55; }
 .dsh-dschat-pop-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 .dsh-dschat-steps { display: flex; flex-direction: column; gap: 7px; padding: 4px 0 8px; }
 .dsh-dschat-step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dsw-alias-label-secondary); }

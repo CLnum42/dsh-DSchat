@@ -4,7 +4,7 @@
  * fenced on the host.
  */
 
-import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
+import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type TransferPreview, type DSchatState, type DSchatTail, type WakeResult, type WebChatSummary } from '../protocol.ts'
 
 /** Shape every /api/dsh-dschat response carries: ok plus optional error. */
 interface ApiResult {
@@ -55,17 +55,88 @@ const TIMEOUT = {
   attach: 60_000,
 } as const
 
-async function request<T>(path: string, body?: unknown, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<EndpointResult<T>> {
+/**
+ * The host's per-run CSRF token, echoed on every mutating request.
+ *
+ * Re-read whenever a response carries one (both `/state` and `/token` do), and
+ * dropped when the host answers `code: 'CSRF'` — which is exactly what a host
+ * restart looks like from here, since the token is per run. The single retry
+ * below is what makes a restart invisible to the reader instead of a panel that
+ * refuses every action until it is reloaded.
+ */
+let csrfToken = ''
+
+/** Header the host expects the token in (see routes.ts). */
+const CSRF_HEADER = 'x-dschat-token'
+
+/** Remember a token from any response that carries one. */
+function rememberToken(payload: unknown): void {
+  const value = (payload as { csrfToken?: unknown } | undefined)?.csrfToken
+  if (typeof value === 'string' && value !== '') csrfToken = value
+}
+
+/** One in-flight token fetch, so a burst of calls performs one handshake. */
+let tokenInFlight: Promise<void> | undefined
+
+/** Fetch the token, giving up quietly: the call it precedes reports its own failure. */
+async function loadToken(): Promise<void> {
+  if (tokenInFlight !== undefined) return tokenInFlight
+  tokenInFlight = (async () => {
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => controller.abort(), 15_000)
+    try {
+      const response = await fetch(DSCHAT_API.token, { method: 'GET', signal: controller.signal })
+      rememberToken(await response.json().catch(() => undefined))
+    } catch {
+      // Left empty on purpose: the mutating call that needed it answers with the
+      // host's own 403, which the panel already knows how to show.
+    } finally {
+      window.clearTimeout(timer)
+      tokenInFlight = undefined
+    }
+  })()
+  return tokenInFlight
+}
+
+/**
+ * One request to the plugin's own route family.
+ *
+ * `body === undefined` means a read (GET); anything else is a POST, which is
+ * what every mutating route now requires — the panel never had a say in that,
+ * and a GET that clears history is precisely what the fence exists to stop.
+ *
+ * @param retried - internal; guards the one retry after a CSRF rejection.
+ */
+async function request<T>(path: string, body?: unknown, timeoutMs: number = REQUEST_TIMEOUT_MS, retried = false): Promise<EndpointResult<T>> {
+  const mutating = body !== undefined
+  if (mutating && csrfToken === '') await loadToken()
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
+    const headers: Record<string, string> = {}
+    if (mutating) {
+      headers['content-type'] = 'application/json'
+      if (csrfToken !== '') headers[CSRF_HEADER] = csrfToken
+    }
     const response = await fetch(path, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      method: mutating ? 'POST' : 'GET',
+      headers: mutating ? headers : undefined,
+      body: mutating ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     })
     const payload = (await response.json().catch(() => ({}))) as EndpointResult<T>
+    /*
+     * A stale token (a host restart, a rotated run) is answered once by
+     * re-reading the token and repeating the call. Repeating is safe: the guard
+     * rejected the request BEFORE its handler ran, so nothing executed twice.
+     */
+    if (!retried && response.status === 403 && (payload as { code?: unknown }).code === 'CSRF') {
+      csrfToken = ''
+      await loadToken()
+      window.clearTimeout(timer)
+      return request<T>(path, body, timeoutMs, true)
+    }
+    rememberToken(payload)
     if (!response.ok && payload.ok !== true) {
       return { ...payload, ok: false, error: payload.error ?? `HTTP ${response.status}` }
     }
@@ -78,7 +149,14 @@ async function request<T>(path: string, body?: unknown, timeoutMs: number = REQU
      * before — a genuine network error is information the caller may want.
      */
     if (controller.signal.aborted) {
-      return { ok: false, error: `请求超时（${Math.round(timeoutMs / 1000)} 秒）：${path}` } as EndpointResult<T>
+      /*
+       * Punctuation only — never a language. This module has no translator (it
+       * is also the transport the tests drive), and the sentence it used to
+       * hardcode was Chinese, so an English reader got 「请求超时（30 秒）：/state」
+       * in a toast. The numbers and the path are the whole information; callers
+       * that want a sentence wrap it in their own localized copy.
+       */
+      return { ok: false, error: `timeout after ${Math.round(timeoutMs / 1000)}s: ${path}` } as EndpointResult<T>
     }
     throw error
   } finally {
@@ -107,6 +185,14 @@ export interface ApiRecoverResult {
   sessionId?: string
   created?: boolean
   updated?: boolean
+  /** Messages the sync appended (see RecoverResult). */
+  added?: number
+  /** Stored messages completed from a longer web copy. */
+  completed?: number
+  /** Stored messages whose text the web copy replaced. */
+  replaced?: number
+  /** Stored messages the web copy does not have. */
+  kept?: number
   messageCount?: number
   source?: string
 }
@@ -131,8 +217,14 @@ export class DSchatApi {
     return request<DSchatTail>(`${DSCHAT_API.tail}?${query.toString()}`, undefined, TIMEOUT.poll)
   }
 
+  /*
+   * These three drive the browser, so they are POSTs now. They used to be GETs
+   * with no body, which made them reachable by a plain `<img src=...>` from any
+   * other page on this machine — opening a login window, waking a browser or
+   * killing the user's session — with no line of the panel involved.
+   */
   openLogin(): Promise<EndpointResult<ApiWakeResult>> {
-    return request<ApiWakeResult>(DSCHAT_API.openLogin, undefined, TIMEOUT.login)
+    return request<ApiWakeResult>(DSCHAT_API.openLogin, {}, TIMEOUT.login)
   }
 
   /**
@@ -143,11 +235,11 @@ export class DSchatApi {
    * the caller must not ask for one again.
    */
   wake(): Promise<EndpointResult<ApiWakeResult>> {
-    return request<ApiWakeResult>(DSCHAT_API.wake, undefined, TIMEOUT.login)
+    return request<ApiWakeResult>(DSCHAT_API.wake, {}, TIMEOUT.login)
   }
 
   closeBrowser(): Promise<EndpointResult<{ ok: boolean }>> {
-    return request<{ ok: boolean }>(DSCHAT_API.closeBrowser, undefined, TIMEOUT.login)
+    return request<{ ok: boolean }>(DSCHAT_API.closeBrowser, {}, TIMEOUT.login)
   }
 
   newChat(): Promise<EndpointResult<{ ok: boolean; chatId?: string }>> {
@@ -256,14 +348,47 @@ export class DSchatApi {
     return request<{ ok: boolean }>(DSCHAT_API.search, { enabled })
   }
 
+  /**
+   * Ask what a transfer WOULD write, without writing anything.
+   *
+   * The whole point of the hand-off preview: distillation drops the reasoning
+   * and every source link, and it can fail into a raw replay without saying so,
+   * so the reader gets to see (and edit) the first message before a session
+   * exists.
+   */
+  transferPreview(
+    chatId: string,
+    cwd?: string,
+    mode?: TransferMode,
+    workspaceId?: string,
+    targetSessionId?: string,
+  ): Promise<EndpointResult<TransferPreview>> {
+    return request<TransferPreview>(DSCHAT_API.transferPreview, { chatId, cwd, mode, workspaceId, targetSessionId }, TIMEOUT.transfer)
+  }
+
+  /**
+   * Write the hand-off.
+   *
+   * `seed` carries the text the reader confirmed (and possibly edited) together
+   * with whether it came from a distillation, so the host writes those exact
+   * bytes instead of distilling a second time.
+   */
   transfer(
     chatId: string,
     cwd?: string,
     mode?: TransferMode,
     workspaceId?: string,
     targetSessionId?: string,
+    seed?: { markdown: string; distilled: boolean },
   ): Promise<EndpointResult<ApiTransferResult>> {
-    return request<ApiTransferResult>(DSCHAT_API.transfer, { chatId, cwd, mode, workspaceId, targetSessionId }, TIMEOUT.transfer)
+    return request<ApiTransferResult>(DSCHAT_API.transfer, {
+      chatId,
+      cwd,
+      mode,
+      workspaceId,
+      targetSessionId,
+      ...(seed === undefined ? {} : { markdown: seed.markdown, distilled: seed.distilled }),
+    }, TIMEOUT.transfer)
   }
 
   /**

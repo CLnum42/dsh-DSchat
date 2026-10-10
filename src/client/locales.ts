@@ -36,6 +36,7 @@ export interface DSchatDict {
   'settings.where': string
   'settings.loading': string
   'settings.auto': string
+  'settings.direct': string
 
   'status.title': string
   'status.description': string
@@ -91,9 +92,22 @@ export interface DSchatDict {
   'rail.clearConfirm': string
   'rail.resize': string
 
+  /*
+   * The right-edge question navigator: the tick rail that expands into the
+   * conversation's questions. Prefixed `qnav.` because `nav.label` above is
+   * already the SIDEBAR row's name — a different "nav" entirely.
+   */
+  'qnav.label': string
+  'qnav.title': string
+  'qnav.item': string
+  'qnav.attachment': string
+  'qnav.latest': string
+  'qnav.latest.hint': string
+
   'item.rename': string
   'item.rename.placeholder': string
   'item.delete': string
+  'item.sync': string
   'item.rename.ok': string
   'item.rename.cancel': string
 
@@ -140,6 +154,9 @@ export interface DSchatDict {
   'msg.model': string
   'msg.model.think': string
   'msg.copy': string
+  'msg.think.collapse': string
+  'msg.details': string
+  'msg.code.language': string
   'msg.copyThinking': string
   'msg.regenerate': string
   'msg.edit': string
@@ -181,6 +198,15 @@ export interface DSchatDict {
   'transfer.step.distill': string
   'transfer.step.session': string
   'transfer.step.open': string
+  'transfer.preview': string
+  'transfer.preview.distilled': string
+  'transfer.preview.raw': string
+  'transfer.preview.chars': string
+  'transfer.preview.edited': string
+  'transfer.preview.building': string
+  'transfer.preview.rebuild': string
+  'transfer.preview.note': string
+  'transfer.confirm': string
 
   'toast.copied': string
   'toast.thinkingCopied': string
@@ -206,15 +232,38 @@ export interface DSchatDict {
   'toast.transfer.continued': string
   'toast.transfer.failed': string
   'toast.transfer.duplicate': string
+  'toast.transfer.fallback': string
   'toast.transfer.retry': string
   'toast.recover.empty': string
   'toast.recover.progress': string
   'toast.recover.summary': string
+  /*
+   * What one sync actually changed. Four separate keys rather than one sentence
+   * with four holes: a sync that only appended two turns must not print
+   * 「补全 0 条 · 本地保留 0 条」, and the panel drops the parts that are zero.
+   */
+  'toast.recover.added': string
+  'toast.recover.completed': string
+  'toast.recover.replaced': string
+  'toast.recover.kept': string
+  'toast.sync.done': string
+  'toast.sync.uptodate': string
   'toast.recover.failed': string
   'toast.open': string
   'toast.open.failed': string
   'toast.workspace.created': string
   'toast.workspace.failed': string
+
+  'attach.name.unnamed': string
+  'attach.name.pasted': string
+
+  'send.newChat': string
+  'send.toggle': string
+  'send.openLogin': string
+  'send.recover': string
+  'send.recoverList': string
+  'send.unknown': string
+  'send.join': string
 
   'error.NEED_LOGIN': string
   'error.PAGE_CHANGED': string
@@ -224,8 +273,8 @@ export interface DSchatDict {
 
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh: DSchatDict = {
-  'nav.label': 'DSchat',
-  'panel.title': 'DSchat',
+  'nav.label': '聊天',
+  'panel.title': '聊天',
   'settings.title': 'DSchat',
   'settings.description': 'DeepSeek 网页端聊天与 harness 迁移设置',
   'settings.status': '状态',
@@ -249,13 +298,14 @@ export const zh: DSchatDict = {
   'settings.distillModel': '蒸馏模型',
   'settings.announce': '向 agent 公告本插件',
   'settings.actions': '操作',
-  'settings.where': '以上参数在「插件」页的 dsh-DSchat 行里编辑，改完即时生效。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
+  'settings.where': '以上参数来自 profile 的 cordis.patch.yml：在 dsh-dschat 那一行下面加 config: 块，重启 Harness 生效（这一版插件没有自带设置表单）。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
   'settings.loading': '正在读取运行参数…',
   'settings.auto': '自动',
+  'settings.direct': '直连',
 
   'status.title': '运行状态',
   'status.description': 'DeepSeek 网页端引擎的实时状态与解析后的运行参数（只读）。',
-  'status.where': '以上参数在「设置 → 插件」的 dsh-DSchat 行里编辑，改完即时生效。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
+  'status.where': '以上参数来自 profile 的 cordis.patch.yml：在 dsh-dschat 那一行下面加 config: 块，重启 Harness 生效（这一版插件没有自带设置表单）。浏览器 profile 默认复用 dsh-webchat 的目录，所以切换插件不需要重新登录。',
   'status.stopped': '未启动',
   'status.launching': '正在启动浏览器',
   'status.needLogin': '未登录',
@@ -269,8 +319,8 @@ export const zh: DSchatDict = {
   'action.newChat': '新对话',
   'action.newChat.hint': '新对话（⌘⇧O）',
   'action.sessions': '会话列表',
-  'action.recover': '从网页恢复',
-  'action.recover.hint': '把网页端已有但本地未收录的会话拉回来；本地已收录但内容不全的会就地补全',
+  'action.recover': '从网页同步',
+  'action.recover.hint': '把网页端的会话同步到本地：没有的收进来，已有的只补缺失的那部分（保留本地的消息 id、时间与思考用时）',
   'action.stop': '停止',
   'action.send': '发送',
   'action.startTransfer': '开始迁移',
@@ -316,9 +366,17 @@ export const zh: DSchatDict = {
   'rail.clearConfirm': '确认清空？',
   'rail.resize': '拖动调整会话列表宽度（双击恢复默认）',
 
+  'qnav.label': '提问导航',
+  'qnav.title': '本会话提问 · {count} 条',
+  'qnav.item': '第 {index} 条提问：{text}',
+  'qnav.attachment': '（附件）',
+  'qnav.latest': '↓ 最新',
+  'qnav.latest.hint': '回到最新消息',
+
   'item.rename': '重命名',
   'item.rename.placeholder': '会话标题',
   'item.delete': '删除（可撤销）',
+  'item.sync': '从网页同步这条（只补缺失的部分）',
   'item.rename.ok': '确认重命名',
   'item.rename.cancel': '取消',
 
@@ -365,6 +423,9 @@ export const zh: DSchatDict = {
   'msg.model': 'DeepSeek',
   'msg.model.think': 'DeepSeek · 深度思考',
   'msg.copy': '复制回复',
+  'msg.think.collapse': '点击收起思考过程',
+  'msg.details': '详情',
+  'msg.code.language': '文本',
   'msg.copyThinking': '复制思考过程',
   'msg.regenerate': '重新生成',
   'msg.edit': '编辑重发',
@@ -406,6 +467,15 @@ export const zh: DSchatDict = {
   'transfer.step.distill': '蒸馏对话为任务简报',
   'transfer.step.session': '创建 harness 会话',
   'transfer.step.open': '打开会话',
+  'transfer.preview': '首条消息预览（可编辑）',
+  'transfer.preview.distilled': '已蒸馏为任务简报，下面是即将写入的完整内容',
+  'transfer.preview.raw': '蒸馏不可用，本次为原文完整迁移，下面是即将写入的完整内容',
+  'transfer.preview.chars': '{count} 字',
+  'transfer.preview.edited': '· 已手动修改',
+  'transfer.preview.building': '生成预览中…',
+  'transfer.preview.rebuild': '重新生成预览',
+  'transfer.preview.note': '确认后才会创建会话',
+  'transfer.confirm': '确认写入',
 
   'toast.copied': '已复制',
   'toast.send.failed': '发送失败：{error}',
@@ -431,15 +501,33 @@ export const zh: DSchatDict = {
   'toast.transfer.continued': '已追加到会话',
   'toast.transfer.failed': '迁移失败：{error}',
   'toast.transfer.duplicate': '这份简报已经在目标会话里，没有重复追加',
+  'toast.transfer.fallback': '已创建会话：蒸馏不可用，写入的是原文完整记录（不是任务简报）',
   'toast.transfer.retry': '重试',
   'toast.recover.empty': '网页端没有未同步的会话',
-  'toast.recover.progress': '正在恢复 {done}/{total}：{title}',
-  'toast.recover.summary': '已从网页恢复 {count}/{total} 个会话，共 {messages} 条消息（其中 {refreshed} 个补全了原先不完整的记录）',
-  'toast.recover.failed': '部分会话恢复失败：{list}',
+  'toast.recover.progress': '正在同步 {done}/{total}：{title}',
+  'toast.recover.summary': '已从网页同步 {count}/{total} 个会话，共 {messages} 条消息',
+  'toast.recover.added': '新增 {count} 条',
+  'toast.recover.completed': '补全 {count} 条',
+  'toast.recover.replaced': '更新 {count} 条',
+  'toast.recover.kept': '本地保留 {count} 条',
+  'toast.sync.done': '已同步「{title}」',
+  'toast.sync.uptodate': '「{title}」本地已是最新',
+  'toast.recover.failed': '部分会话同步失败：{list}',
   'toast.open': '打开',
   'toast.open.failed': '会话已创建，但本页还没收到它——请在左侧会话列表中点开',
   'toast.workspace.created': '已创建工作区「{title}」',
   'toast.workspace.failed': '创建工作区失败：{error}',
+
+  'attach.name.unnamed': '未命名文件',
+  'attach.name.pasted': '粘贴的文件',
+
+  'send.newChat': '新对话创建失败',
+  'send.toggle': '切换开关失败',
+  'send.openLogin': '打开登录窗口失败',
+  'send.recover': '同步失败',
+  'send.recoverList': '读取网页端会话列表失败',
+  'send.unknown': '未知错误',
+  'send.join': '；',
 
   'error.NEED_LOGIN': '需要先完成 DeepSeek 网页登录',
   'error.PAGE_CHANGED': '网页端页面结构疑似改版，请升级插件',
@@ -449,8 +537,8 @@ export const zh: DSchatDict = {
 
 /** English dictionary, checked complete against the zh key set. */
 export const en: DSchatDict = {
-  'nav.label': 'DSchat',
-  'panel.title': 'DSchat',
+  'nav.label': 'Chat',
+  'panel.title': 'Chat',
   'settings.title': 'DSchat',
   'settings.description': 'DeepSeek web chat and harness handoff settings',
   'settings.status': 'Status',
@@ -474,13 +562,14 @@ export const en: DSchatDict = {
   'settings.distillModel': 'Distillation model',
   'settings.announce': 'Announce to the agent',
   'settings.actions': 'Actions',
-  'settings.where': 'These values are edited on the Plugins page under the dsh-DSchat row and apply immediately. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
+  'settings.where': 'These values come from the profile\'s cordis.patch.yml: add a config: block under the dsh-dschat row, then restart Harness. This build ships no settings form of its own. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
   'settings.loading': 'Reading runtime settings…',
   'settings.auto': 'auto',
+  'settings.direct': 'direct',
 
   'status.title': 'Runtime status',
   'status.description': 'Live state of the DeepSeek web engine plus the resolved runtime settings (read-only).',
-  'status.where': 'Edit these values on Settings → Plugins, in the dsh-DSchat row; they apply immediately. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
+  'status.where': 'These values come from the profile\'s cordis.patch.yml: add a config: block under the dsh-dschat row, then restart Harness. This build ships no settings form of its own. The browser profile defaults to the dsh-webchat one, so switching plugins needs no second sign-in.',
   'status.stopped': 'Not started',
   'status.launching': 'Starting browser',
   'status.needLogin': 'Not signed in',
@@ -494,8 +583,8 @@ export const en: DSchatDict = {
   'action.newChat': 'New chat',
   'action.newChat.hint': 'New chat (⌘⇧O)',
   'action.sessions': 'Chats',
-  'action.recover': 'Recover from web',
-  'action.recover.hint': 'Pull in conversations that exist on the web but not locally; short local copies are filled in place',
+  'action.recover': 'Sync from web',
+  'action.recover.hint': 'Sync web conversations into the local store: new ones are pulled in, existing ones only gain what they were missing (local message ids, timestamps and thinking time are kept)',
   'action.stop': 'Stop',
   'action.send': 'Send',
   'action.startTransfer': 'Start transfer',
@@ -526,9 +615,17 @@ export const en: DSchatDict = {
   'rail.clearConfirm': 'Clear all?',
   'rail.resize': 'Drag to resize the conversation list (double-click to reset)',
 
+  'qnav.label': 'Question navigator',
+  'qnav.title': 'Questions · {count}',
+  'qnav.item': 'Question {index}: {text}',
+  'qnav.attachment': '(attachment)',
+  'qnav.latest': '↓ Latest',
+  'qnav.latest.hint': 'Jump to the newest message',
+
   'item.rename': 'Rename',
   'item.rename.placeholder': 'Conversation title',
   'item.delete': 'Delete (undoable)',
+  'item.sync': 'Sync this one from the web (adds only what is missing)',
   'item.rename.ok': 'Confirm rename',
   'item.rename.cancel': 'Cancel',
 
@@ -575,6 +672,9 @@ export const en: DSchatDict = {
   'msg.model': 'DeepSeek',
   'msg.model.think': 'DeepSeek · deep think',
   'msg.copy': 'Copy reply',
+  'msg.think.collapse': 'Click to collapse the reasoning',
+  'msg.details': 'details',
+  'msg.code.language': 'text',
   'msg.copyThinking': 'Copy thinking process',
   'msg.regenerate': 'Regenerate',
   'msg.edit': 'Edit and resend',
@@ -616,6 +716,15 @@ export const en: DSchatDict = {
   'transfer.step.distill': 'Distilling the conversation',
   'transfer.step.session': 'Creating the harness session',
   'transfer.step.open': 'Opening the session',
+  'transfer.preview': 'First message preview (editable)',
+  'transfer.preview.distilled': 'Distilled into a task brief — this is exactly what will be written',
+  'transfer.preview.raw': 'Distillation was unavailable, so this is the raw conversation — exactly what will be written',
+  'transfer.preview.chars': '{count} characters',
+  'transfer.preview.edited': '· edited',
+  'transfer.preview.building': 'Building preview…',
+  'transfer.preview.rebuild': 'Rebuild preview',
+  'transfer.preview.note': 'The session is created only after you confirm',
+  'transfer.confirm': 'Write it',
 
   'toast.copied': 'Copied',
   'toast.send.failed': 'Could not send: {error}',
@@ -641,15 +750,33 @@ export const en: DSchatDict = {
   'toast.transfer.continued': 'Appended to the session',
   'toast.transfer.failed': 'Transfer failed: {error}',
   'toast.transfer.duplicate': 'That brief is already in the target session; nothing was appended',
+  'toast.transfer.fallback': 'Session created, but distillation was unavailable: the raw conversation was written instead of a brief',
   'toast.transfer.retry': 'Retry',
   'toast.recover.empty': 'No unsynced web conversations',
-  'toast.recover.progress': 'Recovering {done}/{total}: {title}',
-  'toast.recover.summary': 'Recovered {count}/{total} conversations ({messages} messages); {refreshed} of them replaced a shorter local copy',
-  'toast.recover.failed': 'Some conversations could not be recovered: {list}',
+  'toast.recover.progress': 'Syncing {done}/{total}: {title}',
+  'toast.recover.summary': 'Synced {count}/{total} conversations ({messages} messages)',
+  'toast.recover.added': '{count} new',
+  'toast.recover.completed': '{count} completed',
+  'toast.recover.replaced': '{count} updated',
+  'toast.recover.kept': '{count} kept locally',
+  'toast.sync.done': 'Synced “{title}”',
+  'toast.sync.uptodate': '“{title}” is already up to date',
+  'toast.recover.failed': 'Some conversations could not be synced: {list}',
   'toast.open': 'Open',
   'toast.open.failed': 'The session was created, but this page has not received it yet — open it from the session list',
   'toast.workspace.created': 'Workspace "{title}" created',
   'toast.workspace.failed': 'Could not create workspace: {error}',
+
+  'attach.name.unnamed': 'unnamed file',
+  'attach.name.pasted': 'pasted file',
+
+  'send.newChat': 'Could not start a new chat',
+  'send.toggle': 'Could not flip that switch',
+  'send.openLogin': 'Could not open the login window',
+  'send.recover': 'Sync failed',
+  'send.recoverList': 'Could not read the web conversation list',
+  'send.unknown': 'unknown error',
+  'send.join': '; ',
 
   'error.NEED_LOGIN': 'Sign in to DeepSeek web first',
   'error.PAGE_CHANGED': 'The web page structure changed — upgrade this plugin',

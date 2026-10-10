@@ -50,18 +50,26 @@ let translate: ((key: string) => string) | undefined
  * @param engineError - the engine's own message, when it reported one.
  */
 export function statusDetail(phase: DSchatPhase, engineError?: string): string {
+  /*
+   * The fallbacks are the ENGLISH sentences, not the Chinese ones they used to
+   * be: this module can be read before the panel injects its translator (the
+   * tooltip is composed during a poll that may land first), and a Chinese
+   * fallback in an English UI is a leak the reader cannot do anything about.
+   * English is the neutral choice for a value that is only ever a stand-in.
+   */
   const tr = (key: string, fallback: string): string => translate?.(key) ?? fallback
+  const separator = translate?.('send.join') ?? '; '
   switch (phase) {
-    case 'launching': return tr('status.launching', '正在启动浏览器')
-    case 'need-login': return tr('status.needLogin', '未登录')
+    case 'launching': return tr('status.launching', 'Starting browser')
+    case 'need-login': return tr('status.needLogin', 'Not signed in')
     case 'error': {
-      const head = tr('status.error', '引擎错误')
-      return engineError === undefined ? head : `${head}：${engineError}`
+      const head = tr('status.error', 'Engine error')
+      return engineError === undefined ? head : `${head}${separator}${engineError}`
     }
-    case 'thinking': return tr('status.thinking', '正在思考')
-    case 'streaming': return tr('status.streaming', '正在输出')
-    case 'ready': return tr('status.ready', '已就绪')
-    default: return tr('status.stopped', '未启动')
+    case 'thinking': return tr('status.thinking', 'Thinking')
+    case 'streaming': return tr('status.streaming', 'Streaming')
+    case 'ready': return tr('status.ready', 'Ready')
+    default: return tr('status.stopped', 'Not started')
   }
 }
 

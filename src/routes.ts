@@ -2,9 +2,24 @@
  * The /api/dsh-dschat route family: engine state, browser login control,
  * chat operations (new chat / send / stop / switch model), transcript
  * export, and the harness transfer that seeds a new session with a web
- * transcript. Every route carries the same loopback-only trust fence the
- * dsh-ssh plugin uses — these endpoints drive a browser and create sessions,
- * so LAN-exposed deployments must not serve them.
+ * transcript.
+ *
+ * Trust fence, in three layers, because "loopback only" is not the whole answer
+ * for an endpoint that drives a browser:
+ *
+ *   1. LOOPBACK — the peer socket must be 127.0.0.1/::1 and the Host header must
+ *      name it. LAN-exposed deployments must not serve these routes at all.
+ *   2. METHOD + ORIGIN — a mutating route answers POST only, and a request that
+ *      carries an `Origin`/`Sec-Fetch-Site` naming another origin is refused.
+ *      Without this a page on ANY other local port could clear the whole
+ *      transcript store with `<img src="http://127.0.0.1:57531/api/dsh-dschat/clear">`
+ *      — no CORS needed, because a simple GET is enough to run the handler.
+ *   3. CSRF TOKEN — a per-run token the panel reads from `/state` and echoes in
+ *      `x-dschat-token`. Origin checks cover the browsers that send those
+ *      headers; the token is what covers the case where one does not.
+ *
+ * Read-only routes keep answering GET (the panel's polls are GETs) and carry
+ * layers 1 and 3 only, since a cross-site read cannot see the response.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -15,9 +30,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { DeepSeekWebEngine } from './engine/engine.ts'
 import type { TranscriptStore } from './store.ts'
-import type { DSchatTranscript } from './protocol.ts'
-import { exportTranscriptFile, transferToHarnessSession } from './transfer.ts'
+import type { DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
+import { exportTranscriptFile, previewHarnessTransfer, transferToHarnessSession } from './transfer.ts'
 import type { DistillConfig } from './transfer.ts'
+import { ATTACHMENT_DIR, SAFE_EXTENSION, attachmentDir, isInsideDirectory, isSameOrInsideDirectory } from './attachments.ts'
 
 /** Cap on JSON request bodies (chat ops are small). */
 const MAX_JSON_BODY_BYTES = 64 * 1024
@@ -46,9 +62,6 @@ const MAX_RESTORE_BODY_BYTES = 24 * 1024 * 1024
  * "图片数据为空或超过 9 MiB".
  */
 const MAX_ATTACHMENT_BODY_BYTES = 36 * 1024 * 1024
-
-/** Pasted files are copied here so the engine has a real path to upload. */
-const ATTACHMENT_DIR = 'attachments'
 
 /** Attachments older than this are pruned on the next upload. */
 const ATTACHMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -92,18 +105,6 @@ const MEDIA_EXTENSION: Record<string, string> = {
   'application/zip': '.zip',
   'application/gzip': '.gz',
 }
-
-/**
- * Extensions this route will write to disk when the media type says nothing.
- *
- * An allow-list rather than "whatever the caller put in the name": the name is
- * caller-controlled in principle (the route is loopback-only, but the file it
- * writes is handed straight to a browser's file input), and it is the only
- * thing stopping a nameless paste from landing as `.exe` or `.command`.
- * Everything here is plain text or a document the web page reads rather than
- * runs.
- */
-const SAFE_EXTENSION = /^\.(png|jpg|jpeg|webp|gif|bmp|tiff|heic|svg|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|md|markdown|csv|tsv|json|jsonl|log|xml|yaml|yml|htm|html|tex|rtf|srt|vtt|py|js|mjs|cjs|ts|tsx|jsx|java|c|h|cpp|hpp|cs|go|rs|rb|php|sh|sql|ini|toml|conf|cfg)$/
 
 /**
  * Pick a safe on-disk extension.
@@ -293,13 +294,69 @@ function pruneAttachments(dir: string, referenced: ReadonlySet<string>): void {
   }
 }
 
-/** Loopback-only trust fence (mirrors dsh-ssh). */
+/**
+ * Loopback-only trust fence (mirrors dsh-ssh), FAIL-CLOSED.
+ *
+ * The address test used to accept `undefined` as loopback. A socket whose
+ * `remoteAddress` the runtime has not filled in (a Unix-domain socket, a
+ * transport this code has not met) is not evidence of a local caller — it is
+ * missing evidence — and reading "unknown" as "trusted" is how the fence around
+ * a route that drives a browser and clears history becomes decoration.
+ */
 function isLoopbackRequest(req: IncomingMessage): boolean {
   const host = req.headers.host ?? ''
   const address = req.socket.remoteAddress ?? ''
   const loopbackHost = host.startsWith('127.0.0.1') || host.startsWith('localhost') || host.startsWith('[::1]')
-  const loopbackAddr = address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1' || address === undefined
+  const loopbackAddr = address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
   return loopbackHost && loopbackAddr
+}
+
+/** One header as a single string (`set-cookie`-style arrays are ignored). */
+function headerValue(req: IncomingMessage, name: string): string {
+  const value = req.headers[name]
+  return typeof value === 'string' ? value : ''
+}
+
+/** The request's method, upper-cased; an absent method counts as GET. */
+function methodOf(req: IncomingMessage): string {
+  return (req.method ?? 'GET').toUpperCase()
+}
+
+/**
+ * True when the request is not provably from ANOTHER origin.
+ *
+ * Two independent signals, both of which a browser sets and page script cannot
+ * forge:
+ *
+ *   - `Origin`, when present, must name this very server. It rides every
+ *     non-GET request a browser makes, including same-origin ones, so a page on
+ *     another local port (`http://127.0.0.1:8080` → same-site, different origin)
+ *     is refused here even though `Sec-Fetch-Site` would call it `same-site`.
+ *   - `Sec-Fetch-Site`, when present, must be `same-origin` or `none`; both
+ *     `cross-site` and the `same-site` another local port produces are refused.
+ *
+ * A caller that sends NEITHER header is not a document in a browser — it is a
+ * script, a test, or curl — and the loopback fence plus the CSRF token still
+ * apply to it.
+ */
+function isSameOriginRequest(req: IncomingMessage): boolean {
+  const origin = headerValue(req, 'origin')
+  /*
+   * Compare host[:port] only: the harness serves plain http, and the scheme a
+   * caller wrote does not change which server answered.
+   *
+   * `Origin: null` — a sandboxed iframe or a `file://` page — is treated as
+   * FOREIGN rather than as "no origin". It is not this server by construction,
+   * and the only legitimate caller (the panel) is served from this very origin,
+   * so it always sends a real one.
+   */
+  if (origin !== '') {
+    const withoutScheme = origin.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    if (withoutScheme !== (req.headers.host ?? '')) return false
+  }
+  const site = headerValue(req, 'sec-fetch-site')
+  if (site !== '' && site !== 'same-origin' && site !== 'none') return false
+  return true
 }
 
 /** One JSON response. */
@@ -307,6 +364,89 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' })
   res.end(payload)
+}
+
+/**
+ * Validate the message list a `/restore` caller hands over.
+ *
+ * 「撤销」 re-imports the conversation the panel still holds, so this body is
+ * written straight into the transcript file and is then read back by the panel,
+ * the export, `dschat_import` and `dschat_transfer` — i.e. it is a local write
+ * primitive whose output ends up in an agent's context. Treating it as
+ * "whatever the caller sent" is how one malformed record becomes a rendering
+ * crash or a permanently-streaming row, far from its cause.
+ *
+ * A record is kept only when it is UNAMBIGUOUSLY a message: a known role and a
+ * string body. Everything else is DROPPED and counted rather than repaired into
+ * a guess — but a single bad entry must not fail the whole undo, because the
+ * realistic bad case is one stale field on one of forty messages.
+ *
+ * @param value - the raw `messages` field.
+ */
+export function sanitizeRestoreMessages(value: unknown): { messages: DSchatMessage[]; dropped: number } {
+  if (!Array.isArray(value)) return { messages: [], dropped: 0 }
+  const messages: DSchatMessage[] = []
+  let dropped = 0
+  for (const entry of value) {
+    const message = sanitizeRestoreMessage(entry)
+    if (message === undefined) dropped += 1
+    else messages.push(message)
+  }
+  return { messages, dropped }
+}
+
+/** One validated message, or undefined when it is not one. */
+function sanitizeRestoreMessage(value: unknown): DSchatMessage | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const role = record['role']
+  if (role !== 'user' && role !== 'assistant') return undefined
+  const content = record['content']
+  if (typeof content !== 'string') return undefined
+  const id = typeof record['id'] === 'string' && record['id'] !== '' ? record['id'] : randomUUID()
+  const ts = typeof record['ts'] === 'number' && Number.isFinite(record['ts']) && record['ts'] > 0 ? record['ts'] : Date.now()
+  const error = typeof record['error'] === 'string' ? record['error'] : undefined
+  const thinkingMs = typeof record['thinkingMs'] === 'number' && Number.isFinite(record['thinkingMs']) && record['thinkingMs'] >= 0
+    ? record['thinkingMs']
+    : undefined
+  const attachments = stringList(record['attachments'])
+  const sources = sourceList(record['sources'])
+  return {
+    id,
+    role,
+    content,
+    ts,
+    /*
+     * ALWAYS false. A restored message is by definition not being generated:
+     * `streaming: true` on a row nobody is streaming leaves the panel's reply
+     * indicator running forever with no engine turn behind it.
+     */
+    streaming: false,
+    ...(error === undefined ? {} : { error }),
+    ...(thinkingMs === undefined ? {} : { thinkingMs }),
+    ...(attachments === undefined ? {} : { attachments }),
+    ...(sources === undefined ? {} : { sources }),
+  }
+}
+
+/** A list of non-empty strings, or undefined when there is nothing usable. */
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const kept = value.filter((item): item is string => typeof item === 'string' && item !== '')
+  return kept.length === 0 ? undefined : kept
+}
+
+/** A citation table, or undefined when there is nothing usable. */
+function sourceList(value: unknown): DSchatSource[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const kept: DSchatSource[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    if (typeof record['url'] !== 'string') continue
+    kept.push(typeof record['title'] === 'string' ? { url: record['url'], title: record['title'] } : { url: record['url'] })
+  }
+  return kept.length === 0 ? undefined : kept
 }
 
 /**
@@ -423,20 +563,74 @@ export interface DSchatRoutesDeps {
   hostContext?: () => HostContextView
 }
 
+/** Header the panel echoes the per-run CSRF token in. */
+const CSRF_HEADER = 'x-dschat-token'
+
+/** What a route does to the world, which decides how hard the fence is. */
+type RouteAccess = 'read' | 'write'
+
 /** Build every /api/dsh-dschat route. */
 export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
   const { ctx, engine, store, distill, hostContext, exportDir } = deps
 
-  const guard = (req: IncomingMessage, res: ServerResponse): boolean => {
-    if (isLoopbackRequest(req)) return true
-    writeJson(res, 403, { ok: false, error: 'loopback only' })
-    return false
+  /*
+   * One CSRF token per plugin run.
+   *
+   * The panel reads it from `/state` (or the tiny `/token` route) and echoes it
+   * in `x-dschat-token` on every mutating call. A cross-site page cannot read
+   * either response — there is no CORS grant here and the bodies are JSON, which
+   * a `<script src>` will not execute — so it cannot produce the header, and
+   * neither can an `<img>`/`<form>` trigger that never runs our JavaScript at
+   * all. Rotating per run (rather than persisting) means a token leaked by a log
+   * or a stale tab is worthless after a restart, and the client answers a 403
+   * `CSRF` by re-reading the token and retrying once, so a restart mid-session
+   * is invisible to the reader.
+   */
+  const csrfToken = randomUUID()
+
+  /**
+   * The three-layer fence; see the module header.
+   *
+   * @param access - 'write' for anything that changes state or drives the
+   *   browser, 'read' for the polls.
+   */
+  const guard = (req: IncomingMessage, res: ServerResponse, access: RouteAccess = 'read'): boolean => {
+    if (!isLoopbackRequest(req)) {
+      writeJson(res, 403, { ok: false, error: 'loopback only' })
+      return false
+    }
+    if (access === 'write') {
+      if (methodOf(req) !== 'POST') {
+        writeJson(res, 405, { ok: false, code: 'METHOD', error: '该操作只接受 POST 请求' })
+        return false
+      }
+      if (!isSameOriginRequest(req)) {
+        writeJson(res, 403, { ok: false, code: 'ORIGIN', error: '跨站请求被拒绝（Origin/Sec-Fetch-Site 不匹配）' })
+        return false
+      }
+      if (headerValue(req, CSRF_HEADER) !== csrfToken) {
+        writeJson(res, 403, { ok: false, code: 'CSRF', error: '缺少或无效的 CSRF 令牌，请刷新面板' })
+        return false
+      }
+      return true
+    }
+    const method = methodOf(req)
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+      writeJson(res, 405, { ok: false, code: 'METHOD', error: '该接口只接受 GET 请求' })
+      return false
+    }
+    return true
   }
 
   const stateView = async (): Promise<Record<string, unknown>> => {
     const status = await engine.status()
     return {
       ok: true,
+      /*
+       * The CSRF token rides /state because that is the panel's first call and
+       * it already happens on mount: no second handshake, no ordering problem.
+       */
+      csrfToken,
       engine: status.engine,
       engineError: status.engineError,
       loggedIn: status.loggedIn,
@@ -540,6 +734,22 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
     },
     {
       /**
+       * The CSRF token on its own.
+       *
+       * Exists so the client can re-arm after a host restart without paying for
+       * a whole `/state` (which reads the live page's toggle states and copies
+       * the entire transcript store). Read-only, like `/state`, and useless to a
+       * cross-site caller for the same reason: no CORS grant, JSON body.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/token',
+      handler: (req, res) => {
+        if (!guard(req, res)) return
+        writeJson(res, 200, { ok: true, csrfToken })
+      },
+    },
+    {
+      /**
        * The streaming feed.
        *
        * Deliberately answers WITHOUT calling `engine.status()`: that reads the
@@ -584,7 +794,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/wake',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const result = await engine.wake()
         writeJson(res, result.ok ? 200 : 500, result)
       },
@@ -593,7 +803,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/open-login',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const result = await engine.openLoginWindow()
         writeJson(res, result.ok ? 200 : 500, result)
       },
@@ -602,7 +812,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/close-browser',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         await engine.disposeBrowser()
         writeJson(res, 200, { ok: true })
       },
@@ -614,7 +824,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/restore',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req, MAX_RESTORE_BODY_BYTES)
         /*
          * An unreadable body is NOT "a conversation with no messages".
@@ -632,9 +842,14 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           })
           return
         }
-        const messages = Array.isArray(body['messages']) ? body['messages'] as DSchatTranscript['messages'] : []
-        if (messages.length === 0) {
-          writeJson(res, 400, { ok: false, error: '撤销失败：没有可恢复的消息。' })
+        const restored = sanitizeRestoreMessages(body['messages'])
+        if (restored.messages.length === 0) {
+          writeJson(res, 400, {
+            ok: false,
+            error: restored.dropped > 0
+              ? `撤销失败：${String(restored.dropped)} 条消息结构不合法，没有可恢复的内容。`
+              : '撤销失败：没有可恢复的消息。',
+          })
           return
         }
         // The web session id travels with the undo too, so the restored
@@ -645,9 +860,16 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           title: stringField(body, 'title') ?? '恢复的对话',
           model: stringField(body, 'model') ?? 'deepseek-chat',
           ...(webSessionId === undefined ? {} : { webSessionId }),
-          messages: [...messages],
+          messages: restored.messages,
         })
-        writeJson(res, 200, { ok: true, chatId: result.chat.id, created: result.created })
+        writeJson(res, 200, {
+          ok: true,
+          chatId: result.chat.id,
+          created: result.created,
+          // Reported so the panel can say "2 条记录已跳过" instead of silently
+          // dropping them.
+          ...(restored.dropped === 0 ? {} : { dropped: restored.dropped }),
+        })
       },
     },
     {
@@ -658,7 +880,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/attach',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req, MAX_ATTACHMENT_BODY_BYTES)
         const data = typeof body?.['data'] === 'string' ? body['data'] : ''
         if (data === '') {
@@ -758,7 +980,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/new-chat',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const result = await engine.newChat()
         writeJson(res, result.ok ? 200 : 500, result)
       },
@@ -767,7 +989,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/send',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const text = stringField(body, 'text')
         if (text === undefined) {
@@ -779,6 +1001,30 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const images = Array.isArray(body?.['images'])
           ? (body['images'] as unknown[]).filter(value => typeof value === 'string').map(value => value as string)
           : undefined
+        /*
+         * Containment at the HTTP boundary.
+         *
+         * The panel's flow is: drop a file → `/attach` writes it under
+         * `<dataDir>/attachments` → `/send` hands that path back. Nothing else
+         * legitimately reaches this route, so a path outside that directory is
+         * refused here rather than being pushed into the page's file input —
+         * which is what turned this route into "upload any readable file on the
+         * machine to the user's DeepSeek account". `dschat_send` is a different
+         * door with a documented "any local path" contract, so the engine's own
+         * checks (regular file, type, size, count) stay the only rule there.
+         */
+        if (images !== undefined && images.length > 0) {
+          const dir = attachmentDir(store.dataDir)
+          const outside = images.filter(path => !isInsideDirectory(dir, path))
+          if (outside.length > 0) {
+            writeJson(res, 403, {
+              ok: false,
+              code: 'PATH',
+              error: `附件路径不在附件目录内：${outside.slice(0, 3).join('、')}`,
+            })
+            return
+          }
+        }
         const result = await engine.send(text, false, images)
         writeJson(res, result.ok ? 200 : 500, result)
       },
@@ -787,7 +1033,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/stop',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         await engine.stop()
         writeJson(res, 200, { ok: true })
       },
@@ -796,7 +1042,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/deep-think',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const enabled = typeof body?.['enabled'] === 'boolean' ? body['enabled'] : undefined
         if (enabled === undefined) {
@@ -811,7 +1057,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/search',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const enabled = typeof body?.['enabled'] === 'boolean' ? body['enabled'] : undefined
         if (enabled === undefined) {
@@ -823,10 +1069,19 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       },
     },
     {
+      /**
+       * Build the hand-off text WITHOUT writing it.
+       *
+       * P0 trust fix: distillation is lossy and can fail silently, so the panel
+       * shows the bytes here, lets the reader edit them, and only then calls
+       * `/transfer` with the confirmed text. Resolving the destination happens
+       * here too, so a bad workspace/target session is reported before the
+       * expensive part.
+       */
       kind: 'exact',
-      path: '/api/dsh-dschat/transfer',
+      path: '/api/dsh-dschat/transfer-preview',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const chatId = stringField(body, 'chatId') ?? store.activeChat()?.id
         const cwd = stringField(body, 'cwd')
@@ -840,7 +1095,45 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         }
         try {
           const workspace = workspaceId === undefined ? undefined : { workspaceId }
-          const { sessionId, distilled, attached, workspaceId: attachedWorkspaceId, duplicate } = await transferToHarnessSession(ctx, { transcript, cwd, workspace, targetSessionId }, distill, mode)
+          const draft = await previewHarnessTransfer(ctx, { transcript, cwd, workspace, targetSessionId }, distill, mode)
+          writeJson(res, 200, { ok: true, ...draft })
+        } catch (error) {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-dschat/transfer',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const chatId = stringField(body, 'chatId') ?? store.activeChat()?.id
+        const cwd = stringField(body, 'cwd')
+        const workspaceId = stringField(body, 'workspaceId')
+        const targetSessionId = stringField(body, 'targetSessionId')
+        const mode = body?.['mode'] === 'raw' ? 'raw' : body?.['mode'] === 'distill' ? 'distill' : undefined
+        /*
+         * The confirmed preview, when there was one. It is passed through
+         * verbatim (see `seedMarkdown`): the reader may have edited it, and
+         * distilling again would both discard that and pay for the model calls
+         * twice.
+         */
+        const seedMarkdown = stringField(body, 'markdown')
+        const transcript: DSchatTranscript | undefined = chatId === undefined ? undefined : store.getChat(chatId)
+        if (transcript === undefined) {
+          writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
+          return
+        }
+        try {
+          const workspace = workspaceId === undefined ? undefined : { workspaceId }
+          const { sessionId, distilled, attached, workspaceId: attachedWorkspaceId, duplicate } = await transferToHarnessSession(ctx, {
+            transcript,
+            cwd,
+            workspace,
+            targetSessionId,
+            ...(seedMarkdown === undefined ? {} : { seedMarkdown, seedDistilled: body?.['distilled'] === true }),
+          }, distill, mode)
           writeJson(res, 200, {
             ok: true,
             sessionId,
@@ -861,7 +1154,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/export',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const chatId = stringField(body, 'chatId') ?? store.activeChat()?.id
         /*
@@ -871,11 +1164,26 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
          * harness session — which meant 「导出 markdown」 dropped the file into
          * whatever project happened to be open, a place the reader had no
          * reason to look. The default is now the download folder (see
-         * `resolveExportDir`), and `cwd` is still honoured when a caller sends
-         * one explicitly (the settings page's own "open folder" test, and any
-         * script that wants the file next to its data).
+         * `resolveExportDir`), and an explicit `cwd` is still honoured — but
+         * only WITHIN the configured export directory.
+         *
+         * The parameter used to accept any absolute path at all, which made
+         * "write a file wherever I say" a feature of a route whose trust fence
+         * is a loopback check. Keeping the caller's choice (a script can still
+         * pick a subfolder, the settings page can probe its own folder) while
+         * bounding where it can land costs the legitimate uses nothing.
          */
-        const cwd = stringField(body, 'cwd') ?? exportDir()
+        const allowedDir = resolve(exportDir())
+        const requestedDir = stringField(body, 'cwd')
+        if (requestedDir !== undefined && !isSameOrInsideDirectory(allowedDir, requestedDir)) {
+          writeJson(res, 403, {
+            ok: false,
+            code: 'PATH',
+            error: `导出目录必须在 ${allowedDir} 内（可在插件配置的 exportDir 中修改）`,
+          })
+          return
+        }
+        const cwd = requestedDir ?? allowedDir
         const transcript: DSchatTranscript | undefined = chatId === undefined ? undefined : store.getChat(chatId)
         if (transcript === undefined) {
           writeJson(res, 404, { ok: false, error: '找不到该对话记录' })
@@ -910,7 +1218,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/recover',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const title = stringField(body, 'title')
         const sessionId = stringField(body, 'sessionId')
@@ -942,7 +1250,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/rename',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const chatId = stringField(body, 'chatId')
         const title = stringField(body, 'title')
@@ -959,7 +1267,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/delete',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const body = await readJsonBody(req)
         const chatId = stringField(body, 'chatId')
         if (chatId === undefined) {
@@ -975,7 +1283,7 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       kind: 'exact',
       path: '/api/dsh-dschat/clear',
       handler: async (req, res) => {
-        if (!guard(req, res)) return
+        if (!guard(req, res, 'write')) return
         const count = store.clearAllChats()
         writeJson(res, 200, { ok: true, count })
       },

@@ -88,7 +88,7 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
     switch (phase) {
       case 'launching': return tr('status.launching')
       case 'need-login': return tr('status.needLogin')
-      case 'error': return `${tr('status.error')}${state?.engineError !== undefined ? `：${state.engineError}` : ''}`
+      case 'error': return `${tr('status.error')}${state?.engineError !== undefined ? `${tr('send.join')}${state.engineError}` : ''}`
       case 'thinking': return tr('status.thinking')
       case 'streaming': return tr('status.streaming')
       case 'ready': return tr('status.ready')
@@ -139,9 +139,9 @@ export function DSchatStatus(props: DSchatStatusProps): ReactNode {
       settings === null
         ? createElement('p', { className: 'dsh-dschat-hintline' }, failed ?? tr('settings.loading'))
         : createElement('div', null,
-            row(tr('settings.channel'), settings.browserChannel === '' ? 'auto' : settings.browserChannel),
+            row(tr('settings.channel'), settings.browserChannel === '' ? tr('settings.auto') : settings.browserChannel),
             row(tr('settings.headless'), yesNo(settings.browserHeadless)),
-            row(tr('settings.proxy'), settings.browserProxy === '' ? 'direct' : settings.browserProxy),
+            row(tr('settings.proxy'), settings.browserProxy === '' ? tr('settings.direct') : settings.browserProxy),
             row(tr('settings.timeout'), `${Math.round(settings.replyTimeoutMs / 1000)}s`),
             row(tr('settings.executable'), settings.browserExecutablePath === '' ? tr('settings.auto') : settings.browserExecutablePath, true),
             row(tr('settings.dataDir'), settings.dataDir, true),

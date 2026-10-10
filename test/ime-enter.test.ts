@@ -164,9 +164,11 @@ test('the mounted panel neither sends on an IME Enter nor keeps the box at two l
       Math.round(document.querySelector('.dsh-dschat-input').getBoundingClientRect().height))
 
     // The empty box is its min-height, and a long draft grows it past two lines
-    // while staying inside the cap.
+    // while staying inside the cap. The min-height came down from 52px in the
+    // v0.5 composer pass, which put every control on a 30px baseline and closed
+    // the card up around its contents.
     const emptyHeight = await composerHeight()
-    assert.ok(emptyHeight >= 50 && emptyHeight <= 56, `an empty composer is ~52px tall, measured ${emptyHeight}`)
+    assert.ok(emptyHeight >= 44 && emptyHeight <= 50, `an empty composer is ~46px tall, measured ${emptyHeight}`)
 
     await view.locator('.dsh-dschat-input').fill(Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join('\n'))
     await view.waitForTimeout(150)

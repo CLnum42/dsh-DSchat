@@ -22,6 +22,23 @@ export interface TranscriptStoreOptions {
   dataDir?: string
 }
 
+/** What one store import (`importTranscript`) produced. */
+export interface ImportResult {
+  readonly chat: DSchatTranscript
+  /** True when the conversation had no local transcript before. */
+  readonly created: boolean
+  /** True when an existing transcript changed at all (see {@link HistoryMerge}). */
+  readonly updated: boolean
+  /** Messages the transcript gained. */
+  readonly added: number
+  /** Stored messages completed from a longer web copy. */
+  readonly completed: number
+  /** Stored messages whose text the web copy replaced (edit / regeneration). */
+  readonly replaced: number
+  /** Stored messages the web copy does not have (kept). */
+  readonly kept: number
+}
+
 interface StoreFile {
   version: 1
   activeChatId?: string
@@ -39,6 +56,255 @@ interface StoreFile {
  * moment a turn ends.
  */
 export const PERSIST_DEBOUNCE_MS = 1_000
+
+/**
+ * The shortest text that may be accepted as a PARTIAL copy of another (chars).
+ *
+ * Below this, "one is a prefix of the other" stops identifying anything: 「回答
+ * 2」 is a prefix of 「回答 29」, and 「继续」 is a prefix of 「继续吧」 — pairing
+ * those would silently graft one turn's id onto another turn's text. Twelve
+ * characters is comfortably past the shortest thing a reader types twice by
+ * accident while still covering a truncated Chinese sentence.
+ */
+const MIN_PARTIAL_CHARS = 12
+
+/**
+ * A message's text reduced to what two copies of it must agree on.
+ *
+ * A recovered copy and a stored copy of the SAME message are not byte-equal:
+ * the reasoning block is inline `<details>` markup that the DOM scraper and the
+ * history endpoint reproduce differently, citation markers are renumbered per
+ * render, and the page's HTML round-trip rearranges whitespace. Comparing the
+ * raw strings therefore finds no overlap at all in exactly the case this
+ * matters for — an old, truncated local copy of a conversation being re-synced.
+ *
+ * @param content - stored markdown.
+ */
+export function contentKey(content: string): string {
+  return content
+    // The reasoning block, closed… (`<details>` is how the panel stores it.)
+    .replace(/<details[\s\S]*?<\/details>/gi, ' ')
+    // …or still open, which is what a reply stored mid-thought looks like.
+    .replace(/<details[\s\S]*$/i, ' ')
+    .replace(/\[citation:\s*\d+\]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** True when two message texts are the same message, or one is a short copy of it. */
+function sameText(left: string, right: string): boolean {
+  const a = contentKey(left)
+  const b = contentKey(right)
+  if (a === b) return true
+  if (a === '' || b === '') return false
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a]
+  return short.length >= MIN_PARTIAL_CHARS && long.startsWith(short)
+}
+
+/** What one re-sync did to a stored transcript. */
+export interface HistoryMerge {
+  /** The transcript to keep: the stored messages, plus what was missing. */
+  readonly messages: DSchatMessage[]
+  /** Messages the store did not have at all (appended from the web copy). */
+  readonly added: number
+  /** Stored messages the web wrote out in full (a truncated local copy, completed). */
+  readonly completed: number
+  /** Stored messages whose text the web changed (an edit or a regeneration). */
+  readonly replaced: number
+  /** Stored messages the web copy does not contain at all (kept, never dropped). */
+  readonly kept: number
+  /** True when the result differs from what was stored. */
+  readonly changed: boolean
+}
+
+/**
+ * Keep the stored IDENTITY of every message the web copy also has.
+ *
+ * A re-sync used to replace `chat.messages` wholesale, which was wrong in a way
+ * that shows: an id is the panel's handle on a row (the hover toolbar, the tail
+ * delta, the search landing mark, and the `data-message-id` the anchor and the
+ * question navigator scroll to), a timestamp is the reader's sense of when they
+ * asked, and `thinkingMs` / `attachments` are facts measured or chosen LOCALLY
+ * that the web copy simply does not carry. All of them were thrown away on
+ * every sync, and the reader's own conversation re-rendered as a stranger's.
+ *
+ * So the stored list is the spine and the web copy is the news:
+ *
+ *   · a message both sides have keeps its id, ts and local extras — and is
+ *     COMPLETED in place when the stored text is a truncated copy of the web's
+ *     (the old DOM scraper stored whatever had rendered);
+ *   · a message only the web has is appended (the sync's whole point);
+ *   · a message only the store has is KEPT — it is a local record of something
+ *     the web no longer shows, and deleting the reader's history is not this
+ *     function's call to make.
+ *
+ * Alignment is by content, not by position: messages are matched in order on
+ * their {@link contentKey}, which is what makes the two copies of a conversation
+ * line up even when one of them is missing its first 28 turns. A stretch that
+ * matches nothing on either side (an edit or a regeneration) is settled in
+ * place, web text over local, so a regenerated answer does not appear twice.
+ *
+ * When NOTHING matches at all the two copies share no evidence of identity, and
+ * the old rule applies: the longer list wins, because a sync may only ever grow
+ * a transcript. Nothing is inferred from position in that case — pairing 2
+ * stored messages with 2 of 30 unrelated ones would invent turns.
+ *
+ * @param existing - the stored messages, in order.
+ * @param incoming - the freshly recovered messages, in order.
+ */
+export function mergeHistory(existing: readonly DSchatMessage[], incoming: readonly DSchatMessage[]): HistoryMerge {
+  if (existing.length === 0) {
+    return { messages: [...incoming], added: incoming.length, completed: 0, replaced: 0, kept: 0, changed: incoming.length > 0 }
+  }
+  if (incoming.length === 0) {
+    return { messages: [...existing], added: 0, completed: 0, replaced: 0, kept: existing.length, changed: false }
+  }
+
+  /*
+   * The anchors: every incoming message that matches a stored one, taken in
+   * order. Greedy is enough and is deterministic — the page gives one copy of a
+   * conversation, so a message matches at most a handful of candidates and the
+   * earliest unused one is the right one.
+   */
+  const anchors: Array<{ incoming: number; stored: number }> = []
+  let cursor = 0
+  for (let i = 0; i < incoming.length; i += 1) {
+    for (let j = cursor; j < existing.length; j += 1) {
+      const next = incoming[i]
+      const current = existing[j]
+      if (next === undefined || current === undefined) continue
+      if (next.role !== current.role) continue
+      if (!sameText(current.content, next.content)) continue
+      anchors.push({ incoming: i, stored: j })
+      cursor = j + 1
+      break
+    }
+  }
+  if (anchors.length === 0) {
+    const grow = incoming.length >= existing.length
+    return grow
+      ? { messages: [...incoming], added: incoming.length, completed: 0, replaced: 0, kept: 0, changed: true }
+      : { messages: [...existing], added: 0, completed: 0, replaced: 0, kept: existing.length, changed: false }
+  }
+
+  const messages: DSchatMessage[] = []
+  let added = 0
+  let completed = 0
+  let replaced = 0
+  let kept = 0
+
+  /**
+   * Settle the stretch between two anchors.
+   *
+   * Equal lengths with matching roles mean the two copies are describing the
+   * same TURNS, and a stretch like that is settled in place: the web text wins
+   * where it differs, the stored id stays, and the answer does not appear twice.
+   * That is what a regenerated reply looks like — the question is unchanged and
+   * is therefore an anchor of its own, leaving a stretch of ASSISTANT messages
+   * that share nothing.
+   *
+   * Length plus role alone was NOT enough, and the case it got wrong was
+   * invisible: a turn that exists only locally (the reader asked it here and the
+   * web never stored it) sits in the same SLOT as an unrelated web turn, so the
+   * two stretches pair up one-for-one and the local text is overwritten while
+   * keeping its own id. The reader's own words were gone, and nothing on screen
+   * said so — the exact opposite of this function's promise that a sync may only
+   * ever grow a transcript.
+   *
+   * So a stretch counts as "the same turns, revised" only when every USER
+   * message in it is recognisably the same message ({@link sameText}). The user
+   * half of a turn is what a reader typed and recognises: an answer can be
+   * regenerated into something unrecognisable, a question cannot be replaced
+   * without losing what was asked. When a question does not match, the stretch
+   * is settled as one-sided on BOTH sides — the store's copy first, then the
+   * web's — which is the honest reading and never drops text.
+   */
+  const gap = (stored: readonly DSchatMessage[], fresh: readonly DSchatMessage[]): void => {
+    const aligned = stored.length === fresh.length
+      && stored.every((message, index) => message.role === fresh[index]?.role)
+    const sameQuestions = aligned && stored.every((message, index) => {
+      if (message.role !== 'user') return true
+      const next = fresh[index]
+      return next !== undefined && sameText(message.content, next.content)
+    })
+    if (aligned && sameQuestions) {
+      stored.forEach((message, index) => {
+        const next = fresh[index]
+        if (next === undefined) return
+        messages.push(withLocalIdentity(message, next))
+        replaced += 1
+      })
+      return
+    }
+    for (const message of stored) {
+      messages.push(message)
+      kept += 1
+    }
+    for (const message of fresh) {
+      messages.push(message)
+      added += 1
+    }
+  }
+
+  let storedAt = 0
+  let incomingAt = 0
+  for (const anchor of anchors) {
+    gap(existing.slice(storedAt, anchor.stored), incoming.slice(incomingAt, anchor.incoming))
+    const stored = existing[anchor.stored]
+    const next = incoming[anchor.incoming]
+    if (stored !== undefined && next !== undefined) {
+      messages.push(withLocalIdentity(stored, next))
+      const before = contentKey(stored.content)
+      const after = contentKey(next.content)
+      if (before !== after && before.length > 0 && (after.startsWith(before) || before.startsWith(after))) completed += 1
+    }
+    storedAt = anchor.stored + 1
+    incomingAt = anchor.incoming + 1
+  }
+  gap(existing.slice(storedAt), incoming.slice(incomingAt))
+
+  const changed = messages.length !== existing.length
+    || messages.some((message, index) => message !== existing[index])
+  return { messages, added, completed, replaced, kept, changed }
+}
+
+/**
+ * The stored message, wearing the web copy's text.
+ *
+ * Everything the reader already has a handle on survives: the id (the panel
+ * keys rows by it), the timestamp (their own record of when they asked),
+ * `thinkingMs` (measured locally), `attachments` (chosen locally — the web copy
+ * carries no paths) and any `error` the panel recorded. The web copy supplies
+ * the text, whether it is still streaming, and the citations it resolved.
+ *
+ * @param stored - the message already in the transcript.
+ * @param incoming - the same message as the web copy has it.
+ */
+function withLocalIdentity(stored: DSchatMessage, incoming: DSchatMessage): DSchatMessage {
+  const sameContent = contentKey(stored.content) === contentKey(incoming.content)
+  // A truncated local copy is completed; an identical one is left alone, so a
+  // re-sync that finds nothing new does not rewrite a single byte.
+  const content = sameContent ? stored.content : incoming.content
+  const sources = incoming.sources === undefined ? stored.sources : incoming.sources
+  const error = incoming.error === undefined ? stored.error : incoming.error
+  /*
+   * The very same object comes back when nothing about the message changed.
+   * That is not an optimisation: `importTranscript` reports "changed" by
+   * identity, and the store's own persist is armed by that flag — a sync that
+   * found nothing new must leave the file (and every row the panel keys by
+   * reference) exactly as it was.
+   */
+  if (content === stored.content && sources === stored.sources && error === stored.error && incoming.streaming === stored.streaming) {
+    return stored
+  }
+  return {
+    ...stored,
+    content,
+    streaming: incoming.streaming,
+    ...(sources === undefined ? {} : { sources }),
+    ...(error === undefined ? {} : { error }),
+  }
+}
 
 /**
  * Make every message in ONE conversation carry its own id.
@@ -311,7 +577,7 @@ export class TranscriptStore {
 
   /**
    * Import (or refresh) a recovered web conversation. Returns the chat, plus
-   * whether it was created and whether an existing one was overwritten.
+   * whether it was created and what the sync changed.
    *
    * Matching is by web session id first and exact title second. The title-only
    * dedup this replaces made re-syncing "idempotent" in the worst way: an
@@ -319,8 +585,11 @@ export class TranscriptStore {
    * virtual list had mounted) could never be repaired, because the second
    * recover matched the title and returned the short transcript unchanged.
    *
-   * An existing transcript is only ever UPGRADED — a recover that comes back
-   * with fewer bytes never truncates what is already stored.
+   * A refresh is now a MERGE, not a replacement — see {@link mergeHistory}. The
+   * messages the store already had keep their ids, timestamps and local extras,
+   * the ones it was missing are appended, and a truncated copy is completed in
+   * place. A recover that comes back with fewer bytes still never truncates what
+   * is already stored.
    */
   importTranscript(input: {
     title: string
@@ -340,7 +609,7 @@ export class TranscriptStore {
      * onto an unrelated conversation.
      */
     matchByTitle?: boolean
-  }): { chat: DSchatTranscript; created: boolean; updated: boolean } {
+  }): ImportResult {
     const cleanTitle = input.title.trim().replace(/\s+/g, ' ').slice(0, 80) || DEFAULT_CHAT_TITLE
     /*
      * Import is the one door foreign ids come through: a caller hands over a
@@ -358,17 +627,25 @@ export class TranscriptStore {
         existing.webSessionId = input.webSessionId
         changed = true
       }
-      const updated = this.isFuller(incoming, existing.messages)
-      if (updated) {
-        existing.messages = incoming
+      const merged = mergeHistory(existing.messages, incoming)
+      if (merged.changed) {
+        existing.messages = merged.messages
         existing.updatedAt = Date.now()
         changed = true
       }
       // The id adoption must be persisted even when the history itself was not
-      // replaced, or the sidebar keeps offering a conversation that is already
+      // touched, or the sidebar keeps offering a conversation that is already
       // imported.
       if (changed) this.persist()
-      return { chat: existing, created: false, updated }
+      return {
+        chat: existing,
+        created: false,
+        updated: merged.changed,
+        added: merged.added,
+        completed: merged.completed,
+        replaced: merged.replaced,
+        kept: merged.kept,
+      }
     }
     const now = Date.now()
     const chat: DSchatTranscript = {
@@ -384,7 +661,7 @@ export class TranscriptStore {
     this.chats.unshift(chat)
     this.activeChatId = chat.id
     this.persist()
-    return { chat, created: true, updated: false }
+    return { chat, created: true, updated: false, added: incoming.length, completed: 0, replaced: 0, kept: 0 }
   }
 
   /**
@@ -403,19 +680,6 @@ export class TranscriptStore {
     }
     if (!matchByTitle || title === DEFAULT_CHAT_TITLE) return undefined
     return this.chats.find(chat => chat.title === title && chat.webSessionId === undefined)
-  }
-
-  /**
-   * True when the incoming history carries more than what is stored.
-   * Message count decides first (a 2-message import of a 32-message
-   * conversation is the failure being repaired); equal counts need a real size
-   * increase so a re-recover with identical content does not churn the file.
-   */
-  private isFuller(next: DSchatMessage[], current: DSchatMessage[]): boolean {
-    if (current.length === 0) return next.length > 0
-    if (next.length !== current.length) return next.length > current.length
-    const size = (messages: DSchatMessage[]): number => messages.reduce((total, message) => total + message.content.length, 0)
-    return size(next) > size(current)
   }
 
   /** Web session ids already imported (so the sidebar can mark the rest). */

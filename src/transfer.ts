@@ -31,15 +31,43 @@ import type { LlmRuntime, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { Workspace, WorkspaceId, WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
+import { answerBody } from './protocol.ts'
 import type { TransferMode, DSchatMessage, DSchatSource, DSchatTranscript } from './protocol.ts'
 
 /** Role label used in rendered transcripts. */
 const ROLE_LABEL: Record<'user' | 'assistant', string> = { user: '用户', assistant: 'DeepSeek（网页端）' }
 
-/** Remove the collapsible R1 reasoning block(s) from reply markdown. */
+/**
+ * Remove the collapsible R1 reasoning block(s) from reply markdown.
+ *
+ * Delegates to the SHARED splitter (protocol.ts), the same one the panel uses to
+ * decide where a reply's answer begins: two implementations of that boundary
+ * would eventually disagree, and the harness session would read a different
+ * reply than the panel showed.
+ *
+ * @param markdown - the stored message body.
+ */
 function stripThinking(markdown: string): string {
+  return answerBody(markdown).replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/**
+ * Drop the web page's citation markers from a reply.
+ *
+ * `[citation:N]` (and the raw `[reference:N]` older conversations persist) is a
+ * pointer into the reply's SOURCE TABLE — the pages the web search returned.
+ * A handoff carries the conversation, not the page the model rested on: with the
+ * table gone the numbers are dead weight mid-sentence, and with the table kept
+ * the brief would carry URLs the coding agent has no use for and no way to
+ * number consistently. Both spellings go, here, so EVERY surface that renders a
+ * transcript for consumption is free of them.
+ *
+ * @param markdown - reply text.
+ */
+function stripCitations(markdown: string): string {
   return markdown
-    .replace(/<details>\s*<summary>.*?<\/summary>[\s\S]*?<\/details>/g, '')
+    // The markers sit mid-sentence; without this a double space is left behind.
+    .replace(/\s*\[(?:citation|reference):\d+\]/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
@@ -73,13 +101,39 @@ function sourceFootnote(sources: readonly DSchatSource[] | undefined): string[] 
   return ['', `> 参考来源：${entries.join(' · ')}`]
 }
 
+/**
+ * How a transcript is rendered for its reader.
+ *
+ * The defaults are the ones a HANDOFF needs, because that is the path every
+ * caller cares about: the reasoning is dropped (it is the model's scratchpad,
+ * including the pages its search browsed), and so are the citation table and its
+ * markers — a harness session gets the conversation between the user and the
+ * model, and nothing about the web page it happened on.
+ *
+ * `sources: true` is for the markdown a PERSON reads (导出 markdown): there the
+ * footnote is the point, since the reader can open the page it names.
+ */
+export interface RenderOptions {
+  /** Drop the R1 reasoning block (default false — keep what the transcript holds). */
+  excludeThinking?: boolean
+  /**
+   * Keep the citation table and its `[citation:N]` markers (default false).
+   *
+   * Off is the handoff behaviour described above; on is for reader-facing
+   * markdown exports.
+   */
+  sources?: boolean
+}
+
 /** Render the message list of a transcript (no header) to markdown. */
-export function renderMessagesMarkdown(messages: DSchatMessage[], options?: { excludeThinking?: boolean }): string {
+export function renderMessagesMarkdown(messages: DSchatMessage[], options?: RenderOptions): string {
   const excludeThinking = options?.excludeThinking ?? false
+  const keepSources = options?.sources ?? false
   const lines: string[] = []
   for (const message of messages) {
     if (message.role === 'assistant' && message.streaming) continue
-    const content = (excludeThinking ? stripThinking(message.content) : message.content).trim()
+    let content = (excludeThinking ? stripThinking(message.content) : message.content).trim()
+    if (!keepSources) content = stripCitations(content)
     lines.push(`## ${ROLE_LABEL[message.role]}`)
     lines.push('')
     lines.push(content === '' ? '（无内容）' : content)
@@ -87,7 +141,7 @@ export function renderMessagesMarkdown(messages: DSchatMessage[], options?: { ex
       lines.push('')
       lines.push(`> 📎 图片附件：${message.attachments.join('、')}`)
     }
-    lines.push(...sourceFootnote(message.sources))
+    if (keepSources) lines.push(...sourceFootnote(message.sources))
     if (message.error !== undefined) {
       lines.push('')
       lines.push(`> ⚠️ 该条回复可能不完整：${message.error}`)
@@ -98,7 +152,7 @@ export function renderMessagesMarkdown(messages: DSchatMessage[], options?: { ex
 }
 
 /** Render one transcript to markdown for harness consumption. */
-export function renderTranscriptMarkdown(transcript: DSchatTranscript, options?: { excludeThinking?: boolean }): string {
+export function renderTranscriptMarkdown(transcript: DSchatTranscript, options?: RenderOptions): string {
   const lines: string[] = []
   lines.push(`# 网页端对话记录：${transcript.title}`)
   lines.push('')
@@ -358,13 +412,13 @@ export async function distillTranscriptToBrief(ctx: Context, transcript: DSchatT
   let source: string
   if (chunks.length <= 1) {
     // Single shot: distill the whole transcript directly.
-    source = `${DISTILL_INSTRUCTION}\n\n--- 网页对话记录 ---\n\n${renderTranscriptMarkdown(transcript, { excludeThinking: true })}`
+    source = `${DISTILL_INSTRUCTION}\n\n--- 网页对话记录 ---\n\n${renderTranscriptMarkdown(transcript, { excludeThinking: true, sources: false })}`
   } else {
     // Map: summarize each chunk; a failed map falls back to a truncated raw
     // excerpt so no information is silently dropped.
     const summaries: string[] = []
     for (let i = 0; i < chunks.length; i++) {
-      const chunkMarkdown = renderMessagesMarkdown(chunks[i], { excludeThinking: true })
+      const chunkMarkdown = renderMessagesMarkdown(chunks[i], { excludeThinking: true, sources: false })
       const summary = await runDistillCall(
         llm,
         target,
@@ -470,6 +524,16 @@ export interface TransferToSessionInput {
    * message to that session rather than seeding a new session.
    */
   targetSessionId?: string
+  /**
+   * The exact seed text to write, from a confirmed preview.
+   *
+   * When set, distillation is skipped entirely: the caller is handing over
+   * bytes a human has already read (and may have edited). Absent on every path
+   * that has not previewed, which keeps the old behaviour.
+   */
+  seedMarkdown?: string
+  /** True when `seedMarkdown` came from a successful distillation. */
+  seedDistilled?: boolean
 }
 
 /** Resolved transfer destination: the session cwd plus an optional owning workspace. */
@@ -750,6 +814,93 @@ function sessionContainsProvenance(events: readonly SessionEvent[], marker: stri
 }
 
 /**
+ * What a transfer is about to write, before anything is written.
+ *
+ * The hand-off used to be invisible until it had happened: the panel picked a
+ * mode, the host distilled (or silently failed to and replayed the raw log
+ * instead), and a session appeared. Since distillation is LOSSY — it drops the
+ * whole reasoning chain and every source link — "which of the two did I just
+ * get?" is not a detail the reader can be left to infer from a success toast.
+ * This is the draft both the preview and the write are built from, so what is
+ * shown is byte-for-byte what will be written.
+ */
+export interface HandoffDraft {
+  /** The exact text that becomes the session's first user message. */
+  markdown: string
+  /** True when an LLM brief was produced. */
+  distilled: boolean
+  /** The mode actually used (after the config default was applied). */
+  mode: TransferMode
+  /** True when distillation was asked for but could not run. */
+  fallback: boolean
+  /** Why not, in the reader's terms — set only when `fallback`. */
+  fallbackReason?: string
+  /** Provider/model that produced the brief, when distilled. */
+  provider?: string
+  model?: string
+}
+
+/**
+ * Build the hand-off text: preamble, body (brief or raw transcript), provenance.
+ *
+ * Extracted so the preview and the write cannot drift: the panel shows this
+ * function's output and then hands the SAME string back to be written.
+ */
+export async function buildHandoffDraft(ctx: Context, transcript: DSchatTranscript, config: DistillConfig, mode?: TransferMode): Promise<HandoffDraft> {
+  const shouldDistill = mode === 'distill' ? true : mode === 'raw' ? false : config.distill
+  const rawMarkdown = renderTranscriptMarkdown(transcript, { excludeThinking: true, sources: false })
+  let body = rawMarkdown
+  let distilled = false
+  let provider: string | undefined
+  let model: string | undefined
+  let fallbackReason: string | undefined
+  if (shouldDistill) {
+    const result = await distillTranscriptToBrief(ctx, transcript, config)
+    if (result === undefined) {
+      fallbackReason = '蒸馏不可用（LLM 服务、提供方或模型不可用，或调用未正常结束），本次改用原文迁移'
+    } else {
+      body = `${result.brief}\n\n> （已由 ${result.provider}/${result.model} 从网页对话蒸馏生成）`
+      distilled = true
+      provider = result.provider
+      model = result.model
+    }
+  }
+  /*
+   * The provenance line goes last so it stays the handoff's footer, and it is
+   * added in BOTH modes: it is what makes a repeat append recognisable (see
+   * appendThroughHandle) and what tells the resumed agent where the brief came
+   * from. Its mode is the REQUESTED one, not the achieved one: the fingerprint
+   * is the dedupe key, and a re-run of "distill this conversation" that fell
+   * back once and succeeded the next time must still be recognised as the same
+   * hand-off rather than appended a second time.
+   */
+  const markdown = `${HANDOFF_PREAMBLE}\n\n${body}\n\n${handoffProvenance(transcript, shouldDistill ? 'distill' : 'raw')}`
+  return {
+    markdown,
+    distilled,
+    mode: shouldDistill ? 'distill' : 'raw',
+    fallback: shouldDistill && !distilled,
+    ...(fallbackReason === undefined ? {} : { fallbackReason }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
+  }
+}
+
+/**
+ * Resolve the destination and build the hand-off WITHOUT writing anything.
+ *
+ * The destination is resolved first for the same reason `transferToHarnessSession`
+ * does it: a typo'd workspace or a session a live agent still owns should cost
+ * nothing, not a full distillation.
+ */
+export async function previewHarnessTransfer(ctx: Context, input: TransferToSessionInput, config: DistillConfig, mode?: TransferMode): Promise<HandoffDraft> {
+  const continueId = input.targetSessionId !== undefined && input.targetSessionId !== '' ? input.targetSessionId : undefined
+  if (continueId === undefined) await resolveTransferTarget(ctx, input)
+  else await assertAppendable(ctx, continueId)
+  return buildHandoffDraft(ctx, input.transcript, config, mode)
+}
+
+/**
  * Create a new COLD harness session seeded with a distilled task brief (or the
  * raw transcript when the user chooses 'raw' / distillation is unavailable),
  * written straight through the session-persistence backend so the GUI lists it
@@ -759,11 +910,11 @@ function sessionContainsProvenance(events: readonly SessionEvent[], marker: stri
  * the GUI groups it under that workspace instead of "ungrouped".
  *
  * `mode` is the user's explicit choice; when undefined the plugin config
- * default (`transferDistill`) applies.
+ * default (`transferDistill`) applies. When `input.seedMarkdown` is set — the
+ * panel/agent confirmed a preview — those exact bytes are written and no
+ * distillation runs.
  */
 export async function transferToHarnessSession(ctx: Context, input: TransferToSessionInput, config: DistillConfig, mode?: TransferMode): Promise<TransferToSessionResult> {
-  const rawMarkdown = renderTranscriptMarkdown(input.transcript, { excludeThinking: true })
-
   const continueId = input.targetSessionId !== undefined && input.targetSessionId !== '' ? input.targetSessionId : undefined
 
   /*
@@ -782,22 +933,22 @@ export async function transferToHarnessSession(ctx: Context, input: TransferToSe
     await assertAppendable(ctx, continueId)
   }
 
-  const shouldDistill = mode === 'distill' ? true : mode === 'raw' ? false : config.distill
-  let seedMarkdown = `${HANDOFF_PREAMBLE}\n\n${rawMarkdown}`
-  let distilled = false
-  if (shouldDistill) {
-    const result = await distillTranscriptToBrief(ctx, input.transcript, config)
-    if (result !== undefined) {
-      seedMarkdown = `${HANDOFF_PREAMBLE}\n\n${result.brief}\n\n> （已由 ${result.provider}/${result.model} 从网页对话蒸馏生成）`
-      distilled = true
-    }
+  /*
+   * A confirmed preview is written verbatim. This is the only path that can
+   * produce bytes a human edited, so it must not be re-derived: re-running the
+   * distillation here would silently discard their edits and pay for the model
+   * calls twice.
+   */
+  let seedMarkdown: string
+  let distilled: boolean
+  if (input.seedMarkdown !== undefined && input.seedMarkdown.trim() !== '') {
+    seedMarkdown = input.seedMarkdown
+    distilled = input.seedDistilled === true
+  } else {
+    const draft = await buildHandoffDraft(ctx, input.transcript, config, mode)
+    seedMarkdown = draft.markdown
+    distilled = draft.distilled
   }
-  // The provenance line goes last so it stays the handoff's footer, and it is
-  // added in BOTH modes: it is what makes a repeat append recognisable (see
-  // appendThroughHandle) and what tells the resumed agent where the brief came
-  // from. Added after distillation so the distilled brief is what the model
-  // reads first, with the line beneath it.
-  seedMarkdown = `${seedMarkdown}\n\n${handoffProvenance(input.transcript, shouldDistill ? 'distill' : 'raw')}`
 
   // Continue an existing session instead of creating a new one.
   if (continueId !== undefined) {
@@ -888,6 +1039,10 @@ export function exportTranscriptFile(input: ExportTranscriptInput): { filePath: 
   const fileName = `dschat-${slug}-${input.transcript.id.slice(-6)}.md`
   const filePath = join(cwd, fileName)
   mkdirSync(cwd, { recursive: true })
-  writeFileSync(filePath, renderTranscriptMarkdown(input.transcript), 'utf8')
+  /*
+   * The one render that KEEPS the citation table: this file is for a person,
+   * who can open the pages a reply rested on. Every handoff path drops them.
+   */
+  writeFileSync(filePath, renderTranscriptMarkdown(input.transcript, { sources: true }), 'utf8')
   return { filePath: basename(filePath) }
 }

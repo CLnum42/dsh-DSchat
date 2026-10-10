@@ -14,7 +14,8 @@ from that project:
   - the distillation / transfer machinery that turns a web conversation into
     a harness session (src/transfer.ts)
 
-The panel UI, the slot registration (sidebar.panellist / main /
-settings.section), the route namespace (/api/dsh-dschat/*) and the tool
-namespace (dschat_*) were rewritten for this plugin; the namespaces are
-independent so both plugins can be installed side by side.
+The panel UI, the slot registration (sidebar.panellist / main), the route
+namespace (/api/dsh-dschat/*) and the tool namespace (dschat_*) were rewritten
+for this plugin; the namespaces are independent so both plugins can be installed
+side by side. No `settings.section` page is registered: engine and connection
+status live in the panel's own 「运行状态」 card.

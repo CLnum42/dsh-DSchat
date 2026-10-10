@@ -290,12 +290,23 @@ test('a send arms the capture before it presses Enter', async () => {
 test('the submit check decides on evidence, not on the clock alone', async () => {
   const engine = readFileSync(join(root, 'src/engine/engine.ts'), 'utf8')
   assert.ok(
-    /waitForTurnStart\(SUBMIT_VERIFY_MS, baselineKeys\)/.test(engine),
+    /waitForTurnStart\(SUBMIT_VERIFY_MS, baselineKeys, generatingBeforeEnter\)/.test(engine),
     'the check is given the pre-submit message list',
   )
   const wait = /private async waitForTurnStart\(([^)]*)\)/.exec(engine)
   assert.ok(wait !== null, 'waitForTurnStart exists')
   assert.ok(/baselineKeys/.test(wait[1]), 'and takes it as a parameter')
+  assert.ok(/alreadyGenerating/.test(wait[1]), 'and is told whether the page was already generating')
+  /*
+   * The binding, asserted where it is easy to lose: the stop affordance is only
+   * evidence for THIS turn when it was not already on screen before Enter. Read
+   * without that, a leftover generation made the next send believe its own
+   * submission had landed while the page was still answering the old question.
+   */
+  const before = engine.indexOf('const generatingBeforeEnter = await this.isGenerating()')
+  const press = engine.indexOf("await page.keyboard.press('Enter')")
+  assert.ok(before > 0, 'the pre-submit generating state is sampled')
+  assert.ok(before < press, 'and sampled before Enter, so it can only describe the previous turn')
   const budget = /const SUBMIT_VERIFY_MS = (\d[\d_]*)/.exec(engine)
   assert.ok(budget !== null, 'the submit budget is a named constant')
   assert.ok(
@@ -328,8 +339,32 @@ test('the submit check decides on evidence, not on the clock alone', async () =>
     false,
     'the failed-submit branch must not call the queued stop() from inside the queue',
   )
+  /*
+   * The public `stop()` is the ONLY place that may click while a send owns the
+   * queue, and it must do so without going through the queue itself: a stop that
+   * queues behind the turn it interrupts is the bug this pins against. The
+   * queued path is still there for every other caller.
+   */
+  const stop = /async stop\(\): Promise<void> \{([\s\S]*?)\n  \}/.exec(engine)
+  assert.ok(stop !== null, 'the public stop() exists')
   assert.ok(
-    /async stop\(\): Promise<void> \{\s*await this\.queue\.run\(\(\) => this\.stopInner\(\)\)/.test(engine),
-    'the public stop() is the queued wrapper around stopInner()',
+    /if \(this\.sendInFlight \|\| this\.busy\)/.test(stop[1]),
+    'it bypasses the queue exactly while a send owns it',
   )
+  assert.ok(/await this\.stopInner\(\)/.test(stop[1]), 'and clicks directly in that case')
+  assert.ok(
+    /await this\.queue\.run\(\(\) => this\.stopInner\(\)\)/.test(stop[1]),
+    'while an idle engine still stops through the queue',
+  )
+  // The reply loop has to honour the request too, or the page stops generating
+  // while the panel keeps waiting for a stream that will never complete.
+  assert.ok(
+    /if \(this\.stopRequested\) \{\s*stoppedByUser = true\s*break\s*\}/.test(engine),
+    'the reply loop ends the turn when a stop is requested',
+  )
+  // And a timeout must stop the page, not just return the partial text.
+  const timeoutBranch = engine.indexOf("replyError = '生成超时，已返回部分内容'")
+  assert.ok(timeoutBranch > 0, 'the timeout branch exists')
+  const timeoutLead = engine.slice(Math.max(0, timeoutBranch - 400), timeoutBranch)
+  assert.ok(/await this\.stopInner\(\)/.test(timeoutLead), 'a timed-out turn stops the page before returning')
 })

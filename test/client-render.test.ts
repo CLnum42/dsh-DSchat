@@ -1678,3 +1678,50 @@ test('every locale key the panel asks for exists in both dictionaries', async ()
     'and the two dictionaries stay the same size',
   )
 })
+
+/**
+ * The entry point's NAME is part of the localization, not decoration.
+ *
+ * The sidebar row and the panel title come from the same two keys, and until
+ * this was fixed the Chinese dictionary said 「Chat」 — the English word inside
+ * an otherwise Chinese UI, which is what made a bilingual reader conclude the
+ * plugin had no Chinese at all. Both halves are asserted here because the pair
+ * is the requirement: 聊天 in Chinese, Chat in English.
+ */
+test('the sidebar entry is 聊天 in Chinese and Chat in English', async () => {
+  const { readFileSync } = await import('node:fs')
+  const locales = readFileSync(join(root, 'src/client/locales.ts'), 'utf8')
+  const zh = locales.slice(locales.indexOf('export const zh'), locales.indexOf('export const en'))
+  const en = locales.slice(locales.indexOf('export const en'))
+  const valueOf = (block: string, key: string): string | undefined =>
+    new RegExp(`^  '${key}': '(.*)',$`, 'm').exec(block)?.[1]
+
+  assert.equal(valueOf(zh, 'nav.label'), '聊天', 'the Chinese entry is 聊天')
+  assert.equal(valueOf(en, 'nav.label'), 'Chat', 'the English entry is Chat')
+  assert.equal(valueOf(zh, 'panel.title'), '聊天', 'the Chinese panel title follows it')
+  assert.equal(valueOf(en, 'panel.title'), 'Chat', 'the English panel title follows it')
+})
+
+/**
+ * No Chinese may leak into the English dictionary.
+ *
+ * The audit that produced this test found the English half carrying CJK
+ * punctuation (`Synced 「x」`) and, worse, hosts of hardcoded Chinese strings
+ * that no dictionary scan could see. A dictionary is trivially checkable, so it
+ * is checked: every English value is ASCII apart from the ellipsis, the em dash
+ * and the typographic quotes the copy already uses deliberately.
+ */
+test('the English dictionary carries no CJK', async () => {
+  const { readFileSync } = await import('node:fs')
+  const locales = readFileSync(join(root, 'src/client/locales.ts'), 'utf8')
+  const en = locales.slice(locales.indexOf('export const en'))
+  const cjk = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]/
+  const offenders: string[] = []
+  for (const match of en.matchAll(/^  '([^']+)': '(.*)',$/gm)) {
+    const [, key, value] = match
+    // The brand line is a product name, not copy: it may be written either way.
+    if (key === 'brand.title') continue
+    if (cjk.test(value ?? '')) offenders.push(`${key}: ${value}`)
+  }
+  assert.deepEqual(offenders, [], 'English copy must not contain Chinese characters or CJK punctuation')
+})

@@ -123,6 +123,13 @@ function fixtures() {
     updatedAt: now - age,
     model: 'deepseek-chat',
     streaming: false,
+    /*
+     * A web session id, so these rows are the ones that offer 「从网页同步」.
+     * Without it the per-row sync action — the only way to top up a conversation
+     * that was synced once and then continued on the web — would never appear in
+     * a screenshot, which is exactly the kind of thing a rendered check is for.
+     */
+    webSessionId: `web-demo-${String(count)}`,
     messages: Array.from({ length: count }, (_, index) => ({
       id: `d-demo-${String(count)}-${String(index)}`,
       role: index % 2 === 0 ? 'user' : 'assistant',
@@ -248,6 +255,44 @@ async function bundle(dir) {
         setDeepThink: pending, setSearch: pending, transfer: pending, exportFile: pending,
         renameChat: pending, deleteChat: pending, clearChats: pending, webChats: pending,
         recover: pending, restore: pending,
+        /*
+         * The hand-off preview, answered with a short sample brief so the
+         * preview box can be rendered and measured like any other surface.
+         * The transfer call itself stays pending: the shots stop before the
+         * write, which is the whole point of having a preview.
+         *
+         * Newlines are joined with String.fromCharCode(10) rather than an escape
+         * sequence: this block is itself inside a template literal, where a
+         * backslash-n would be turned into a real newline before the browser
+         * ever parsed it.
+         */
+        transferPreview: record('transferPreview', async () => window.__previewFail === true ? ok({
+          markdown: '（原文迁移：整段网页对话记录，约 15,000 字…）',
+          distilled: false,
+          mode: 'distill',
+          fallback: true,
+          fallbackReason: '蒸馏不可用（LLM 服务、提供方或模型不可用，或调用未正常结束），本次改用原文迁移',
+        }) : ok({
+          markdown: [
+            '这是一次从 DeepSeek 网页端会话（chat.deepseek.com）转来的上下文交接。',
+            '',
+            '## 目标',
+            '把网页端讨论的面板改版落成一个可执行的实现计划。',
+            '',
+            '## 已确认',
+            '- 迁移前必须先看到首条消息，且可以编辑',
+            '- 蒸馏不可用时要明确说明回退成原文',
+            '',
+            '## 待办',
+            '1. 预览接口',
+            '2. 确认后写入',
+          ].join(String.fromCharCode(10)),
+          distilled: true,
+          mode: 'distill',
+          fallback: false,
+          provider: 'deepseek',
+          model: 'deepseek-chat',
+        })),
       }
     }
 
@@ -766,6 +811,52 @@ try {
     return caret === null ? null : getComputedStyle(caret).transform
   })
   await shot('07c-transfer-popover', { clip: menuClip })
+
+  /*
+   * The preview step, driven for real: click the dialog's primary button, wait
+   * for the editable box, and photograph it. This is the surface the whole
+   * trust fix hangs on — if the box were clipped, or the confirm button pushed
+   * out of the dialog, a static-markup test would never notice.
+   */
+  await view.locator('.dsh-dschat-pop-up .dsh-dschat-btn-primary').click()
+  await view.locator('.dsh-dschat-preview').waitFor({ state: 'visible', timeout: 5_000 })
+  await view.waitForTimeout(160)
+  const previewBox = await view.locator('.dsh-dschat-pop-up').boundingBox()
+  report.probes.transferPreview = {
+    text: await view.locator('.dsh-dschat-preview').inputValue(),
+    editable: await view.locator('.dsh-dschat-preview').isEditable(),
+    notice: await view.evaluate(() => document.querySelector('.dsh-dschat-pop-up .dsh-dschat-hintline')?.textContent ?? null),
+    buttons: await view.evaluate(() =>
+      [...document.querySelectorAll('.dsh-dschat-pop-up .dsh-dschat-pop-foot button')].map(el => (el.textContent ?? '').trim())),
+    // The dialog opens UPWARD, so a box taller than the space above it is lost
+    // off the top of the window rather than scrolled to.
+    box: previewBox === null ? null : { y: Math.round(previewBox.y), height: Math.round(previewBox.height) },
+    viewport: view.viewportSize(),
+  }
+  await shot('07e-transfer-preview', { clip: menuClip })
+
+  /*
+   * And the case the whole fix exists for: distillation UNAVAILABLE.
+   *
+   * The host reports it in the preview (`fallback` + `fallbackReason`) and the
+   * dialog has to say so where the reader is already looking, rather than
+   * producing the same success sentence a real brief produces. Photographed and
+   * colour-measured, because "the warning is there but rendered in the same grey
+   * as a footnote" is the failure mode a text assertion cannot see.
+   */
+  await view.evaluate(() => { window.__previewFail = true })
+  await view.locator('.dsh-dschat-pop-up .dsh-dschat-pop-foot button').nth(1).click()
+  await view.waitForTimeout(260)
+  report.probes.transferPreviewFallback = {
+    notices: await view.evaluate(() =>
+      [...document.querySelectorAll('.dsh-dschat-pop-up .dsh-dschat-preview-note')].map(el => ({
+        text: (el.textContent ?? '').trim(),
+        colour: getComputedStyle(el).color,
+        tone: el.getAttribute('data-tone'),
+      }))),
+    confirmEnabled: await view.locator('.dsh-dschat-pop-up .dsh-dschat-btn-primary').isEnabled(),
+  }
+  await shot('07f-transfer-preview-fallback', { clip: menuClip })
   await view.keyboard.press('Escape')
   await view.waitForTimeout(180)
 
@@ -1190,6 +1281,131 @@ try {
   })
   await shot('16b-status-card-dark', { clip: { x: 300, y: 100, width: 680, height: 620 } })
   await view.evaluate(() => { delete document.body.dataset.dsDarkTheme })
+
+  /*
+   * ---- 17..20: the question navigator and the 「↓ 最新」 pill ----
+   *
+   * A LONG conversation is required, not optional: the navigator deliberately
+   * does not exist until a transcript has more than one question AND actually
+   * overflows, and neither condition holds in the fixture above. So this mounts
+   * a purpose-built one — four questions, each with a reply tall enough to push
+   * the next question off screen.
+   */
+  const longReply = Array.from({ length: 10 }, (_, i) =>
+    `第 ${String(i + 1)} 段：这里是回答的正文，长度是为了把消息流撑到必须滚动的高度。`).join('\n\n')
+  const longMessages = []
+  const navClock = Date.now()
+  for (let i = 1; i <= 4; i += 1) {
+    const at = navClock - (30 - i) * 60_000
+    longMessages.push({ id: `n-u${String(i)}`, role: 'user', content: `第 ${String(i)} 个问题：请把这一段展开讲讲，最好给出可以照做的步骤。`, ts: at })
+    longMessages.push({ id: `n-a${String(i)}`, role: 'assistant', content: longReply, ts: at + 5_000 })
+  }
+  const longChat = { ...fixture.chats[0], id: 'chat-ui-long', title: '提问导航样例', messages: longMessages, streaming: false }
+  await mount({ chats: [longChat, ...fixture.chats.slice(1)], activeChatId: longChat.id })
+  await view.waitForTimeout(400)
+  report.probes.questionNav = await view.evaluate(() => {
+    const nav = document.querySelector('.dsh-dschat-nav')
+    const list = document.querySelector('.dsh-dschat-thread')
+    const box = el => {
+      if (el === null) return null
+      const r = el.getBoundingClientRect()
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+    }
+    const items = [...document.querySelectorAll('.dsh-dschat-nav-item')]
+    const active = items.findIndex(item => item.dataset.active === 'true')
+    return {
+      present: nav !== null,
+      collapsed: box(nav),
+      items: items.length,
+      active,
+      pitch: items.length > 1 ? Math.round(items[1].getBoundingClientRect().top - items[0].getBoundingClientRect().top) : 0,
+      tick: (() => {
+        const tick = items[0]?.querySelector('.dsh-dschat-nav-tick')
+        if (tick === undefined || tick === null) return null
+        const cs = getComputedStyle(tick)
+        return { w: cs.width, h: cs.height, bg: cs.backgroundColor }
+      })(),
+      gutter: getComputedStyle(document.querySelector('.dsh-dschat-thread-inner')).paddingRight,
+      overflow: list.scrollHeight > list.clientHeight,
+      latest: document.querySelector('.dsh-dschat-latest') !== null,
+    }
+  })
+  await shot('17-nav-collapsed', { clip: { x: 980, y: 52, width: 300, height: 620 } })
+  await shot('17b-nav-collapsed-full')
+
+  // Hover: the capsule becomes the question list, and — the part that matters —
+  // the rows do not move while it does.
+  const firstTick = view.locator('.dsh-dschat-nav-item').first()
+  const rowYBefore = await firstTick.evaluate(el => Math.round(el.getBoundingClientRect().top))
+  await firstTick.hover()
+  await view.waitForTimeout(320)
+  const rowYAfter = await firstTick.evaluate(el => Math.round(el.getBoundingClientRect().top))
+  report.probes.questionNavOpen = await view.evaluate(() => {
+    const nav = document.querySelector('.dsh-dschat-nav')
+    const item = document.querySelector('.dsh-dschat-nav-item')
+    const text = item?.querySelector('.dsh-dschat-nav-text')
+    const r = nav.getBoundingClientRect()
+    return {
+      open: nav.dataset.open === 'true',
+      w: Math.round(r.width),
+      rowH: Math.round(item.getBoundingClientRect().height),
+      textShown: text !== null && getComputedStyle(text).display !== 'none',
+      firstText: (text?.textContent ?? '').slice(0, 24),
+    }
+  })
+  report.probes.questionNavOpen.rowStable = rowYBefore === rowYAfter
+  await shot('18-nav-open', { clip: { x: 640, y: 52, width: 640, height: 500 } })
+
+  // Click: the first question lands at the top of the viewport, and the tick
+  // for it becomes the current one.
+  await firstTick.click()
+  await view.waitForTimeout(1_400)
+  report.probes.questionJump = await view.evaluate(() => {
+    const list = document.querySelector('.dsh-dschat-thread')
+    const first = list.querySelector('[data-role="user"]')
+    const items = [...document.querySelectorAll('.dsh-dschat-nav-item')]
+    return {
+      offset: Math.round(first.getBoundingClientRect().top - list.getBoundingClientRect().top),
+      active: items.findIndex(item => item.dataset.active === 'true'),
+      latest: document.querySelector('.dsh-dschat-latest') !== null,
+    }
+  })
+  await shot('19-nav-jump', { clip: { x: 260, y: 52, width: 1020, height: 400 } })
+
+  // The 「↓ 最新」 pill: offered off the end, and it retires itself on the way back.
+  await shot('20-latest-pill', { clip: { x: 620, y: 380, width: 660, height: 260 } })
+  await view.locator('.dsh-dschat-latest').click()
+  await view.waitForTimeout(1_600)
+  /* ---- 21: the per-row 「从网页同步」 action, revealed on hover ---- */
+  const railChat = await view.evaluate(() => {
+    const row = [...document.querySelectorAll('.dsh-dschat-item')]
+      .find(item => item.querySelector('.dsh-dschat-item-acts button[title*="同步"]') !== null)
+    if (row === undefined || row === null) return null
+    const r = row.getBoundingClientRect()
+    return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), text: row.textContent?.slice(0, 20) ?? '' }
+  })
+  if (railChat !== null) {
+    await view.mouse.move(railChat.x + railChat.w / 2, railChat.y + railChat.h / 2)
+    await view.waitForTimeout(250)
+  }
+  report.probes.railSyncAction = await view.evaluate(() => {
+    const rows = [...document.querySelectorAll('.dsh-dschat-item')]
+    const withSync = rows.filter(row => row.querySelector('.dsh-dschat-item-acts button[title*="同步"]') !== null)
+    return {
+      rows: rows.length,
+      withSync: withSync.length,
+      buttons: withSync[0] === undefined ? [] : [...withSync[0].querySelectorAll('.dsh-dschat-item-acts button')].map(button => button.getAttribute('title')),
+    }
+  })
+  await shot('21-rail-sync-action', { clip: { x: 0, y: 52, width: 300, height: 420 } })
+
+  report.probes.latestPill = await view.evaluate(() => {
+    const list = document.querySelector('.dsh-dschat-thread')
+    return {
+      gone: document.querySelector('.dsh-dschat-latest') === null,
+      gap: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight),
+    }
+  })
 
   await browser.close()
   writeFileSync(join(outDir, 'report.json'), `${JSON.stringify({ ...report, errors }, null, 2)}\n`, 'utf8')

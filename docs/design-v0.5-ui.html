@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-DSchat v0.5 界面设计稿（待确认）</title>
+<style>
+  :root{
+    --bg:#fff; --bg2:#f7f8fa; --bg3:#eef0f4; --bd1:rgba(0,0,0,.06); --bd2:rgba(0,0,0,.10); --bd3:rgba(0,0,0,.16);
+    --tx:#14171c; --tx2:#4a5260; --tx3:#78808f; --hover:rgba(38,49,72,.06);
+    --blue:#4176e6; --blue-wash:rgba(65,118,230,.13); --blue-line:rgba(65,118,230,.34);
+    --green:#22a95f; --amber:#e09515; --red:#e0483c; --idle:#b9bdc6;
+    --bubble:#eef3fe; --card:#fff;
+    --nav-surface:rgba(255,255,255,.82); --nav-dash:rgba(0,0,0,.16); --nav-dash-active:#3964fe;
+    --shadow-card:0 4px 12px rgba(0,0,0,.02), 0 2px 4px rgba(72,104,178,.012);
+    --shadow-pop:0 10px 30px rgba(15,23,42,.14), 0 2px 6px rgba(15,23,42,.08);
+  }
+  [data-theme="dark"]{
+    --bg:#1b1d21; --bg2:#23262b; --bg3:#2b2f36; --bd1:rgba(255,255,255,.07); --bd2:rgba(255,255,255,.13); --bd3:rgba(255,255,255,.2);
+    --tx:#eef1f5; --tx2:#b7bfcc; --tx3:#8b93a1; --hover:rgba(255,255,255,.08);
+    --blue:#679efe; --blue-wash:rgba(103,158,254,.18); --blue-line:rgba(103,158,254,.4);
+    --green:#3ec97a; --amber:#e8a63a; --red:#f2635a; --idle:#5d6470;
+    --bubble:#283142; --card:#212429;
+    --nav-surface:rgba(35,38,43,.82); --nav-dash:rgba(255,255,255,.22); --nav-dash-active:#679efe;
+    --shadow-card:none;
+    --shadow-pop:0 12px 32px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#eceef1;font:14px/1.6 -apple-system,"PingFang SC","Segoe UI",system-ui,sans-serif;color:#14171c}
+  .sheet{width:1180px;padding:26px 30px 34px;display:flex;flex-direction:column;gap:22px;background:#eceef1}
+  .shot{background:#fff;border-radius:16px;padding:20px 22px 22px;box-shadow:0 1px 2px rgba(0,0,0,.08),0 10px 26px rgba(0,0,0,.07)}
+  .shot > h1{font-size:15px;margin:0 0 2px;letter-spacing:.01em}
+  .shot > h1 em{font-style:normal;color:var(--blue);font-weight:600;margin-right:8px}
+  .shot > p.cap{margin:0 0 16px;font-size:12.5px;color:#5b6472;line-height:1.7}
+  .row{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+  .pane{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:8px}
+  .pane > .lab{font-size:11.5px;letter-spacing:.05em;color:#6b7480;font-weight:600;min-height:34px}
+  .pane > .lab b{color:#14171c}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:1px 7px;border-radius:99px;border:1px solid}
+  .badge.old{color:#8a5a00;border-color:rgba(224,149,21,.4);background:rgba(224,149,21,.1)}
+  .badge.new{color:#1d6b3d;border-color:rgba(34,169,95,.4);background:rgba(34,169,95,.1)}
+  .badge.alt{color:#2b4d9e;border-color:rgba(65,118,230,.4);background:rgba(65,118,230,.1)}
+
+  /* ---------- mini panel shell ---------- */
+  .shell{background:var(--bg);color:var(--tx);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;
+    box-shadow:0 1px 2px rgba(0,0,0,.08),0 12px 30px rgba(0,0,0,.10);border:1px solid var(--bd1);position:relative}
+  .shell .hd{flex:none;height:40px;display:flex;align-items:center;gap:7px;padding:0 12px;border-bottom:1px solid var(--bd1)}
+  .shell .hd .brand{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500}
+  .shell .hd .brand svg{color:var(--blue)}
+  .shell .hd .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .shell .hd .sp{flex:1}
+  .shell .hd .kebab{width:22px;height:22px;display:grid;place-items:center;border-radius:6px;color:var(--tx3)}
+  .chatcol{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+  .thread{flex:1;min-height:0;overflow:hidden;border-bottom:1px solid transparent}
+  .thread-inner{padding:12px 14px;display:flex;flex-direction:column;gap:14px}
+  .thread-inner.dim{opacity:.5}
+  .m{display:flex;flex-direction:column;gap:5px}
+  .m.user{align-items:flex-end}
+  .who{font-size:10.5px;color:var(--tx3);display:flex;gap:6px;align-items:center}
+  .m.user .who{flex-direction:row-reverse}
+  .bubble{max-width:80%;background:var(--bubble);border-radius:12px;padding:8px 11px;font-size:12.5px;line-height:1.65}
+  .reply{font-size:12.5px;line-height:1.75;color:var(--tx)}
+  .reply p{margin:0 0 7px}
+  .reply h4{margin:0 0 6px;font-size:12.5px}
+  .reply ul{margin:0 0 7px;padding-left:18px}
+  .reply li{margin:2px 0}
+  .cursor{display:inline-block;width:7px;height:13px;background:var(--blue);vertical-align:-2px;border-radius:1px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* ---------- viewport guides ---------- */
+  .viewport{position:relative}
+  .viewport .fold{position:absolute;left:0;right:0;top:0;border-top:1px dashed var(--blue);z-index:3}
+  .viewport .fold span{position:absolute;right:6px;top:-9px;background:var(--blue);color:#fff;font-size:9.5px;font-weight:600;
+    padding:1px 6px;border-radius:99px;letter-spacing:.03em}
+  .viewport .cut{position:absolute;left:0;right:0;bottom:0;border-top:1px dashed var(--blue);z-index:3}
+  .viewport .fade{position:absolute;left:0;right:0;top:0;height:26px;background:linear-gradient(var(--bg),transparent);z-index:2}
+
+  /* ---------- scroll hint ---------- */
+  .scroller{position:absolute;right:2px;top:22%;bottom:22%;width:4px;border-radius:99px;background:var(--bd1)}
+  .scroller i{position:absolute;left:-1px;width:6px;height:34%;border-radius:99px;background:var(--bd3)}
+
+  /* ---------- composer ---------- */
+  .composer{flex:none;padding:6px 12px 4px}
+  .actions{display:flex;align-items:center;gap:4px;padding:5px 0 7px}
+  .actions.old{border-top:1px solid var(--bd1)}
+  /* old metrics: 28px, radius 8, mixed treatments */
+  .tbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border-radius:8px;border:1px solid transparent;
+    background:none;color:var(--tx2);font:inherit;font-size:12.5px;cursor:pointer}
+  .tbtn.on{background:var(--blue-wash);border-color:var(--blue-line);color:var(--tx)}
+  .tbtn svg{color:var(--tx2)}
+  .tbtn.on svg{color:var(--blue)}
+  .sp{flex:1}
+  /* new metrics: 30px, pill 999, one treatment */
+  .tpill{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:999px;border:1px solid transparent;
+    background:none;color:var(--tx2);font:inherit;font-size:12.5px;cursor:pointer;transition:background .12s}
+  .tpill:hover{background:var(--hover);color:var(--tx)}
+  .tpill.on{background:var(--blue-wash);border-color:var(--blue-line);color:var(--tx)}
+  .tpill.on svg{color:var(--blue)}
+  .tpill .caret{font-size:9px;color:var(--tx3)}
+
+  .card{border:1px solid var(--bd2);background:var(--card);box-shadow:var(--shadow-card);transition:border-color .12s}
+  .card.old{border-radius:24px}
+  .card.new{border-radius:20px}
+  .card.new.focused{border-color:var(--blue-line);box-shadow:0 0 0 3px rgba(65,118,230,.10)}
+  .dockbar{display:flex;align-items:center;gap:4px;padding:6px 8px 8px;border-bottom:1px solid var(--bd1);margin-bottom:2px}
+  .card.off{border-color:var(--blue-line);background:color-mix(in srgb,var(--blue) 3%,var(--card))}
+  .atts{display:flex;gap:6px;flex-wrap:wrap;padding:10px 10px 0}
+  .thumb{position:relative;width:44px;height:44px;border-radius:8px;overflow:hidden;border:1px solid var(--bd1);flex:none;
+    background:linear-gradient(135deg,#dbe6ff,#f0f4ff)}
+  .thumb .ph{position:absolute;inset:0;display:grid;place-items:center;color:var(--blue);font-size:15px}
+  .textarea{font-size:12.5px;line-height:1.6;padding:12px 14px 4px;min-height:46px;color:var(--tx2)}
+  .tools{display:flex;align-items:center;gap:4px}
+  .tools.old{padding:12px}
+  .tools.new{padding:8px 10px 10px}
+  .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;border:1px solid var(--bd2);background:none;
+    color:var(--tx2);font:inherit;cursor:pointer}
+  .pill.old{height:34px;padding:0 10px;font-size:12.5px}
+  .pill.new{height:30px;padding:0 10px;font-size:12.5px}
+  .pill.on{background:var(--blue-wash);border-color:var(--blue-line);color:var(--tx)}
+  .pill.on svg{color:var(--blue)}
+  .round{display:grid;place-items:center;border:none;border-radius:50%;background:none;color:var(--tx2);cursor:pointer}
+  .round.old{width:34px;height:34px}
+  .round.new{width:30px;height:30px}
+  .round.new:hover{background:var(--hover);color:var(--tx)}
+  .send{display:grid;place-items:center;border:none;border-radius:50%;background:var(--blue);color:#fff;cursor:pointer}
+  .send.old{width:34px;height:34px}
+  .send.new{width:30px;height:30px}
+  .send.off{background:color-mix(in srgb,var(--blue) 30%,transparent)}
+  .phase{flex:none;display:flex;gap:8px;justify-content:center;padding:6px 12px 8px;font-size:10.5px;color:var(--tx3)}
+  .phase .sep{opacity:.45}
+
+  /* ---------- question navigator ---------- */
+  .navdock{position:absolute;right:10px;top:50%;transform:translateY(-50%);z-index:4;display:flex;align-items:center}
+  .navlist{display:flex;flex-direction:column;justify-content:center;gap:10px;padding:14px 0;width:34px;border-radius:16px;
+    background:var(--nav-surface);border:1px solid var(--bd1);backdrop-filter:blur(8px);transition:width .16s ease}
+  .navlist button{display:flex;align-items:center;justify-content:center;width:34px;height:2px;padding:0;border:none;background:none;cursor:pointer}
+  .navlist i{display:block;width:8px;height:2px;border-radius:4px;background:var(--nav-dash)}
+  .navlist button[data-active] i{width:12px;height:3px;background:var(--nav-dash-active)}
+  .navlist button[data-hover] i{width:16px;background:var(--tx2)}
+  .navlist ul{list-style:none;margin:0;padding:0;display:none}
+
+  /* expanded state: the whole capsule becomes a question list */
+  .navcard{width:268px;border-radius:14px;background:var(--nav-surface);border:1px solid var(--bd1);
+    box-shadow:var(--shadow-pop);backdrop-filter:blur(10px);padding:6px;display:flex;flex-direction:column;gap:1px}
+  .navcard .nh{display:flex;align-items:center;gap:6px;padding:4px 8px 6px;font-size:10.5px;color:var(--tx3);border-bottom:1px solid var(--bd1);margin-bottom:3px}
+  .navcard .nrow{display:flex;align-items:center;gap:8px;height:30px;padding:0 4px 0 8px;border-radius:8px;background:none;border:none;
+    font:inherit;font-size:12px;color:var(--tx3);cursor:pointer;text-align:left;width:100%}
+  .navcard .nrow .idx{flex:none;width:14px;font-size:10px;color:var(--tx3);font-variant-numeric:tabular-nums;text-align:right}
+  .navcard .nrow .txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .navcard .nrow i{flex:none;display:block;width:8px;height:2px;border-radius:4px;background:var(--nav-dash)}
+  .navcard .nrow:hover{background:var(--hover);color:var(--tx)}
+  .navcard .nrow[data-active]{color:var(--tx);font-weight:500}
+  .navcard .nrow[data-active] i{width:12px;height:3px;background:var(--nav-dash-active)}
+  .navcard .nrow[data-hover]{background:var(--hover);color:var(--tx)}
+
+  /* jump flash */
+  .bubble.flash{background:color-mix(in srgb,var(--blue) 11%,transparent);box-shadow:0 0 0 1px var(--blue-line)}
+  .m.flash .who{color:var(--blue)}
+  #shot-dark .navdock{top:36%}
+
+  /* ---------- misc ---------- */
+  .anno{display:flex;gap:7px;font-size:11.5px;color:#4a5260;line-height:1.65;align-items:flex-start}
+  .anno b{color:#14171c}
+  .anno .n{flex:none;width:16px;height:16px;border-radius:50%;background:#14171c;color:#fff;display:grid;place-items:center;
+    font-size:10px;font-weight:600;margin-top:1px}
+  .anno.new .n{background:#1d6b3d}
+  .k{display:inline-block;padding:0 5px;border-radius:5px;background:#eef0f4;border:1px solid var(--bd2);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+  table{border-collapse:collapse;font-size:12px;width:100%}
+  th,td{border-bottom:1px solid #e7e9ee;padding:6px 8px;text-align:left;vertical-align:top;color:#4a5260}
+  th{color:#14171c;font-weight:600;background:#f7f8fa}
+  td b{color:#14171c}
+  .switcher{display:flex;gap:6px;margin:0 0 12px}
+  .switcher button{border:1px solid #cfd4dc;background:#fff;border-radius:7px;padding:4px 10px;font:inherit;font-size:12px;cursor:pointer;color:#4a5260}
+  .switcher button[data-on]{background:#14171c;color:#fff;border-color:#14171c}
+  .themed{display:block}
+  [data-theme="dark"] .lightonly{display:none}
+  .darkonly{display:none}
+  [data-theme="dark"] .darkonly{display:block}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <!-- ==================================================================== -->
+  <!-- SHOT 1: new-question anchoring                                        -->
+  <!-- ==================================================================== -->
+  <section class="shot" id="shot-anchor">
+    <h1><em>01</em>新提问自动置顶 —— 发出去的那条问题停在视口顶部，回答在下方流入</h1>
+    <p class="cap">现在：发送后视口钉在「底部」，回答每增长一行就把页面往下推一次，读者得一直滚。<br>
+       改后：发送后把刚发出的那条提问对齐到视口顶部（留 12px），回答在它下面长出来 —— 不用滚就能从第一行读起。</p>
+    <div class="row">
+      <div class="pane">
+        <div class="lab"><span class="badge old">现在</span> &nbsp;钉在底部，回答不断把视口推下去</div>
+        <div class="shell" style="height:420px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span><span class="kebab">⋯</span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding-top:14px">
+              <div class="m"><div class="who">DeepSeek</div><div class="reply" style="opacity:.45">
+                <p>我先看了一遍文档结构，术语表在第 3 节，共 218 条。</p>
+              </div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply">
+                <p>第 4 节还有 12 条「半术语」，我按上下文判成了普通词组：</p>
+                <ul><li>工程化落地 → engineering rollout</li><li>审校闭环 → review loop</li></ul>
+                <p>这些要合并进术语表吗？<span class="cursor"></span></p>
+              </div></div>
+            </div></div>
+            <div class="viewport" style="position:absolute;inset:0;pointer-events:none">
+              <div class="fade"></div>
+              <div class="fold"><span>视口顶部 · 刚才那条提问已经滚上去了</span></div>
+              <div class="cut"></div>
+              <div class="scroller"><i style="top:66%"></i></div>
+            </div>
+            <div class="composer">
+              <div class="card old"><div class="textarea">给 DeepSeek 网页端发消息…</div>
+                <div class="tools old"><span class="pill old">深度思考</span><span class="pill old">智能搜索</span><span class="sp"></span><span class="round old">📎</span><span class="send old">↑</span></div>
+              </div>
+              <div class="phase"><span>就绪</span><span class="sep">|</span><span>网页会话 已登录</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="pane">
+        <div class="lab"><span class="badge new">改后</span> &nbsp;提问停在顶部，回答从第一行开始长</div>
+        <div class="shell" style="height:420px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span><span class="kebab">⋯</span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding-top:12px">
+              <div class="m user flash"><div class="who">你 · 14:07 · 刚刚发送</div><div class="bubble flash">这些「半术语」按上下文保留还是合并？给我一个判断标准。</div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply">
+                <p>判断标准可以落成三条可执行规则：</p>
+                <ul><li><b>可复现</b>：换一个译者还会译成同一个词 → 收；</li><li><b>可检索</b>：客户会在 CAT 工具里按它查 → 收；</li><li><b>可替换</b>：只是这句里的顺口说法 → 不收。</li></ul>
+                <p>所以上面 12 条里，只有 3 条该进表：<span class="cursor"></span></p>
+              </div></div>
+            </div></div>
+            <div class="viewport" style="position:absolute;inset:0;pointer-events:none">
+              <div class="fold"><span>视口顶部 · 这条提问停在这里</span></div>
+              <div class="fade" style="top:0;background:linear-gradient(var(--bg) 30%,transparent)"></div>
+              <div class="scroller"><i style="top:0"></i></div>
+            </div>
+            <div class="composer">
+              <div class="card new"><div class="textarea">给 DeepSeek 网页端发消息…</div>
+                <div class="tools new"><span class="pill new on">深度思考</span><span class="pill new">智能搜索</span><span class="sp"></span><span class="round new">📎</span><span class="send new off">↑</span></div>
+              </div>
+              <div class="phase"><span>生成中 00:04</span><span class="sep">|</span><span>网页会话 已登录</span><span class="sep">|</span><span>本会话 5 条消息</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="anno new" style="flex:1"><span class="n">1</span><div><b>锚定规则</b>：发送成功的那一刻，把这条提问的顶部对齐到消息区顶部 + 12px；此后回答流式增长<b>不再自动滚动</b>。</div></div>
+      <div class="anno new" style="flex:1"><span class="n">2</span><div><b>何时回到"跟随最新"</b>：打开/切换会话、点「↓ 最新」、或自己滚到底部 —— 三种情况恢复钉底，其余时间尊重锚点。</div></div>
+      <div class="anno new" style="flex:1"><span class="n">3</span><div><b>提示与不打扰</b>：不在底部时右下浮出一枚 <span class="k">↓ 最新</span> 小胶囊；点它就到底并重新跟随。搜索跳转、上滑阅读的历史行为都不变。</div></div>
+    </div>
+  </section>
+
+  <!-- ==================================================================== -->
+  <!-- SHOT 2: question navigator                                            -->
+  <!-- ==================================================================== -->
+  <section class="shot" id="shot-nav">
+    <h1><em>02</em>右侧「提问导航」—— 收起是一列刻度，悬停展开成提问清单，点一下跳过去</h1>
+    <p class="cap">照 DeepSeek 官网的交互做的：右缘一枚悬浮胶囊，每条提问一道刻度；<b>悬停即展开</b>成提问列表（一行一条、超长省略），当前那条刻度是蓝色加宽的；点任意一条跳转并高亮落点。</p>
+    <div class="row">
+      <div class="pane" style="flex:1">
+        <div class="lab"><span class="badge new">A</span> 收起 · 只有刻度（≥2 条提问且消息区可滚动时才出现）</div>
+        <div class="shell" style="height:340px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner dim" style="padding-right:58px">
+              <div class="m user"><div class="who">你 · 第 5 问</div><div class="bubble">但如果我要学生用这个 AI Agent，也需要讲这些编码吗？</div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply"><p>不需要教写代码，但要教「怎么读懂 AI 给出的代码」…</p></div></div>
+            </div></div>
+            <div class="navdock"><div class="navlist">
+              <button><i></i></button><button><i></i></button><button><i></i></button><button><i></i></button>
+              <button data-active><i></i></button><button><i></i></button><button><i></i></button><button><i></i></button>
+            </div></div>
+          </div>
+        </div>
+      </div>
+      <div class="pane" style="flex:1">
+        <div class="lab"><span class="badge new">B</span> 悬停展开 · 提问清单（点行即跳）</div>
+        <div class="shell" style="height:340px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner dim" style="padding-right:58px">
+              <div class="m user"><div class="who">你 · 第 5 问</div><div class="bubble">但如果我要学生用这个 AI Agent，也需要讲这些编码吗？</div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply"><p>不需要教写代码，但要教「怎么读懂 AI 给出的代码」…</p></div></div>
+            </div></div>
+            <div class="navdock"><div class="navcard">
+              <div class="nh">本会话提问 · 8 条</div>
+              <button class="nrow"><span class="idx">1</span><span class="txt">如果要让翻译系的研究生学会怎么用 AI 来翻译…</span><i></i></button>
+              <button class="nrow"><span class="idx">2</span><span class="txt">我上一个 8 个星期的翻译工作坊，怎么安排比较好？</span><i></i></button>
+              <button class="nrow"><span class="idx">3</span><span class="txt">Embedding 跟这个术语管理有什么关系？</span><i></i></button>
+              <button class="nrow" data-hover><span class="idx">4</span><span class="txt">文件与编码：DOCX/PDF/HTML/JSON/SRT 这个话题讲什么？</span><i></i></button>
+              <button class="nrow"><span class="idx">5</span><span class="txt">但如果我要学生用这个 AI Agent，也需要讲这些编码吗？</span><i></i></button>
+              <button class="nrow"><span class="idx">6</span><span class="txt">那翻译工作坊是不是应该采用项目制？</span><i></i></button>
+              <button class="nrow"><span class="idx">7</span><span class="txt">我还是不明白，为什么要让学生学 Agent？</span><i></i></button>
+              <button class="nrow" data-active><span class="idx">8</span><span class="txt">给我一句话总结这门课的定位</span><i></i></button>
+            </div></div>
+          </div>
+        </div>
+      </div>
+      <div class="pane" style="flex:1">
+        <div class="lab"><span class="badge new">C</span> 跳转落点 · 高亮 1.8s 后自然淡出</div>
+        <div class="shell" style="height:340px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding-right:58px">
+              <div class="m user flash"><div class="who">你 · 第 4 问 · 已跳转</div><div class="bubble flash">文件与编码：DOCX/PDF/HTML/JSON/SRT 这个话题讲什么？</div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply">
+                <p>这一节只讲「读」，不讲「写」：</p>
+                <ul><li>格式差异：DOCX 是压缩包、PDF 是排版结果；</li><li>编码：UTF-8 与 GBK 混用时的乱码定位。</li></ul>
+              </div></div>
+            </div></div>
+            <div class="navdock"><div class="navlist">
+              <button><i></i></button><button><i></i></button><button><i></i></button><button data-active><i></i></button>
+              <button><i></i></button><button><i></i></button><button><i></i></button><button><i></i></button>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <table style="margin-top:16px">
+      <tr><th style="width:120px">项目</th><th>规格（照官网实测微调）</th></tr>
+      <tr><td><b>位置</b></td><td>浮在消息区右缘：距面板右边 10px、垂直居中；不随内容滚动</td></tr>
+      <tr><td><b>不挡正文</b></td><td>导航出现时消息列右侧预留 <b>44px</b> 内边距，胶囊浮在这条留白里；面板再窄也不会压到文字</td></tr>
+      <tr><td><b>收起态</b></td><td>34×内容高、圆角 16px 的胶囊（<span class="k">bg-layer-1</span> 82% + 背景模糊 + 1px 描边）；每条提问一道 <b>8×2px</b> 圆头刻度，间距 10px</td></tr>
+      <tr><td><b>当前条目</b></td><td>刻度加宽到 <b>12×3px</b> 并用强调蓝 —— 和官网一致（官网为 12×2，这里加高 1px 便于小面板辨认）</td></tr>
+      <tr><td><b>悬停</b></td><td>胶囊向左展开成 <b>268px</b> 提问清单：序号 + 单行省略的提问原文，行高 30px；指针所在行加深，刻度同时加宽</td></tr>
+      <tr><td><b>点击</b></td><td>平滑滚动到该提问并居中，落点高亮 1.8s（复用搜索跳转的同一套高亮）</td></tr>
+      <tr><td><b>出现条件</b></td><td>用户提问 ≥ 2 条 <b>且</b> 消息区确实可滚动；否则整条隐藏，不占一列</td></tr>
+      <tr><td><b>键盘 / 无障碍</b></td><td>是一列 <span class="k">&lt;nav&gt;</span> + 按钮：<span class="k">Tab</span> 进入、<span class="k">↑↓</span> 移动、<span class="k">Enter</span> 跳转、<span class="k">Esc</span> 收起；每行 <span class="k">aria-label</span> 为「第 N 条提问：原文」</td></tr>
+      <tr><td><b>阅读位置</b></td><td>滚动时按「哪条提问最接近消息区顶部」实时更新当前条目（不额外 requestAnimationFrame 轮询，挂在已有的 onScroll 上）</td></tr>
+    </table>
+  </section>
+
+  <!-- ==================================================================== -->
+  <!-- SHOT 3: composer unification                                          -->
+  <!-- ==================================================================== -->
+  <section class="shot" id="shot-composer">
+    <h1><em>03</em>输入区统一 —— 同一个圆角刻度、同一个控件高度、同一种按钮语言</h1>
+    <p class="cap">功能一个不动，只把三套并存的尺寸/形状收敛成一套：<b>圆角回到面板自己的刻度</b>、<b>控件高度统一 30px</b>、<b>「文字+图标」一律胶囊、「纯图标」一律圆形</b>。</p>
+    <div class="row">
+      <div class="pane" style="flex:1.1">
+        <div class="lab"><span class="badge old">现在</span> &nbsp;28 / 34 / 34px 三种高度，8 / 18 / 24px 三种圆角</div>
+        <div class="shell" style="height:250px">
+          <div class="hd" style="height:34px"><span class="brand" style="font-size:11.5px">DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding:10px 14px">
+              <div class="m"><div class="who">DeepSeek</div><div class="reply" style="opacity:.4"><p>…这些要合并进术语表吗？</p></div></div>
+            </div></div>
+            <div class="composer">
+              <div class="actions old">
+                <button class="tbtn on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>会话列表</button>
+                <button class="tbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
+                <span class="sp"></span>
+                <button class="tbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>DSH 迁移<span class="caret">▾</span></button>
+              </div>
+              <div class="card old">
+                <div class="textarea">给 DeepSeek 网页端发消息…</div>
+                <div class="tools old">
+                  <span class="pill old on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>深度思考</span>
+                  <span class="pill old"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14 0 18"/></svg>智能搜索</span>
+                  <span class="sp"></span>
+                  <span class="round old"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 11l-8 8a5 5 0 01-7-7l8-8a3.5 3.5 0 015 5l-8 8a2 2 0 01-3-3l7-7"/></svg></span>
+                  <span class="send old"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"/></svg></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="anno"><span class="n">!</span><div>动作行是 <b>8px 方角</b>、卡片是 <b>24px 大圆角</b>、胶囊是 <b>18px 全圆</b> —— 三个数各说各话；动作行顶部那条细线还和卡片的描边叠在一起，看上去是两道边。</div></div>
+      </div>
+      <div class="pane" style="flex:1.1">
+        <div class="lab"><span class="badge new">改后 · 推荐</span> &nbsp;一条基线：30px 控件 + 20px 卡片</div>
+        <div class="shell" style="height:250px">
+          <div class="hd" style="height:34px"><span class="brand" style="font-size:11.5px">DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding:10px 14px">
+              <div class="m"><div class="who">DeepSeek</div><div class="reply" style="opacity:.4"><p>…这些要合并进术语表吗？</p></div></div>
+            </div></div>
+            <div class="composer">
+              <div class="actions">
+                <button class="tpill on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>会话列表</button>
+                <button class="tpill"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
+                <span class="sp"></span>
+                <button class="tpill"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>DSH 迁移<span class="caret">▾</span></button>
+              </div>
+              <div class="card new focused">
+                <div class="textarea">给 DeepSeek 网页端发消息…</div>
+                <div class="tools new">
+                  <span class="pill new on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>深度思考</span>
+                  <span class="pill new"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14 0 18"/></svg>智能搜索</span>
+                  <span class="sp"></span>
+                  <span class="round new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 11l-8 8a5 5 0 01-7-7l8-8a3.5 3.5 0 015 5l-8 8a2 2 0 01-3-3l7-7"/></svg></span>
+                  <span class="send new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"/></svg></span>
+                </div>
+              </div>
+              <div class="phase"><span>就绪</span><span class="sep">|</span><span>网页会话 已登录</span><span class="sep">|</span><span>本会话 5 条消息</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="anno new"><span class="n">✓</span><div>动作行去掉顶部细线（把那条边让给卡片自己），按钮变成和胶囊同族的 <b>30px 圆胶囊</b>；卡片圆角收到 <b>20px</b>（<span class="k">--dschat-radius-xl</span>），聚焦时是柔和的一圈蓝而不是换一条硬描边。</div></div>
+      </div>
+      <div class="pane" style="flex:1.1">
+        <div class="lab"><span class="badge alt">备选</span> &nbsp;一体化 Dock：动作行搬进卡片顶部</div>
+        <div class="shell" style="height:250px">
+          <div class="hd" style="height:34px"><span class="brand" style="font-size:11.5px">DeepSeek Chat</span><span class="dot"></span><span class="sp"></span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding:10px 14px">
+              <div class="m"><div class="who">DeepSeek</div><div class="reply" style="opacity:.4"><p>…这些要合并进术语表吗？</p></div></div>
+            </div></div>
+            <div class="composer">
+              <div class="card new">
+                <div class="dockbar">
+                  <button class="tpill on" style="height:26px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>会话列表</button>
+                  <button class="tpill" style="height:26px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
+                  <span class="sp"></span>
+                  <button class="tpill" style="height:26px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>DSH 迁移<span class="caret">▾</span></button>
+                </div>
+                <div class="textarea" style="padding-top:6px">给 DeepSeek 网页端发消息…</div>
+                <div class="tools new">
+                  <span class="pill new on">深度思考</span><span class="pill new">智能搜索</span><span class="sp"></span>
+                  <span class="round new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 11l-8 8a5 5 0 01-7-7l8-8a3.5 3.5 0 015 5l-8 8a2 2 0 01-3-3l7-7"/></svg></span>
+                  <span class="send new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"/></svg></span>
+                </div>
+              </div>
+              <div class="phase"><span>就绪</span><span class="sep">|</span><span>网页会话 已登录</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="anno"><span class="n">?</span><div>整个输入区只剩 <b>一个</b>带边框的盒子，最统一；代价是「会话列表 / 新对话」看起来像输入框自身的一部分，输入区也更高更重。</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================================================================== -->
+  <!-- SHOT 4: dark + full panel                                             -->
+  <!-- ==================================================================== -->
+  <section class="shot" id="shot-dark">
+    <h1><em>04</em>深色下的同一套设计（含已展开的提问导航）</h1>
+    <p class="cap">深色里刻度用 <span class="k">white/22%</span>、当前条目用面板的强调蓝 <span class="k">#679efe</span>；胶囊底色改为不透明图层再叠模糊，避免深色下发灰。</p>
+    <div class="switcher"><button data-theme-btn="light" data-on>浅色</button><button data-theme-btn="dark">深色</button></div>
+    <div class="row">
+      <div class="pane">
+        <div class="shell" style="height:430px">
+          <div class="hd"><span class="brand"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 3.2c1.5 0 2.7 1.2 2.7 2.7S13.5 10.6 12 10.6 9.3 9.4 9.3 7.9 10.5 5.2 12 5.2z"/></svg>DeepSeek Chat</span><span class="dot"></span><span class="sp"></span><span class="kebab">⋯</span></div>
+          <div class="chatcol">
+            <div class="thread"><div class="thread-inner" style="padding-right:58px">
+              <div class="m user flash"><div class="who">你 · 14:07 · 刚刚发送</div><div class="bubble flash">这些「半术语」按上下文保留还是合并？给我一个判断标准。</div></div>
+              <div class="m"><div class="who">DeepSeek</div><div class="reply">
+                <p>判断标准可以落成三条可执行规则：</p>
+                <ul><li><b>可复现</b>：换一个译者还会译成同一个词 → 收；</li><li><b>可检索</b>：客户会在 CAT 工具里按它查 → 收；</li></ul>
+                <p>剩下那些只在这句里顺口的，不进表。<span class="cursor"></span></p>
+              </div></div>
+            </div></div>
+            <div class="navdock"><div class="navcard">
+              <div class="nh">本会话提问 · 8 条</div>
+              <button class="nrow"><span class="idx">5</span><span class="txt">但如果我要学生用这个 AI Agent，也需要讲这些编码吗？</span><i></i></button>
+              <button class="nrow"><span class="idx">6</span><span class="txt">那翻译工作坊是不是应该采用项目制？</span><i></i></button>
+              <button class="nrow" data-active><span class="idx">7</span><span class="txt">这些「半术语」按上下文保留还是合并？</span><i></i></button>
+              <button class="nrow" data-hover><span class="idx">8</span><span class="txt">给我一句话总结这门课的定位</span><i></i></button>
+            </div></div>
+            <div class="composer">
+              <div class="actions">
+                <button class="tpill on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>会话列表</button>
+                <button class="tpill"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
+                <span class="sp"></span>
+                <button class="tpill"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>DSH 迁移<span class="caret">▾</span></button>
+              </div>
+              <div class="card new">
+                <div class="atts"><div class="thumb"><div class="ph">🖼</div></div>
+                  <span class="chipx" style="display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 8px;border-radius:999px;font-size:11.5px;background:var(--bg2);border:1px solid var(--bd1);color:var(--tx2)">术语表.pdf</span></div>
+                <div class="textarea" style="padding-top:8px">按刚才那三条规则，把第 4 节重新过一遍。</div>
+                <div class="tools new">
+                  <span class="pill new on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>深度思考</span>
+                  <span class="pill new"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14 0 18"/></svg>智能搜索</span>
+                  <span class="sp"></span>
+                  <span class="round new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 11l-8 8a5 5 0 01-7-7l8-8a3.5 3.5 0 015 5l-8 8a2 2 0 01-3-3l7-7"/></svg></span>
+                  <span class="send new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M6 11l6-6 6 6"/></svg></span>
+                </div>
+              </div>
+              <div class="phase"><span>就绪</span><span class="sep">|</span><span>网页会话 已登录</span><span class="sep">|</span><span>本会话 12 条消息</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="anno" style="flex:1"><span class="n">4</span><div><b>待确认</b>：① 「一体化 Dock」备选要不要；② 问据导航的出现条件（≥2 条）与 268px 展开宽度是否合适；③ 卡片圆角 24→20 是否接受（会与官网 24px 略有差异，但更贴合面板自身刻度）。</div></div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  for (const btn of document.querySelectorAll('[data-theme-btn]')) {
+    btn.addEventListener('click', () => {
+      const theme = btn.dataset.themeBtn
+      const dark = theme === 'dark'
+      // The sheet itself stays light so the shot never flips under the camera;
+      // only the framed shells are themed. We therefore theme each .shell subtree.
+      for (const shell of document.querySelectorAll('#shot-dark .shell')) shell.dataset.theme = dark ? 'dark' : 'light'
+      for (const b of document.querySelectorAll('[data-theme-btn]')) b.toggleAttribute('data-on', b === btn)
+    })
+  }
+</script>
+</body>
+</html>

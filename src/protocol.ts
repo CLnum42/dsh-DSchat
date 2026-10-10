@@ -104,7 +104,7 @@ export interface WebChatSummary {
  */
 export type RecoverSource = 'history-api' | 'page-cache' | 'dom'
 
-/** Result of recovering one web conversation into the local store. */
+/** What syncing one web conversation into the local store produced. */
 export interface RecoverResult {
   readonly ok: boolean
   readonly chatId?: string
@@ -112,9 +112,24 @@ export interface RecoverResult {
   readonly sessionId?: string
   /** True when a new local transcript was created. */
   readonly created?: boolean
-  /** True when an existing transcript was overwritten with a fuller history. */
+  /** True when an existing transcript changed at all. */
   readonly updated?: boolean
-  /** Number of messages written. */
+  /**
+   * Messages the store did not have and the sync appended.
+   *
+   * A sync is a MERGE: the messages already stored keep their ids, timestamps
+   * and locally measured extras, and only what was missing is written. These
+   * four counters are what the panel and the agent report back, so a reader can
+   * tell "3 new turns" from "1 truncated reply completed".
+   */
+  readonly added?: number
+  /** Stored messages the web had written out in full (a truncated copy, completed). */
+  readonly completed?: number
+  /** Stored messages whose text the web changed (an edit or a regeneration). */
+  readonly replaced?: number
+  /** Stored messages the web copy does not contain (kept, never dropped). */
+  readonly kept?: number
+  /** Number of messages the web copy carried. */
   readonly messageCount?: number
   readonly source?: RecoverSource
   readonly error?: string
@@ -180,6 +195,12 @@ export interface DSchatState {
    * history looks inexplicably empty.
    */
   readonly storeWarning?: string
+  /**
+   * Per-run CSRF token the panel echoes in `x-dschat-token` on every mutating
+   * call. Delivered here because `/state` is already the panel's first request;
+   * see the routes module header for why the fence needs it.
+   */
+  readonly csrfToken?: string
 }
 
 /**
@@ -267,6 +288,61 @@ export function hasAnswerBody(markdown: string): boolean {
   const close = text.indexOf('</details>')
   if (close < 0) return false
   return text.slice(close + '</details>'.length).trim() !== ''
+}
+
+/**
+ * A finished thinking block, matched only at the START of a message.
+ *
+ * The closing tag is required: while the model is still reasoning the engine has
+ * only written the opener (see {@link hasAnswerBody}), and treating the text
+ * after an unterminated `</summary>` as the answer would hand the reader half a
+ * chain of thought in place of a reply.
+ */
+const THINKING_BLOCK = /^<details>\s*<summary>[^<]*<\/summary>([\s\S]*?)<\/details>/
+
+/** True for the engine thinking wrapper, closed or still streaming. */
+export function opensWithThinking(content: string): boolean {
+  return content.trimStart().startsWith('<details>')
+}
+
+/**
+ * Answer text of a stored assistant message: the content with a LEADING thinking
+ * block removed.
+ *
+ * Conservative on purpose — only a block that OPENS the message counts, so a
+ * reply that legitimately discusses `<details>` further down is untouched.
+ * A block whose closer has not arrived yet has no answer to hand back, so this
+ * returns '' rather than the reasoning.
+ *
+ * Shared by the panel (复制 / 引用 read the answer, never the reasoning) and the
+ * host half's transfer (a harness session gets the conversation, not the
+ * scratchpad and the pages it browsed).
+ *
+ * @param content - the stored message body.
+ */
+export function answerBody(content: string): string {
+  const text = content.trimStart()
+  if (!text.startsWith('<details>')) return content.trim()
+  const closed = THINKING_BLOCK.exec(text)
+  if (closed === null) return ''
+  return text.slice(closed[0].length).trim()
+}
+
+/**
+ * Reasoning text of a stored assistant message, '' when it carries none.
+ *
+ * Used only where the EXACT source text matters (复制思考过程), so whitespace is
+ * preserved as the model produced it.
+ *
+ * @param content - the stored message body.
+ */
+export function thinkingBody(content: string): string {
+  const text = content.trimStart()
+  if (!text.startsWith('<details>')) return ''
+  const closed = THINKING_BLOCK.exec(text)
+  if (closed !== null) return (closed[1] ?? '').trim()
+  const opener = text.indexOf('</summary>')
+  return opener < 0 ? '' : text.slice(opener + '</summary>'.length).trim()
 }
 
 /**
@@ -419,6 +495,15 @@ export interface SendResult {
    * duplicate the message on the next send.
    */
   readonly stored?: boolean
+  /**
+   * True when the turn ended because someone asked it to (a stop click, the
+   * agent's `dschat_stop`) rather than because the reply finished.
+   *
+   * Carried so `ok: true` is not read as "the model said all of this": the
+   * reply is what had been generated when the turn was ended, and the agent's
+   * render says so.
+   */
+  readonly stopped?: boolean
 }
 
 /** Result of transferring a transcript into harness mode. */
@@ -432,6 +517,29 @@ export interface TransferResult {
   readonly workspaceId?: string
   /** True when the brief was appended to an existing session instead of a new one. */
   readonly continued?: boolean
+  readonly error?: string
+}
+
+/**
+ * The hand-off text a transfer WOULD write (the `/transfer-preview` answer).
+ *
+ * Carried whole so the panel can show the reader exactly what will become the
+ * new session's first message — and edit it — before anything is created.
+ */
+export interface TransferPreview {
+  readonly ok: boolean
+  /** The exact markdown that will seed the session, including the provenance footer. */
+  readonly markdown?: string
+  /** True when an LLM brief was produced. */
+  readonly distilled?: boolean
+  /** The mode actually used after the config default was applied. */
+  readonly mode?: TransferMode
+  /** True when distillation was requested but could not run (raw text is used). */
+  readonly fallback?: boolean
+  /** Why not, in the reader's terms — present only when `fallback`. */
+  readonly fallbackReason?: string
+  readonly provider?: string
+  readonly model?: string
   readonly error?: string
 }
 
@@ -467,6 +575,11 @@ export interface WakeResult {
 export const DSCHAT_API = {
   state: '/api/dsh-dschat/state',
   /**
+   * The per-run CSRF token on its own, for a client that must re-arm after a
+   * host restart without paying for a whole `/state` snapshot.
+   */
+  token: '/api/dsh-dschat/token',
+  /**
    * Cheap streaming feed: one message, as a delta. Polled fast while a reply is
    * in flight; `/state` stays the slow, authoritative, whole-store snapshot.
    */
@@ -500,6 +613,11 @@ export const DSCHAT_API = {
   deepThink: '/api/dsh-dschat/deep-think',
   search: '/api/dsh-dschat/search',
   transfer: '/api/dsh-dschat/transfer',
+  /**
+   * Build the hand-off text without writing it, so the reader can see (and
+   * edit) what a transfer would put in the new session's first message.
+   */
+  transferPreview: '/api/dsh-dschat/transfer-preview',
   exportFile: '/api/dsh-dschat/export',
   renameChat: '/api/dsh-dschat/rename',
   deleteChat: '/api/dsh-dschat/delete',

@@ -132,6 +132,7 @@ test('attachment pruning never deletes a file a transcript still references', as
 
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: joinPath(dataDir, 'profile') })
+    await armCsrf(routes)
     const route = (path: string) => (routes as Route[]).find(r => r.path === path)!
 
     // A stored conversation that still carries the attachment.
@@ -244,11 +245,13 @@ test('host half imports and registers its surfaces', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'dschat-data-'))
     const { ctx, routes, tools, sections } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
 
     // Every route family member the panel calls must exist.
     const paths = routes.map(route => route.path)
     for (const path of [
       '/api/dsh-dschat/state',
+      '/api/dsh-dschat/token',
       '/api/dsh-dschat/context',
       '/api/dsh-dschat/wake',
       '/api/dsh-dschat/open-login',
@@ -260,6 +263,7 @@ test('host half imports and registers its surfaces', async () => {
       '/api/dsh-dschat/deep-think',
       '/api/dsh-dschat/search',
       '/api/dsh-dschat/transfer',
+      '/api/dsh-dschat/transfer-preview',
       '/api/dsh-dschat/export',
       '/api/dsh-dschat/rename',
       '/api/dsh-dschat/delete',
@@ -279,10 +283,14 @@ test('host half imports and registers its surfaces', async () => {
       assert.ok(paths.includes(path), `DSCHAT_API.${name} (${path}) has no route`)
     }
 
-    // The five agent tools keep their documented names.
+    /*
+     * The agent tools keep their documented names. `dschat_stop` is here because
+     * the BUSY hint told the agent to "先调用 dschat 停止" while no such tool was
+     * registered — a stuck agent was sent to a name that did not exist.
+     */
     assert.deepEqual(
       tools.map(tool => tool.name).sort(),
-      ['dschat_import', 'dschat_recover', 'dschat_send', 'dschat_status', 'dschat_transfer'],
+      ['dschat_import', 'dschat_recover', 'dschat_send', 'dschat_status', 'dschat_stop', 'dschat_transfer'],
     )
     assert.equal(sections.length, 1)
     assert.match(sections[0].name, /dsh-dschat/)
@@ -299,6 +307,7 @@ test('disabled config registers nothing', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'dschat-data-'))
     const { ctx, routes, tools, sections } = fakeContext()
     mod.apply(ctx, { enabled: false, announceToAgent: false, dataDir, profileDir: join(dataDir, 'p') })
+    await armCsrf(routes)
     assert.equal(routes.length, 0)
     assert.equal(tools.length, 0)
     assert.equal(sections.length, 0)
@@ -309,10 +318,49 @@ test('disabled config registers nothing', async () => {
 })
 
 /** A minimal IncomingMessage stand-in: headers, socket, async body chunks. */
-function fakeRequest(body: unknown, host = '127.0.0.1:19387', address = '127.0.0.1', url = '/') {
+/**
+ * The CSRF token the panel harvests from its first `/state` call.
+ *
+ * Module-scoped because `fakeRequest` is synchronous and every mutating route
+ * now requires the token: a test calls {@link armCsrf} once after `apply()`, and
+ * the requests it builds afterwards carry it. Tests that assert the fence itself
+ * pass their own headers (an empty or foreign token) instead.
+ */
+let TOKEN = ''
+
+/**
+ * Perform the panel's token handshake against a freshly applied plugin.
+ *
+ * A no-op when the plugin registered no routes (the disabled-config case), so
+ * the call can sit unconditionally next to every `apply()`.
+ */
+async function armCsrf(routes: Array<{ path: string; handler: Function }>): Promise<void> {
+  const state = routes.find(route => route.path === '/api/dsh-dschat/state')
+  if (state === undefined) { TOKEN = ''; return }
+  const res = fakeResponse()
+  await state.handler(fakeRequest(undefined), res)
+  TOKEN = typeof res.captured.body.csrfToken === 'string' ? res.captured.body.csrfToken : ''
+}
+
+/**
+ * One fake incoming request.
+ *
+ * A body means POST: every mutating route answers only POST now, and the polling
+ * routes are the ones called with no body, so the shape of the call already says
+ * which it is. `headers` overrides the defaults, which is how the fence tests
+ * present a foreign Origin or a missing token.
+ */
+function fakeRequest(
+  body: unknown,
+  host = '127.0.0.1:19387',
+  address = '127.0.0.1',
+  url = '/',
+  headers: Record<string, string> = {},
+) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
   return {
-    headers: { host },
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { host, 'x-dschat-token': TOKEN, ...headers },
     socket: { remoteAddress: address },
     url,
     async *[Symbol.asyncIterator]() {
@@ -357,6 +405,7 @@ test('attach route persists pasted image bytes and returns a real path', async (
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
 
     const attach = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/attach')
     assert.ok(attach !== undefined, 'attach route registered')
@@ -416,6 +465,7 @@ test('attachment route serves stored bytes and refuses anything outside the dire
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
 
     const attach = (routes as Route).find(route => route.path === '/api/dsh-dschat/attach')
     const serve = (routes as Route).find(route => route.path === '/api/dsh-dschat/attachment')
@@ -476,6 +526,7 @@ test('context route reports workspaces, cwd and resolved settings', async () => 
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
 
     const context = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/context')
     assert.ok(context !== undefined, 'context route registered')
@@ -501,6 +552,7 @@ test('every route refuses a non-loopback caller', async () => {
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     for (const route of routes as Route[]) {
       const res = fakeResponse()
       await route.handler(fakeRequest({}, '192.168.1.9:19387', '192.168.1.9'), res)
@@ -565,6 +617,7 @@ test('transfer writes a cold session through the persistence write handle', asyn
     const { service, created } = fakePersistence()
     const { ctx, routes, tools, emitted } = fakeContext({ persistence: service })
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
 
     // Seed the transcript store the way the panel does, through the restore route.
     const restore = (routes as Array<{ path: string; handler: Function }>).find(r => r.path === '/api/dsh-dschat/restore')!
@@ -581,7 +634,8 @@ test('transfer writes a cold session through the persistence write handle', asyn
     assert.ok(typeof chatId === 'string' && chatId !== '', 'restore returned a chat id')
 
     const transfer = (tools as Array<{ name: string; execute: Function }>).find(t => t.name === 'dschat_transfer')!
-    const result = await transfer.execute({ chatId, cwd: dataDir })
+    // `confirm: true` is the write; without it the call only builds a preview.
+    const result = await transfer.execute({ chatId, cwd: dataDir, confirm: true })
 
     assert.equal(result.error, undefined, `transfer must not fail: ${String(result.error)}`)
     assert.ok(typeof result.sessionId === 'string' && result.sessionId !== '', 'transfer returned a session id')
@@ -657,7 +711,7 @@ test('transfer writes a cold session through the persistence write handle', asyn
     const secondChatId = res2.captured.body.chatId as string
     assert.notEqual(secondChatId, chatId, 'a second round is its own transcript')
 
-    const continued = await transfer.execute({ chatId: secondChatId, targetSessionId: result.sessionId })
+    const continued = await transfer.execute({ chatId: secondChatId, targetSessionId: result.sessionId, confirm: true })
     assert.equal(continued.error, undefined, `continue must not fail: ${String(continued.error)}`)
     assert.equal(continued.sessionId, result.sessionId, 'continue targets the same session')
     assert.equal(continued.continued, true, 'continue reports the continue path')
@@ -694,6 +748,7 @@ test('re-appending the same handoff is a no-op, a new round still appends', asyn
     const { service, created } = fakePersistence()
     const { ctx, routes, tools } = fakeContext({ persistence: service })
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     const restore = (routes as Array<{ path: string; handler: Function }>).find(r => r.path === '/api/dsh-dschat/restore')!
     const importChat = async (title: string, messages: Array<Record<string, unknown>>): Promise<string> => {
       const res = fakeResponse()
@@ -702,28 +757,36 @@ test('re-appending the same handoff is a no-op, a new round still appends', asyn
     }
     const transfer = (tools as Array<{ name: string; execute: Function }>).find(t => t.name === 'dschat_transfer')!
 
-    // A session seeded from one conversation...
+    // A session seeded from one conversation, through the preview/confirm pair
+    // the tool now requires: nothing may be written by the preview call.
     const firstChatId = await importChat('幂等测试会话', [{ id: 'm1', role: 'user', content: '第一轮', ts: 1 }])
-    const seed = await transfer.execute({ chatId: firstChatId, cwd: dataDir })
+    const draft = await transfer.execute({ chatId: firstChatId, cwd: dataDir })
+    assert.equal(draft.error, undefined)
+    assert.equal(typeof draft.preview, 'string', 'the preview is what an unconfirmed call answers with')
+    assert.ok(draft.preview.length > 0, 'and it carries the text that would be written')
+    assert.equal(draft.sessionId, undefined, 'a preview creates nothing')
+    assert.equal(created.length, 0, 'and writes nothing at all')
+
+    const seed = await transfer.execute({ chatId: firstChatId, cwd: dataDir, confirm: true })
     assert.equal(seed.error, undefined)
     const [record] = created
 
     // ...and a SECOND web conversation appended to it: a real append.
     const secondChatId = await importChat('另一个网页会话', [{ id: 'n1', role: 'user', content: '另一个话题', ts: 1 }])
-    const first = await transfer.execute({ chatId: secondChatId, targetSessionId: seed.sessionId })
+    const first = await transfer.execute({ chatId: secondChatId, targetSessionId: seed.sessionId, confirm: true })
     assert.equal(first.continued, true)
     assert.notEqual(first.duplicate, true, 'the first append is not a duplicate')
     const afterFirst = record.events.length
 
     // The retry: same conversation, same state — nothing new may be written.
-    const retry = await transfer.execute({ chatId: secondChatId, targetSessionId: seed.sessionId })
+    const retry = await transfer.execute({ chatId: secondChatId, targetSessionId: seed.sessionId, confirm: true })
     assert.equal(retry.continued, true, 'the retry still reports the continue path')
     assert.equal(retry.duplicate, true, 'and it is reported as a duplicate')
     assert.equal(record.events.length, afterFirst, 'no second copy of the brief was appended')
 
     // The same conversation re-appended to the session it was SEEDED from is the
     // same duplicate: the brief is already there, whoever put it there.
-    const reseed = await transfer.execute({ chatId: firstChatId, targetSessionId: seed.sessionId })
+    const reseed = await transfer.execute({ chatId: firstChatId, targetSessionId: seed.sessionId, confirm: true })
     assert.equal(reseed.duplicate, true, 'a brief already in the session is never appended twice')
 
     // A later round of that conversation is a NEW handoff: its provenance covers
@@ -771,6 +834,7 @@ test('append refusals are reported in the user\'s terms', async () => {
       try {
         const { ctx, routes, tools } = fakeContext({ persistence: service })
         mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+        await armCsrf(routes)
 
         const restore = (routes as Array<{ path: string; handler: Function }>).find(r => r.path === '/api/dsh-dschat/restore')!
         const res = fakeResponse()
@@ -782,7 +846,7 @@ test('append refusals are reported in the user\'s terms', async () => {
         const chatId = res.captured.body.chatId as string
 
         const transfer = (tools as Array<{ name: string; execute: Function }>).find(t => t.name === 'dschat_transfer')!
-        const result = await transfer.execute({ chatId, targetSessionId: 'session-missing' })
+        const result = await transfer.execute({ chatId, targetSessionId: 'session-missing', confirm: true })
         assert.match(String(result.error), expected, `${errorName} is translated`)
       } finally {
         rmSync(dataDir, { recursive: true, force: true })
@@ -893,6 +957,7 @@ test('the state route exposes every field the panel reads', async () => {
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     const route = (routes as Array<{ path: string; handler: Function }>)
       .find(r => r.path === '/api/dsh-dschat/state')!
     const res = fakeResponse()
@@ -1558,6 +1623,65 @@ test('a second recover repairs a transcript that was imported short', async () =
   }
 })
 
+test('a re-sync merges: stored ids and local extras survive, only the missing turns are added', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-merge-'))
+  try {
+    const { TranscriptStore } = await import('../src/store.ts')
+    const store = new TranscriptStore({ dataDir })
+    /*
+     * What an earlier partial sync left behind: the first turn only, and with a
+     * locally measured thinking time the web copy knows nothing about. Both are
+     * things a re-sync must not throw away.
+     */
+    store.importTranscript({
+      title: '标题',
+      model: 'deepseek-chat',
+      webSessionId: 'sid-1',
+      messages: [
+        { id: 'kept-u1', role: 'user', content: '问题 1', ts: 11 },
+        {
+          id: 'kept-a1',
+          role: 'assistant',
+          ts: 22,
+          thinkingMs: 8_400,
+          content: '<details><summary>思考过程</summary>\n\n思考 2\n\n</details>\n\n回答 2',
+        },
+      ],
+    })
+
+    const mocks = webPage({ history: historyPayload(4), rows: [{ title: '标题', sessionId: 'sid-1' }] })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir, store)
+    const result = await engine.recoverWebConversation('标题')
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.created, false, 'the existing transcript is reused')
+    assert.equal(result.updated, true, 'and it gains the turns it was missing')
+    assert.equal(result.added, 2, 'exactly the two messages the store did not have')
+    assert.equal(result.completed, 0)
+    assert.equal(result.kept, 0)
+
+    const chat = store.list()[0]
+    assert.equal(chat?.messages.length, 4)
+    assert.equal(chat?.messages[0]?.id, 'kept-u1', 'the stored id survives the sync')
+    assert.equal(chat?.messages[1]?.id, 'kept-a1')
+    assert.equal(chat?.messages[0]?.ts, 11, 'and so does the timestamp the reader saw')
+    assert.equal(chat?.messages[1]?.thinkingMs, 8_400, 'thinkingMs is measured locally and is never dropped')
+    assert.equal(chat?.messages[2]?.role, 'user', 'the appended turns land in order')
+
+    // A third sync of the same conversation is a no-op.
+    const again = await engine.recoverWebConversation('标题')
+    assert.equal(again.ok, true, again.error)
+    assert.equal(again.updated, false, 'a sync that finds nothing new changes nothing')
+    assert.deepEqual(
+      store.list()[0]?.messages.map(message => message.id),
+      ['kept-u1', 'kept-a1', chat?.messages[2]?.id, chat?.messages[3]?.id],
+      'and every id is exactly where it was',
+    )
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('recover never truncates a stored transcript with a shorter history', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-nochurn-'))
   try {
@@ -1889,6 +2013,7 @@ test('the tail route answers with one message, never the whole store', async () 
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     const table = routes as Route[]
 
     const restore = table.find(route => route.path === '/api/dsh-dschat/restore')!
@@ -1955,6 +2080,7 @@ test('the tail carries the reasoning duration, and stays quiet without one', asy
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     const table = routes as Route[]
     const restore = table.find(route => route.path === '/api/dsh-dschat/restore')!
     const tail = table.find(route => route.path === '/api/dsh-dschat/tail')!
@@ -2055,6 +2181,7 @@ test('a cited reply hands its source table to the panel, and an uncited one stay
   try {
     const { ctx, routes } = fakeContext()
     mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
     const table = routes as Route[]
 
     const restore = table.find(route => route.path === '/api/dsh-dschat/restore')!
@@ -2112,10 +2239,19 @@ test('a cited reply hands its source table to the panel, and an uncited one stay
 })
 
 /**
- * An agent reading a transferred transcript has no panel to resolve
- * `[citation:N]` in, so the source table has to travel as markdown too.
+ * A HANDOFF carries the conversation, not the web page it happened on.
+ *
+ * This test used to pin the opposite: every rendered transcript appended the
+ * reply's source table as `> 参考来源：…` footnotes and kept the `[citation:N]`
+ * markers in the answer text. That put the web search results — URLs, page
+ * titles, and dead numbers pointing at a table the reader cannot see — into
+ * every migrated harness session. What a handoff owes the coding agent is what
+ * the user and the model said; the sources are the web page's business.
+ *
+ * `sources: true` still turns them back on for the one reader who wants them:
+ * the markdown export a person opens.
  */
-test('a transferred transcript carries its sources as footnote links', async () => {
+test('a handoff strips the web references, and the markdown export keeps them', async () => {
   /*
    * `transfer.ts` imports the harness SDK (`@deepseek-ai/dsh-llm` and friends),
    * which only resolves inside a running harness, so it is bundled with those
@@ -2138,26 +2274,56 @@ test('a transferred transcript carries its sources as footnote links', async () 
       'playwright-core': join(root, 'test/stubs/harness.ts'),
     },
   })
-  const { renderMessagesMarkdown } = await import(pathToFileURL(outfile).href) as {
-    renderMessagesMarkdown: (messages: unknown[], options?: { excludeThinking?: boolean }) => string
+  const { renderMessagesMarkdown, renderTranscriptMarkdown } = await import(pathToFileURL(outfile).href) as {
+    renderMessagesMarkdown: (messages: unknown[], options?: { excludeThinking?: boolean; sources?: boolean }) => string
+    renderTranscriptMarkdown: (transcript: unknown, options?: { excludeThinking?: boolean; sources?: boolean }) => string
   }
-  const markdown = renderMessagesMarkdown([
+  const messages = [
     { id: 'u1', role: 'user', content: '问', ts: 1 },
     {
-      id: 'a1', role: 'assistant', content: '有依据[citation:1]。', ts: 2,
+      id: 'a1', role: 'assistant', content: '有依据[citation:1]，也有 [citation:2]。', ts: 2,
       sources: [{ url: 'https://a.example/1', title: '甲页' }, { url: 'https://b.example/2' }],
     },
     { id: 'a2', role: 'assistant', content: '没有搜索。', ts: 3 },
+  ]
+
+  /* ---- the handoff (the default) ---- */
+  const handoff = renderMessagesMarkdown(messages)
+  assert.equal(handoff.includes('参考来源'), false, 'no source footnote in a handoff')
+  assert.equal(handoff.includes('a.example'), false, 'no cited URL in a handoff')
+  assert.equal(handoff.includes('[citation:'), false, 'no citation markers in a handoff')
+  assert.ok(handoff.includes('有依据，也有。'), 'the answer text survives with its markers removed')
+  assert.ok(handoff.includes('没有搜索。'), 'a reply that cited nothing is untouched')
+
+  // The same rule reaches every message of a whole transcript.
+  const transcript = renderTranscriptMarkdown({
+    id: 'c1', title: '标题', createdAt: 1, updatedAt: 2, model: 'deepseek-chat', messages,
+  })
+  assert.equal(transcript.includes('参考来源'), false, 'the whole-transcript render strips them too')
+  assert.equal(/https?:\/\/[ab]\.example/.test(transcript), false, 'and carries no source URL')
+
+  /*
+   * The `[reference:N]` spelling is the raw marker older web conversations
+   * persist (the engine normalizes it for the panel). It means the same thing,
+   * so it goes the same way.
+   */
+  const legacy = renderMessagesMarkdown([
+    { id: 'a4', role: 'assistant', content: '旧格式[reference:3]结尾。', ts: 4 },
   ])
-  assert.match(markdown, /> 参考来源：\[1\] \[甲页\]\(https:\/\/a\.example\/1\) · \[2\] \[https:\/\/b\.example\/2\]\(https:\/\/b\.example\/2\)/,
-    'sources are numbered to match the markers, with the URL as the fallback label')
+  assert.ok(legacy.includes('旧格式结尾。'), 'the raw reference spelling is stripped as well')
+
+  /* ---- the reader-facing export ---- */
+  const exported = renderMessagesMarkdown(messages, { sources: true })
+  assert.match(
+    exported,
+    /> 参考来源：\[1\] \[甲页\]\(https:\/\/a\.example\/1\) · \[2\] \[https:\/\/b\.example\/2\]\(https:\/\/b\.example\/2\)/,
+    'sources are numbered to match the markers, with the URL as the fallback label',
+  )
+  assert.ok(exported.includes('有依据[citation:1]，也有 [citation:2]。'), 'the export keeps the markers')
   assert.equal(
-    (markdown.match(/参考来源/g) ?? []).length, 1,
+    (exported.match(/参考来源/g) ?? []).length, 1,
     'a reply that cited nothing gets no footnote block',
   )
-  // The markers themselves stay untouched: the distilled brief is built from
-  // this text, and rewriting it would leak panel vocabulary into the session.
-  assert.ok(markdown.includes('有依据[citation:1]。'), 'the answer text is passed through verbatim')
 
   // Numbering follows the TABLE, not the footnote list: a source the page named
   // no URL for leaves a gap, so `[2]` still means the second source.
@@ -2166,8 +2332,330 @@ test('a transferred transcript carries its sources as footnote links', async () 
       id: 'a3', role: 'assistant', content: '结论[citation:2]。', ts: 4,
       sources: [{ url: '' }, { url: 'https://b.example/2', title: '乙页' }],
     },
-  ])
+  ], { sources: true })
   assert.match(gapped, /> 参考来源：\[2\] \[乙页\]\(https:\/\/b\.example\/2\)/, 'the second source keeps number 2')
   assert.equal(/\[1\]/.test(gapped), false, 'an unnamed source is simply not listed')
   rmSync(bundleDir, { recursive: true, force: true })
+})
+
+/* ------------------------------------------------------------------ P0 fence */
+
+/*
+ * The route family's trust fence, in all three layers.
+ *
+ * It used to be loopback alone, which is not enough for endpoints that drive a
+ * browser and delete history: a page on ANY other local port could clear the
+ * whole transcript store with
+ *
+ *     <img src="http://127.0.0.1:57531/api/dsh-dschat/clear">
+ *
+ * — no CORS, no token, not one line of the panel involved, because a simple GET
+ * ran the handler. These tests pin each layer separately, so a later edit that
+ * drops one of them fails here rather than in the reader's history.
+ */
+test('a mutating route refuses anything but a same-origin POST with the token', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-fence-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const clear = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/clear')!
+    const state = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/state')!
+
+    // Seed one conversation so "was it cleared?" is a real question.
+    const restore = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/restore')!
+    const seeded = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '不该被清掉', model: 'deepseek-chat', messages: [{ id: 'm1', role: 'user', content: '留着', ts: 1 }],
+    }), seeded)
+    assert.equal(seeded.captured.body.ok, true)
+    const countOf = async (): Promise<number> => {
+      const view = fakeResponse()
+      await state.handler(fakeRequest(undefined), view)
+      return (view.captured.body.chats as unknown[]).length
+    }
+    assert.equal(await countOf(), 1, 'the store holds the seeded conversation')
+
+    // (1) The `<img src=...>` trigger: a GET. Refused on method, before anything
+    // else can matter.
+    const viaGet = fakeResponse()
+    await clear.handler({ ...fakeRequest({}), method: 'GET' }, viaGet)
+    assert.equal(viaGet.captured.status, 405, 'a GET on a destructive route is refused')
+    assert.equal(await countOf(), 1, 'and the history is untouched')
+
+    // (2) A POST from another origin — the cross-site form/fetch case. The token
+    // is even valid here: Origin alone must be enough.
+    const foreign = fakeResponse()
+    await clear.handler(fakeRequest({}, '127.0.0.1:19387', '127.0.0.1', '/', {
+      origin: 'http://127.0.0.1:8080',
+      'sec-fetch-site': 'same-site',
+    }), foreign)
+    assert.equal(foreign.captured.status, 403, 'a foreign Origin is refused')
+    assert.equal(foreign.captured.body.code, 'ORIGIN')
+    assert.equal(await countOf(), 1, 'and the history is still untouched')
+
+    // (2b) `Origin: null` — a sandboxed iframe or a file:// page — is foreign,
+    // not "no origin", and the token does not rescue it.
+    const nullOrigin = fakeResponse()
+    await clear.handler(fakeRequest({}, '127.0.0.1:19387', '127.0.0.1', '/', { origin: 'null' }), nullOrigin)
+    assert.equal(nullOrigin.captured.status, 403, 'a null Origin is refused')
+
+    // (3) A same-origin POST carrying no token.
+    const tokenless = fakeResponse()
+    await clear.handler(fakeRequest({}, '127.0.0.1:19387', '127.0.0.1', '/', { 'x-dschat-token': '' }), tokenless)
+    assert.equal(tokenless.captured.status, 403, 'a missing token is refused')
+    assert.equal(tokenless.captured.body.code, 'CSRF')
+    assert.equal(await countOf(), 1, 'and still nothing was cleared')
+
+    // (4) The panel's own shape: POST, same origin, token. Accepted.
+    const allowed = fakeResponse()
+    await clear.handler(fakeRequest({}, '127.0.0.1:19387', '127.0.0.1', '/', {
+      origin: 'http://127.0.0.1:19387',
+      'sec-fetch-site': 'same-origin',
+    }), allowed)
+    assert.equal(allowed.captured.status, 200, 'the panel can still clear the history')
+    assert.equal(allowed.captured.body.ok, true)
+    assert.equal(await countOf(), 0, 'and the clear really happened')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('the loopback fence is fail-closed on an unknown peer address', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-peer-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const state = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/state')!
+    /*
+     * `address === undefined` used to count as loopback. A socket whose peer the
+     * runtime has not identified is MISSING evidence, not evidence of a local
+     * caller, and reading it as trusted is how the fence around a route that
+     * clears history becomes decoration.
+     */
+    const request = fakeRequest(undefined)
+    const res = fakeResponse()
+    await state.handler({ ...request, socket: { remoteAddress: undefined } }, res)
+    assert.equal(res.captured.status, 403, 'an unknown peer address is not a local caller')
+    assert.equal(res.captured.body.error, 'loopback only')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+/* --------------------------------------------------------- P0 path convergence */
+
+test('the send route only forwards attachments from the plugin attachment directory', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-sendpath-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const send = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/send')!
+
+    // A readable file that is NOT an attachment: the shape of "upload any local
+    // file to the user's DeepSeek account", which is what this route allowed.
+    const outside = fakeResponse()
+    await send.handler(fakeRequest({ text: '看看这个', images: ['/etc/hosts'] }), outside)
+    assert.equal(outside.captured.status, 403, 'a path outside the attachment directory is refused')
+    assert.equal(outside.captured.body.code, 'PATH')
+
+    // A sibling directory sharing the prefix must not pass either.
+    const nested = join(dataDir, 'attachments-evil', 'x.png')
+    const sibling = fakeResponse()
+    await send.handler(fakeRequest({ text: 'x', images: [nested] }), sibling)
+    assert.equal(sibling.captured.status, 403, 'a prefix-sharing sibling directory is not inside')
+
+    // An uploaded attachment is accepted by the fence (the engine is what would
+    // then talk to the browser, which this offline test deliberately has none of).
+    const attach = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/attach')!
+    const uploaded = fakeResponse()
+    await attach.handler(fakeRequest({
+      name: 'ok.png', mediaType: 'image/png', data: Buffer.from('bytes').toString('base64'),
+    }), uploaded)
+    assert.equal(uploaded.captured.body.ok, true)
+    const inside = fakeResponse()
+    await send.handler(fakeRequest({ text: 'x', images: [uploaded.captured.body.path as string] }), inside)
+    assert.notEqual(inside.captured.status, 403, 'a real attachment path clears the fence')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('the export route writes only inside the configured export directory', async () => {
+  const { existsSync: existsSyncSync } = await import('node:fs')
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-export-'))
+  const allowedDir = mkdtempSync(join(tmpdir(), 'dschat-exports-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, exportDir: allowedDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const exportRoute = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/export')!
+    const restore = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/restore')!
+    const seeded = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '导出测试', model: 'deepseek-chat', messages: [{ id: 'm1', role: 'user', content: '内容', ts: 1 }],
+    }), seeded)
+    const chatId = seeded.captured.body.chatId as string
+
+    // Any absolute path used to be honoured, which made "write a file wherever I
+    // say" a feature of a route fenced by a loopback check.
+    const away = fakeResponse()
+    await exportRoute.handler(fakeRequest({ chatId, cwd: tmpdir() }), away)
+    assert.equal(away.captured.status, 403, 'an export outside the configured directory is refused')
+    assert.equal(away.captured.body.code, 'PATH')
+
+    const inside = fakeResponse()
+    await exportRoute.handler(fakeRequest({ chatId }), inside)
+    assert.equal(inside.captured.body.ok, true, `the host's own directory works: ${String(inside.captured.body.error)}`)
+    // `filePath` is the NAME; `dir` is where it landed (the panel joins them).
+    assert.equal(inside.captured.body.dir, allowedDir, 'and the file landed in the configured directory')
+    assert.ok(existsSyncSync(join(allowedDir, String(inside.captured.body.filePath))), 'the file is really on disk')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    rmSync(allowedDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('the restore route drops malformed records instead of persisting them', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-restore-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const restore = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/restore')!
+
+    const res = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '结构校验',
+      model: 'deepseek-chat',
+      messages: [
+        { id: 'ok1', role: 'user', content: '正常消息', ts: 10 },
+        // Not a message: no role.
+        { id: 'bad1', content: '缺 role', ts: 11 },
+        // An unknown role.
+        { id: 'bad2', role: 'system', content: 'x', ts: 12 },
+        // Content that is not a string.
+        { id: 'bad3', role: 'assistant', content: { text: 'x' }, ts: 13 },
+        // A streaming flag on a restored message would leave the panel spinning
+        // forever with no engine turn behind it.
+        { id: 'ok2', role: 'assistant', content: '正常回复', ts: 14, streaming: true },
+        'not an object at all',
+      ],
+    }), res)
+    assert.equal(res.captured.body.ok, true)
+    assert.equal(res.captured.body.dropped, 4, 'the four unusable records are counted, not guessed at')
+
+    const state = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/state')!
+    const view = fakeResponse()
+    await state.handler(fakeRequest(undefined), view)
+    const [chat] = (view.captured.body.chats as Array<{ messages: Array<Record<string, unknown>> }>)
+    assert.equal(chat?.messages.length, 2, 'only the usable messages were stored')
+    assert.deepEqual(chat?.messages.map(message => message.id), ['ok1', 'ok2'])
+    assert.equal(chat?.messages[1]?.streaming, false, 'a restored message is never left streaming')
+
+    // Nothing usable at all is a refusal, not an empty conversation.
+    const empty = fakeResponse()
+    await restore.handler(fakeRequest({ title: '全坏', model: 'deepseek-chat', messages: [null, 42] }), empty)
+    assert.equal(empty.captured.status, 400, 'an all-invalid body does not create an empty chat')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('attachment upload rules are enforced in the engine, once, for every caller', async () => {
+  const { checkAttachments, MAX_ATTACH_FILES } = await import('../src/attachments.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'dschat-attach-rules-'))
+  try {
+    const good = join(dir, 'ok.png')
+    writeFileSync(good, 'x')
+    assert.deepEqual(checkAttachments([good]), [], 'a plain image is uploadable')
+
+    // The panel's own caps used to be the ONLY rules, and a scripted caller
+    // never sees them.
+    const many = Array.from({ length: MAX_ATTACH_FILES + 1 }, (_, i) => join(dir, `f${String(i)}.png`))
+    assert.equal(checkAttachments(many).length, 1, 'too many files is refused')
+    assert.match(checkAttachments(many)[0]!.reason, /最多上传/)
+
+    const big = join(dir, 'big.png')
+    writeFileSync(big, Buffer.alloc(25 * 1024 * 1024))
+    assert.match(checkAttachments([big])[0]!.reason, /超过/, 'an oversize file is refused')
+
+    const secret = join(dir, 'id_rsa')
+    writeFileSync(secret, 'PRIVATE KEY')
+    assert.match(checkAttachments([secret])[0]!.reason, /类型/, 'an extension-less private key is refused')
+
+    const pem = join(dir, 'server.pem')
+    writeFileSync(pem, 'PRIVATE KEY')
+    assert.match(checkAttachments([pem])[0]!.reason, /类型/, 'a .pem is refused')
+
+    assert.match(checkAttachments([join(dir, 'missing.png')])[0]!.reason, /不可读/, 'a missing file is refused')
+    assert.match(checkAttachments([dir])[0]!.reason, /类型|常规文件/, 'a directory is not a file')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/* -------------------------------------------------------------- P0 transfer */
+
+test('a transfer previews before it writes, and the write uses those exact bytes', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-preview-'))
+  try {
+    const { service, created } = fakePersistence()
+    const { ctx, routes } = fakeContext({ persistence: service })
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const restore = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/restore')!
+    const preview = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/transfer-preview')!
+    const transfer = (routes as Route[]).find(route => route.path === '/api/dsh-dschat/transfer')!
+
+    const seeded = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '预览测试', model: 'deepseek-chat',
+      messages: [{ id: 'm1', role: 'user', content: '帮我把这个做出来', ts: 1 }],
+    }), seeded)
+    const chatId = seeded.captured.body.chatId as string
+
+    const draft = fakeResponse()
+    await preview.handler(fakeRequest({ chatId }), draft)
+    assert.equal(draft.captured.body.ok, true)
+    assert.equal(typeof draft.captured.body.markdown, 'string', 'the preview carries the text')
+    assert.ok(String(draft.captured.body.markdown).includes('帮我把这个做出来'), 'which is the conversation')
+    /*
+     * No LLM is composed in this offline context, so distillation cannot run and
+     * the honest answer is a named fallback — NOT a success shape identical to a
+     * real brief, which is exactly the bug: 4 of 8 real transfers on this machine
+     * were raw replays the reader had no way to notice.
+     */
+    assert.equal(draft.captured.body.distilled, false, 'distillation is reported as unavailable')
+    assert.equal(draft.captured.body.fallback, true, 'and the preview says it fell back')
+    assert.match(String(draft.captured.body.fallbackReason), /蒸馏不可用/)
+    assert.equal(created.length, 0, 'a preview writes no session at all')
+
+    // The confirm path: the reader's text is what is written, byte for byte.
+    const edited = `${String(draft.captured.body.markdown)}\n\n> 我加的一行`
+    const written = fakeResponse()
+    await transfer.handler(fakeRequest({ chatId, markdown: edited, distilled: false }), written)
+    assert.equal(written.captured.body.ok, true, `transfer must not fail: ${String(written.captured.body.error)}`)
+    assert.equal(created.length, 1, 'now exactly one session exists')
+    const [record] = created
+    const seed = record!.events.find(event => event.type === 'user/message') as unknown as
+      { data?: { content?: Array<{ text?: string }> } } | undefined
+    assert.equal(seed?.data?.content?.[0]?.text, edited, 'the confirmed bytes are what lands, edits included')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
 })

@@ -39,6 +39,7 @@ import type {
 } from '../protocol.ts'
 import { hasAnswerBody, sourcesOf } from '../protocol.ts'
 import { serializeToMarkdown } from './html-md.ts'
+import { checkAttachments, describeRejections } from '../attachments.ts'
 
 /**
  * True when an error is just "the browser went away underneath us".
@@ -1045,6 +1046,25 @@ export class DeepSeekWebEngine {
   private busy = false
   /** Epoch ms when the current turn started (panel renders the elapsed timer). */
   private busySince: number | undefined
+  /**
+   * True while a `send` occupies the serial queue — from the moment it starts
+   * typing until it stops holding the queue.
+   *
+   * Exists so {@link stop} can tell "the queue is busy with a send I must not
+   * wait for" from "the queue is busy with a page navigation I must not
+   * interrupt". `busy` alone is not enough: it is set by the reply loop, which
+   * starts only after the composer work, so a stop clicked in that window would
+   * still queue behind the whole turn.
+   */
+  private sendInFlight = false
+  /**
+   * Set by {@link stop}, read by the reply loop.
+   *
+   * The loop is what commits the partial reply and clears `busy`, so a stop that
+   * only clicked the page would leave the panel showing "generating" until the
+   * reply timeout — the reader's click would look ignored for three minutes.
+   */
+  private stopRequested = false
   private lastError: string | undefined
   private lastErrorCode: DSchatErrorCode | undefined
   /**
@@ -1680,7 +1700,7 @@ export class DeepSeekWebEngine {
 
   private async listWebConversationsInner(): Promise<WebChatSummary[]> {
     // Listing the web sidebar is a user-initiated read: start the browser when
-    // it is cold. Returning [] here instead made "从网页恢复" show an empty
+    // it is cold. Returning [] here instead made "从网页同步" show an empty
     // list until some other action happened to launch the engine.
     if (this.page === undefined) {
       try {
@@ -1796,7 +1816,7 @@ export class DeepSeekWebEngine {
         return {
           ok: false,
           sessionId: sessionId === '' ? undefined : sessionId,
-          error: `「${title}」在网页端还没有任何消息（空会话），没有可恢复的内容。`,
+          error: `「${title}」在网页端还没有任何消息（空会话），没有可同步的内容。`,
         }
       }
 
@@ -1877,6 +1897,10 @@ export class DeepSeekWebEngine {
         ...(sessionId === '' ? {} : { sessionId }),
         created: result.created,
         updated: result.updated,
+        added: result.added,
+        completed: result.completed,
+        replaced: result.replaced,
+        kept: result.kept,
         messageCount: messages.length,
         source,
       }
@@ -2338,7 +2362,8 @@ export class DeepSeekWebEngine {
    *     is the page's own request going out — the strongest possible evidence,
    *     and after {@link resetCapture} it can only be THIS turn's request;
    *   - the stop affordance is on screen, which is what the page shows while
-   *     generating;
+   *     generating — but ONLY when it was not already on screen before Enter;
+   *     see `alreadyGenerating`;
    *   - the message list grew a row that was not there before Enter — the
    *     page's own copy of the user message, which is slower to appear than
    *     either of the above but survives a page whose streaming UI has not
@@ -2348,9 +2373,14 @@ export class DeepSeekWebEngine {
    * @param baselineKeys - message-list keys captured before Enter; an empty
    *   baseline (the selector matched nothing) skips the third check, because
    *   "we cannot tell" must not be read as "nothing was submitted".
+   * @param alreadyGenerating - true when the page was ALREADY generating before
+   *   this turn was submitted. The stop affordance then belongs to the PREVIOUS
+   *   turn, and accepting it made the next send believe its own submission had
+   *   landed while the page was still answering the old question. The signal has
+   *   to be bound to a specific turn, not to "something is generating".
    * @returns true when a turn is under way, false when the budget ran out.
    */
-  private async waitForTurnStart(timeoutMs: number, baselineKeys: readonly string[] = []): Promise<boolean> {
+  private async waitForTurnStart(timeoutMs: number, baselineKeys: readonly string[] = [], alreadyGenerating = false): Promise<boolean> {
     if (this.page === undefined) return false
     const deadline = Date.now() + timeoutMs
     for (;;) {
@@ -2361,7 +2391,7 @@ export class DeepSeekWebEngine {
         return stream.started === true || stream.done === true || (stream.text ?? '') !== ''
       }).catch(() => false)
       if (captureStarted) return true
-      if (await this.isGenerating()) return true
+      if (!alreadyGenerating && await this.isGenerating()) return true
       if (baselineKeys.length > 0) {
         const keys = await this.messageKeys()
         if (keys.some(key => !baselineKeys.includes(key))) return true
@@ -2384,12 +2414,36 @@ export class DeepSeekWebEngine {
   }
 
   /**
-   * Click the stop-generation affordance, best effort.
+   * Stop the running generation.
    *
-   * Queued, so a click from the panel waits behind whatever the engine is doing
-   * to the page.
+   * DELIBERATELY OFF the serial queue while a send owns it.
+   *
+   * `stopInner` used to be reached only through `queue.run` — the same queue a
+   * send occupies for its whole turn. An agent-issued send (`wait: true`) holds
+   * that queue for up to `replyTimeoutMs`, so the reader's 「停止」 sat BEHIND the
+   * very turn it was meant to interrupt and did nothing for up to three
+   * minutes: the most common "it's stuck" complaint, caused by the fix rather
+   * than the bug it was meant to cure.
+   *
+   * The bypass is narrow on purpose. It applies only when a send currently owns
+   * the queue, and even then the click is best-effort and only lands if the
+   * page's own stop control is on screen — which is why it cannot collide with
+   * the composer work `sendImpl` does first. With no send in flight the click
+   * goes through the queue as before, so it can never land in the middle of a
+   * page navigation or a browser relaunch.
    */
   async stop(): Promise<void> {
+    if (this.sendInFlight || this.busy) {
+      /*
+       * The flag is what actually ends the turn: the reply loop reads it, writes
+       * the partial answer, clears `busy` and releases the panel. Without it the
+       * page would stop generating while the engine kept waiting for a stream
+       * that will never complete.
+       */
+      this.stopRequested = true
+      await this.stopInner()
+      return
+    }
     await this.queue.run(() => this.stopInner())
   }
 
@@ -2399,7 +2453,8 @@ export class DeepSeekWebEngine {
    * Callers that are ALREADY inside the serial queue must use this one:
    * `SerialQueue.run` appends to a promise chain, so awaiting the queued `stop`
    * from inside a queued task would wait for that task to finish — a deadlock
-   * with no error and no timeout. `sendImpl` (failed submit) is such a caller.
+   * with no error and no timeout. `sendImpl` (failed submit) and the reply
+   * loop's timeout exit are such callers.
    */
   private async stopInner(): Promise<void> {
     if (this.page === undefined) return
@@ -2439,10 +2494,21 @@ export class DeepSeekWebEngine {
    * prefers an input that accepts more than images and falls back to any file
    * input at all — the page is the authority, and it answers with a visible
    * rejection if it will not take a given type.
+   *
+   * The rules the PAGE cannot state are enforced here, once, for every caller:
+   * `/send` from the panel, the `dschat_send` tool, and anything added later.
+   * The panel's own caps are UI rules a scripted caller never sees, and
+   * `setInputFiles` will happily push a private key into a chat upload.
    */
   private async attachFiles(paths: string[]): Promise<{ ok: boolean; error?: string }> {
     if (this.page === undefined) return { ok: false, error: '浏览器未启动' }
     if (paths.length === 0) return { ok: true }
+    const rejected = checkAttachments(paths)
+    if (rejected.length > 0) {
+      const message = `附件不符合上传规则：${describeRejections(rejected)}`
+      this.setLastError(message, 'PAGE_CHANGED')
+      return { ok: false, error: message }
+    }
     const selectors = [
       'input[type="file"][accept*="."]',
       'input[type="file"][accept*="pdf" i]',
@@ -2486,7 +2552,21 @@ export class DeepSeekWebEngine {
    *   and the panel polls it live.
    */
   send(text: string, wait = false, images?: string[]): Promise<SendResult> {
-    return this.queue.run(() => this.sendImpl(text, wait, images))
+    return this.queue.run(async () => {
+      /*
+       * `sendInFlight` spans the QUEUE HOLD, not the turn: the GUI path
+       * (`wait: false`) releases the queue as soon as the message is submitted
+       * while the reply keeps streaming, and `busy` covers that half. Between
+       * them the two flags answer "does a send own the queue right now?", which
+       * is what `stop` needs to decide whether it may bypass it.
+       */
+      this.sendInFlight = true
+      try {
+        return await this.sendImpl(text, wait, images)
+      } finally {
+        this.sendInFlight = false
+      }
+    })
   }
 
   private async sendImpl(text: string, wait: boolean, images?: string[]): Promise<SendResult> {
@@ -2601,6 +2681,16 @@ export class DeepSeekWebEngine {
        * affordances have all been observed to lie here, the text has not.
        */
       const previousReply = previousReplyMessage(this.store.getChat(chat.id)?.messages ?? [])
+      /*
+       * Whether the page was ALREADY generating as this turn was submitted.
+       *
+       * Sampled immediately before Enter, so it can only describe the previous
+       * turn. `waitForTurnStart` uses it to refuse the stop affordance as
+       * evidence for THIS turn: a leftover generation would otherwise be read as
+       * "my submission landed", and the reply loop would then commit whatever the
+       * page was already producing as the answer to this question.
+       */
+      const generatingBeforeEnter = await this.isGenerating()
       await page.keyboard.press('Enter')
 
       /*
@@ -2625,7 +2715,7 @@ export class DeepSeekWebEngine {
        * the morning after an overnight idle), so this decides on evidence rather
        * than on the clock alone.
        */
-      const started = await this.waitForTurnStart(SUBMIT_VERIFY_MS, baselineKeys)
+      const started = await this.waitForTurnStart(SUBMIT_VERIFY_MS, baselineKeys, generatingBeforeEnter)
       if (!started) {
         /*
          * The page may still be generating — the whole point of the wider
@@ -2649,6 +2739,22 @@ export class DeepSeekWebEngine {
       }
 
       const assistantId = randomUUID()
+      /*
+       * A stop that arrived while this turn was still being typed.
+       *
+       * `streamReply` clears the flag when the loop starts, so without this the
+       * click would be swallowed silently: the reader pressed 停止 in the second
+       * or two between Enter and the reply loop and nothing whatsoever happened
+       * — the exact "clicking stop does nothing" complaint this release fixes.
+       * The page's generation has just begun, so it is stopped here, and the
+       * turn ends with no reply row at all (the honest picture: the question is
+       * in the transcript, the answer was cancelled).
+       */
+      if (this.stopRequested) {
+        await this.stopInner()
+        this.stopRequested = false
+        return { ok: true, chatId: chat.id, stored: true, stopped: true }
+      }
       if (!wait) {
         // Fire-and-forget for the GUI: the background loop streams into the
         // transcript; the panel tails /tail and renders live.
@@ -2688,6 +2794,12 @@ export class DeepSeekWebEngine {
     if (this.page === undefined) return { ok: false, error: '浏览器未启动' }
     this.busy = true
     this.busySince = Date.now()
+    /*
+     * A stop request belongs to ONE turn. Cleared here — the only place a turn
+     * begins — so a click that raced the end of the previous turn, or arrived
+     * while the engine was idle, cannot abort the next turn before it starts.
+     */
+    this.stopRequested = false
     const started = Date.now()
     const timeout = this.config.replyTimeoutMs ?? DEFAULT_TIMEOUT_MS
     let replyMarkdown = ''
@@ -2796,11 +2908,28 @@ export class DeepSeekWebEngine {
       await this.page.waitForTimeout(700)
       let captureSeen = false
       let captureCompleted = false
+      /*
+       * True when the reader (or the agent) asked for this turn to end.
+       *
+       * It is NOT an error: the partial answer is what they asked to keep, and
+       * reporting a failure would say the reply was lost.
+       */
+      let stoppedByUser = false
       // One parser for the whole turn: it owns the citation tables, the current
       // fragment type and the assembled body, so each tick applies its delta
       // instead of rescanning everything received so far.
       const parser = createStreamReplyParser()
       while (Date.now() - started < timeout) {
+        /*
+         * Checked at the TOP of the tick, so a stop lands within one
+         * `STREAM_TICK_MS`. The engine is the only half that can end the turn
+         * and release the panel: clicking the page's control alone would leave
+         * the reader watching "generating" until the reply timeout.
+         */
+        if (this.stopRequested) {
+          stoppedByUser = true
+          break
+        }
         const capture = await readCapture()
         if (capture !== null && capture.started) {
           captureSeen = true
@@ -2884,7 +3013,13 @@ export class DeepSeekWebEngine {
         }
         await this.page.waitForTimeout(STREAM_TICK_MS)
       }
-      if (replyMarkdown === '' && replyCode === undefined) {
+      if (stoppedByUser) {
+        /*
+         * Ending the turn on request is not a failure, and it deliberately does
+         * NOT set an error: the partial answer is exactly what the reader asked
+         * to keep, and an error line under it would read as "this reply broke".
+         */
+      } else if (replyMarkdown === '' && replyCode === undefined) {
         if (captureSeen && captureCompleted) {
           replyError = '页面协议疑似改版：已捕获到回复流但无法解析出内容，请升级 dsh-dschat 插件'
           replyCode = 'PAGE_CHANGED'
@@ -2903,6 +3038,17 @@ export class DeepSeekWebEngine {
           replyCode = 'TIMEOUT'
         }
       } else if (replyCode === undefined && Date.now() - started >= timeout) {
+        /*
+         * The budget ran out with the page still generating.
+         *
+         * Returning the partial text is only half of ending a turn: the page
+         * keeps streaming into the conversation, so the reader's 重试 is answered
+         * BEHIND a reply they have already given up on, and the next send finds
+         * a stop affordance belonging to the abandoned turn. Click the page's own
+         * control before returning — `stopInner` rather than `stop()`, because
+         * this method may already own the serial queue.
+         */
+        await this.stopInner()
         replyError = '生成超时，已返回部分内容'
         replyCode = 'TIMEOUT'
       }
@@ -2928,7 +3074,16 @@ export class DeepSeekWebEngine {
       // finished reply in a 1 s debounce window.
       this.store.flush()
       if (replyError !== undefined) this.setLastError(replyError, replyCode)
-      return { ok: replyError === undefined, chatId, reply: replyMarkdown, error: replyError, code: replyCode }
+      return {
+        ok: replyError === undefined,
+        chatId,
+        reply: replyMarkdown,
+        error: replyError,
+        code: replyCode,
+        // Told apart from an ordinary success: the agent's tool render says this
+        // is a partial reply the reader stopped, not a finished answer.
+        ...(stoppedByUser ? { stopped: true } : {}),
+      }
     } catch (error) {
       const message = `生成过程中断：${String(error)}`
       this.setLastError(message)
