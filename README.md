@@ -30,11 +30,18 @@
 - **排队而不是被拒**：回复还在生成时输入的消息会排队，上一轮结束自动发出。
 - **迁移到 harness**：「DSH 迁移」把这段网页对话**蒸馏成任务简报**（或按原文迁移），新建 harness 会话或追加
   到已有会话，可指定工作区。迁移过去的上下文只有用户⇄模型的对话：R1 思考块被丢掉，`[citation:N]` /
-  `[reference:N]` 标记被清掉，「参考来源」列表不跟着走；唯一的例外是「导出 markdown」——导出文件是给人看的，
-  仍然保留来源链接。
+  `[reference:N]` 标记被清掉，「参考来源」列表不跟着走。**「导出 markdown」同样如此** —— 导出文件是这场
+  问答本身的记录：用户问了什么、DeepSeek 答了什么，不再带上搜索来源与思考过程。
+- **置顶会话**：会话列表里每条右侧有一个图钉，钉住的会话排到列表最上面、单独一组「置顶」，跟网页端侧栏
+  一样。钉住只是排列，不动会话的更新时间，也不影响下面的按时间排序。**点「从网页同步」会按网页端账号的
+  置顶状态对齐**（网页上钉了的会钉上，网页上没有的会取消）——置顶状态本身在网页账号上，这里只是镜像。
 - **从网页同步**：把网页端的对话增量收进本地，成为可搜索、可迁移的记录 —— 已有的消息保留本地的 id、时间与
-  思考用时，只补缺失的那些，被截断的回复就地补全。
-- **导出 markdown**：整段对话导出到 `~/Downloads`（可配置）。
+  思考用时，只补缺失的那些，被截断的回复就地补全。会话列表读的是网页端自己的会话接口（不是侧栏 DOM），
+  所以**整账号的会话都在**。同步会分两步：先按网页端对齐**置顶状态与每条会话的真实时间**、并把旧版本留下的
+  **重复记录合并成一条**（这一步只读一次会话列表，不读任何会话内容，也不改写你原有记录的文字），再补没收过
+  的会话内容。列表按「最近使用」从新到旧排列，置顶的一律在上。
+  在面板里聊过的会话会记住自己的网页 session id，**同步时按 id 合并回同一条记录**，不会再多出一条同名的。
+- **导出 markdown**：整段对话导出到 `~/Downloads`（可配置），只有用户的问题与 DeepSeek 的回答。
 - **运行状态**：`···` 菜单里的诊断卡，看引擎、登录、浏览器与错误原因。
 
 ### 安装
@@ -206,12 +213,25 @@ Thinking time, the `[citation:N]` chips in the body, and the source list (collap
 - **Migrate to DSH**: the **Migrate to DSH** menu distills the web conversation into a **task brief** (or replays
   it verbatim) and either starts a new harness session or appends to an existing one, optionally inside a
   workspace you pick. What crosses over is only the user⇄model conversation: the R1 reasoning block is dropped,
-  `[citation:N]` / `[reference:N]` markers are removed, and the search-source list is not transferred. One
-  exception: **Export markdown** keeps those source links, because that file is written for a person to read.
+  `[citation:N]` / `[reference:N]` markers are removed, and the search-source list is not transferred.
+  **Export markdown** works the same way — the exported file is a record of the exchange itself: what you asked
+  and what DeepSeek answered, with no search sources and no reasoning block.
+- **Pin conversations**: every row in the conversation list carries a pin. Pinned conversations move to the top
+  in their own **Pinned** block, the way the web sidebar does it. Pinning only rearranges the list — it does not
+  touch a conversation's update time, so unpinning later does not leave the row sitting at the top of the recent
+  list. **Sync from web aligns the pins with the web account** (pinned there → pinned here, not pinned there →
+  unpinned here): the pins live on the web account, and this side mirrors them.
 - **Sync from web**: pulls web conversations into the local store incrementally, so they become searchable and
   transferable. Messages already stored keep their local ids, timestamps and thinking time; only what was missing
-  is appended, and a truncated reply is completed in place.
-- **Export markdown**: writes the whole conversation to `~/Downloads` (configurable).
+  is appended, and a truncated reply is completed in place. The list is read from the web's own conversation
+  endpoint rather than from the rendered sidebar, so **every conversation in the account is there**. A sync has
+  two steps: first it aligns the **pins and each conversation's real time** with the web and **folds the duplicate
+  rows older versions left behind** into one (one list read, no conversation bodies, and no rewriting of the
+  messages you already had), then it imports the ones never seen here. The list itself is ordered
+  most-recently-used first, with the pinned rows above everything. A conversation you chatted in from the panel
+  remembers its web session id, so **syncing merges into that same row** instead of adding a second copy of it.
+- **Export markdown**: writes the whole conversation to `~/Downloads` (configurable) — user questions and
+  DeepSeek answers only.
 - **Runtime status**: a diagnostic card in the `···` menu covering the engine, the sign-in, the browser, and the
   last error.
 

@@ -79,8 +79,25 @@ export interface DSchatTranscript {
    * This — not the title — is a web conversation's real identity: titles
    * repeat, get renamed, and the old title-only dedup made a second recover of
    * the same conversation a no-op (so a short import could never be repaired).
+   *
+   * Since v0.8 the panel stamps it on the conversation the user is chatting in
+   * (see `DeepSeekWebEngine.stampWebSessionId`), which is what lets a LATER
+   * sync recognize that conversation instead of importing a second copy of it.
    */
   webSessionId?: string
+  /**
+   * True when the reader pinned this conversation to the top of the list.
+   *
+   * The local counterpart of the web's own 置顶: the pinned rows are listed
+   * above everything else, under their own 「置顶」 heading. Persisted here
+   * rather than read from the web on every render because it is the reader's
+   * own arrangement of THEIR list — the panel's list is not the web's list, so
+   * it cannot borrow the web's pin state wholesale. A conversation synced for
+   * the first time still INHERITS the web's `pinned` flag once, on creation.
+   */
+  pinned?: boolean
+  /** Epoch ms of the pin, used to order the pinned rows newest-first. */
+  pinnedAt?: number
 }
 
 /**
@@ -103,6 +120,9 @@ export interface DSchatChatSummary {
   /** How many messages the conversation has (the sidebar's row label). */
   readonly messageCount: number
   readonly webSessionId?: string
+  /** True when the reader pinned this conversation (see {@link DSchatTranscript}). */
+  readonly pinned?: boolean
+  readonly pinnedAt?: number
 }
 
 /**
@@ -135,6 +155,24 @@ export interface WebChatSummary {
    * the markup changed; callers then fall back to title matching.
    */
   sessionId?: string
+  /**
+   * The web account's own 置顶 flag.
+   *
+   * Read from `/api/v0/chat_session/fetch_page` (the DOM has no such field —
+   * the pinned rows simply render under a 「置顶」 heading). A conversation
+   * synced for the first time inherits it, so a fresh install starts out
+   * arranged the way the web already had it.
+   */
+  pinned?: boolean
+  /**
+   * The web's own `updated_at`, in epoch ms (the endpoint reports seconds).
+   *
+   * Real conversation time, as opposed to the moment of the local import: the
+   * sidebar's date groups (今天 / 昨天 / …) are derived from it, and the local
+   * list used to show the sync run's clock for every conversation it touched.
+   * Absent on the DOM fallback, which has no timestamps at all.
+   */
+  updatedAt?: number
 }
 
 /**
@@ -176,6 +214,18 @@ export interface RecoverResult {
   /** Number of messages the web copy carried. */
   readonly messageCount?: number
   readonly source?: RecoverSource
+  /**
+   * True when the web answered `40029 TOO_MANY_REQUESTS`.
+   *
+   * Its own flag rather than a sentence in `error`, because the batch sync has
+   * to ACT on it: hammering the history endpoint for every conversation in a
+   * long list earns a rate limit part-way through, and the old behaviour —
+   * silently treating the throttled answer as "the endpoint has nothing" and
+   * falling through to opening each conversation in the page — turned a
+   * one-second read into a navigation per conversation. The reader is told to
+   * wait and try again instead.
+   */
+  readonly rateLimited?: boolean
   readonly error?: string
 }
 
@@ -742,9 +792,21 @@ export const DSCHAT_API = {
   exportFile: '/api/dsh-dschat/export',
   renameChat: '/api/dsh-dschat/rename',
   deleteChat: '/api/dsh-dschat/delete',
+  /**
+   * Pin / unpin one conversation in the local list (the 置顶 of the web's own
+   * sidebar). A local arrangement — the web's own pin state is only READ, to
+   * seed a conversation the first time it is synced.
+   */
+  pinChat: '/api/dsh-dschat/pin',
   clearChats: '/api/dsh-dschat/clear',
   webChats: '/api/dsh-dschat/web-chats',
   recover: '/api/dsh-dschat/recover',
+  /**
+   * Mirror the web's 置顶 flags and conversation times onto conversations that
+   * are ALREADY stored. Separate from `recover` because it reads no history:
+   * one request fixes the arrangement of the whole list.
+   */
+  syncPins: '/api/dsh-dschat/sync-pins',
   /**
    * Read-only diagnostics for the page scrapers. Exists because a failed
    * recover used to report only "读取网页会话历史失败（页面可能已改版）", which

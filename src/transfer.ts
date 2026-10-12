@@ -110,8 +110,9 @@ function sourceFootnote(sources: readonly DSchatSource[] | undefined): string[] 
  * markers — a harness session gets the conversation between the user and the
  * model, and nothing about the web page it happened on.
  *
- * `sources: true` is for the markdown a PERSON reads (导出 markdown): there the
- * footnote is the point, since the reader can open the page it names.
+ * `导出 markdown` now renders with the very same defaults (see
+ * {@link exportTranscriptFile}): the file is a record of what the reader asked
+ * and what DeepSeek answered.
  */
 export interface RenderOptions {
   /** Drop the R1 reasoning block (default false — keep what the transcript holds). */
@@ -119,8 +120,9 @@ export interface RenderOptions {
   /**
    * Keep the citation table and its `[citation:N]` markers (default false).
    *
-   * Off is the handoff behaviour described above; on is for reader-facing
-   * markdown exports.
+   * Off is the handoff behaviour described above. It stays available for any
+   * caller that genuinely wants the pages a reply rested on, but nothing in the
+   * plugin asks for it any more: 导出 is a Q&A record, not a bibliography.
    */
   sources?: boolean
 }
@@ -1120,17 +1122,24 @@ export interface ExportTranscriptInput {
   cwd?: string
 }
 
-/** Write the transcript markdown into the target directory; returns the path. */
+/**
+ * Write the transcript markdown into the target directory; returns the path.
+ *
+ * The export is the reader's OWN record of the exchange, so it holds exactly
+ * that: every question they asked and every answer DeepSeek gave. It used to be
+ * the one render that KEPT the citation table and the reasoning block, on the
+ * theory that a human could open the pages a reply rested on — which made an
+ * exported conversation a mixture of the answer and the web search behind it.
+ * The 参考来源 footnotes, the `[citation:N]` markers mid-sentence, the
+ * search/browse trace and the R1 scratchpad are all web-page material and are
+ * dropped here now, exactly as every handoff path drops them.
+ */
 export function exportTranscriptFile(input: ExportTranscriptInput): { filePath: string } {
   const cwd = normalizeCwd(input.cwd)
   const slug = input.transcript.title.replace(/[^\w\u4e00-\u9fa5-]+/g, '-').replace(/-+/g, '-').slice(0, 60) || 'dschat'
   const fileName = `dschat-${slug}-${input.transcript.id.slice(-6)}.md`
   const filePath = join(cwd, fileName)
   mkdirSync(cwd, { recursive: true })
-  /*
-   * The one render that KEEPS the citation table: this file is for a person,
-   * who can open the pages a reply rested on. Every handoff path drops them.
-   */
-  writeFileSync(filePath, renderTranscriptMarkdown(input.transcript, { sources: true }), 'utf8')
+  writeFileSync(filePath, renderTranscriptMarkdown(input.transcript, { excludeThinking: true, sources: false }), 'utf8')
   return { filePath: basename(filePath) }
 }

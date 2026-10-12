@@ -96,6 +96,16 @@ interface ScrapedMessage {
   role: 'user' | 'assistant'
   parts: Array<{ kind: 'think' | 'body'; markdown: string; text: string }>
   /**
+   * When this message was written, in epoch ms — the web's own `inserted_at`
+   * when the message came from the history endpoint.
+   *
+   * Absent for a DOM scrape, which has no time at all; the consumer then falls
+   * back to "now". Recovered transcripts used to stamp `Date.now()` for EVERY
+   * message, so a synced conversation showed one timestamp repeated for every
+   * turn and its local `updatedAt` was the sync run's clock.
+   */
+  ts?: number
+  /**
    * The answer's search sources, in citation order (see {@link DSchatSource}).
    *
    * Only the fragment sources can supply this — the DOM shows citation chips
@@ -133,6 +143,14 @@ export interface WebMessage {
   message_id?: number
   role?: string
   status?: string
+  /**
+   * When the web wrote this message, in epoch seconds (a float).
+   *
+   * The web's REAL message time, and the reason a recovered transcript used to
+   * carry one identical timestamp for every turn: the import stamped
+   * `Date.now()` at sync time instead. See `webMessagesToScraped`.
+   */
+  inserted_at?: number
   fragments?: WebFragment[]
 }
 
@@ -140,7 +158,35 @@ export interface WebMessage {
 export interface WebHistory {
   title?: string
   messages: WebMessage[]
+  /**
+   * The conversation's own times, in epoch ms.
+   *
+   * `chat_session.updated_at` / `inserted_at`, which the history endpoint
+   * carries in epoch seconds. They are what the local transcript is stamped
+   * with, so the list is ordered and dated by when the conversation was really
+   * used rather than by when the sync happened to run. Absent on the
+   * IndexedDB-cache path and on the DOM scrape, neither of which exposes them.
+   */
+  createdAt?: number
+  updatedAt?: number
 }
+
+/**
+ * The outcome of one history read.
+ *
+ * A plain `WebHistory | undefined` could not express the one failure that
+ * matters — the fetch succeeded and the server REFUSED it — so callers treated
+ * a throttle as "this conversation has nothing" and went on to scrape the page
+ * for every conversation in a long list.
+ */
+interface WebHistoryResult {
+  history?: WebHistory
+  /** The server answered `40029 TOO_MANY_REQUESTS`. */
+  rateLimited?: boolean
+}
+
+/** DeepSeek's `code` for a throttled request (HTTP 200 with an error body). */
+const RATE_LIMIT_CODE = 40029
 
 const DEFAULT_TIMEOUT_MS = 180_000
 
@@ -200,6 +246,51 @@ const SUBMIT_VERIFY_POLL_MS = 100
  * textContent is the title.
  */
 export const WEB_CHAT_LINK_SELECTOR = 'a[href*="/a/chat/s/"]'
+
+/**
+ * How many pages of the web's conversation list one sync will read.
+ *
+ * The endpoint answers 100 sessions per page, so this is a 2 500-conversation
+ * ceiling — far past any real account, and a hard stop rather than a loop that
+ * follows `has_more` forever if the server ever reported it wrongly.
+ */
+const WEB_CHAT_PAGE_LIMIT = 25
+
+/**
+ * The web client version the conversation-list endpoint expects.
+ *
+ * Sent as `x-client-version`. It is not cosmetic: the server gates its cursor
+ * handling on the client headers, and a request without them answers with the
+ * FIRST page every time — pagination silently becomes the truncated list this
+ * endpoint was adopted to replace. Verified against the live site.
+ */
+const WEB_CLIENT_VERSION = '2.5.0'
+
+/**
+ * The web's timestamps are epoch SECONDS (a float, e.g. `1791783407.525`);
+ * everything this plugin stores is epoch ms.
+ *
+ * Non-numeric or missing input becomes 0, which callers treat as "unknown"
+ * rather than as 1970.
+ */
+function toEpochMs(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1000) : 0
+}
+
+/**
+ * The web session id inside a chat.deepseek.com URL, or `''`.
+ *
+ * The id is the segment after `/a/chat/s/` — the same routing contract every
+ * other page read depends on. Exported and pure so the URL shapes can be tested
+ * without a browser.
+ */
+export function webSessionIdFromUrl(url: string): string {
+  const marker = '/a/chat/s/'
+  const index = url.indexOf(marker)
+  if (index < 0) return ''
+  const rest = url.slice(index + marker.length)
+  return rest.split(/[/?#]/)[0]?.trim() ?? ''
+}
 
 /**
  * Message list of an opened web conversation. `[data-virtual-list-item-key]` is
@@ -619,6 +710,13 @@ export function webMessagesToScraped(messages: WebMessage[]): ScrapedMessage[] {
   const out: ScrapedMessage[] = []
   for (const message of messages) {
     const fragments = Array.isArray(message.fragments) ? message.fragments : []
+    /*
+     * The web's own write time for this message, carried through to the stored
+     * transcript. Absent (or zero) on an older payload, in which case the
+     * consumer stamps "now" exactly as it always did.
+     */
+    const ts = toEpochMs(message.inserted_at)
+    const stamped = ts === 0 ? {} : { ts }
     const textOf = (type: string): string =>
       fragments.filter(fragment => fragment.type === type).map(fragment => fragment.content ?? '').join('')
     if (message.role === 'USER') {
@@ -629,7 +727,7 @@ export function webMessagesToScraped(messages: WebMessage[]): ScrapedMessage[] {
         .filter(name => name !== '')
       const body = textOf('REQUEST').trim()
       const content = [body, ...attachments.map(name => `（附件：${name}）`)].filter(part => part !== '').join('\n\n')
-      if (content !== '') out.push({ role: 'user', parts: [{ kind: 'body', markdown: '', text: content }] })
+      if (content !== '') out.push({ role: 'user', parts: [{ kind: 'body', markdown: '', text: content }], ...stamped })
       continue
     }
     const parts: ScrapedMessage['parts'] = []
@@ -664,7 +762,11 @@ export function webMessagesToScraped(messages: WebMessage[]): ScrapedMessage[] {
     )
     // A message whose only fragments are a TIP / an unfinished search step has
     // nothing to show and is skipped rather than imported empty.
-    if (parts.length > 0) out.push(sources === undefined ? { role: 'assistant', parts } : { role: 'assistant', parts, sources })
+    if (parts.length > 0) {
+      out.push(sources === undefined
+        ? { role: 'assistant', parts, ...stamped }
+        : { role: 'assistant', parts, sources, ...stamped })
+    }
   }
   return out
 }
@@ -1647,12 +1749,23 @@ export class DeepSeekWebEngine {
     return raw
   }
 
-  /** Convert scraped DOM messages into transcript messages (markdown content). */
+  /**
+   * Convert scraped DOM messages into transcript messages (markdown content).
+   *
+   * Each message is stamped with the WEB's own write time when the source had
+   * one (`inserted_at`, via {@link webMessagesToScraped}). Only a DOM scrape has
+   * no time at all, and there the fallback is "now" — but even then the stamps
+   * are walked forward by a millisecond per message, so a recovered transcript
+   * is at least monotonic instead of N messages sharing one instant.
+   */
   private scrapedToMessages(scraped: ScrapedMessage[]): DSchatMessage[] {
+    let fallbackTs = Date.now()
     return scraped.map(message => {
+      const ts = message.ts !== undefined && message.ts > 0 ? message.ts : fallbackTs
+      fallbackTs = Math.max(ts + 1, fallbackTs)
       if (message.role === 'user') {
         const text = message.parts.map(part => part.text).join('\n\n').trim()
-        return { id: randomUUID(), role: 'user', content: text === '' ? '（无内容）' : text, ts: Date.now() }
+        return { id: randomUUID(), role: 'user', content: text === '' ? '（无内容）' : text, ts }
       }
       const think = message.parts.filter(part => part.kind === 'think').map(part => part.text).join('\n\n').trim()
       /*
@@ -1670,8 +1783,8 @@ export class DeepSeekWebEngine {
       const thinkMd = think === '' ? '' : `<details><summary>思考过程</summary>\n\n${think}\n\n</details>`
       const content = [thinkMd, body].filter(Boolean).join('\n\n')
       return message.sources === undefined
-        ? { id: randomUUID(), role: 'assistant', content, ts: Date.now() }
-        : { id: randomUUID(), role: 'assistant', content, ts: Date.now(), sources: message.sources }
+        ? { id: randomUUID(), role: 'assistant', content, ts }
+        : { id: randomUUID(), role: 'assistant', content, ts, sources: message.sources }
     })
   }
 
@@ -1685,7 +1798,7 @@ export class DeepSeekWebEngine {
    * "你好问候").
    */
   /**
-   * The web sidebar, read on the serial queue.
+   * The web conversation list, read on the serial queue.
    *
    * Reading it is a page operation that can also LAUNCH the browser (below), so
    * it must not overlap a send that is typing into the composer — see
@@ -1698,6 +1811,52 @@ export class DeepSeekWebEngine {
     return this.queue.run(() => this.listWebConversationsInner())
   }
 
+  /**
+   * Align the LOCAL list with the web account, without reading any conversation's
+   * history: fold duplicate rows, then mirror 置顶 flags and real times.
+   *
+   * 「从网页同步」 only ever imported conversations it had never seen (that is
+   * what "missing" means), so a reader who pinned a conversation in the browser
+   * saw nothing change here — the pin lived on a row that was already imported.
+   * The list endpoint carries the flag and the conversation's own `updated_at`
+   * for the whole account in one request, so both are applied to every matching
+   * local row at once, and the list stops showing a sync-time stamp for
+   * conversations imported by an older version.
+   *
+   * The duplicate fold runs FIRST so the survivor is the row the web's pin and
+   * time land on.
+   *
+   * @returns how many rows matched, how many duplicates were folded, and how
+   *   many rows changed in each way.
+   */
+  async syncWebListState(): Promise<{ matched: number; pinned: number; unpinned: number; retimed: number; folded: number }> {
+    return this.queue.run(async () => {
+      const folded = this.store.foldDuplicateConversations()
+      const rows = await this.listWebConversationsInner()
+      return { ...this.store.applyWebListState(rows), folded }
+    })
+  }
+
+  /**
+   * Every web conversation, read from the site's OWN list endpoint first.
+   *
+   * Why not the sidebar DOM (which is what this used to be, and is now only the
+   * fallback): the sidebar is an infinite-scroll list. Measured on a live
+   * account, a freshly loaded page has the first 100 rows in the DOM and grows
+   * to 595 as it is scrolled, each extra page arriving from
+   * `GET /api/v0/chat_session/fetch_page?lte_cursor.pinned=false&lte_cursor.updated_at=<sec>`
+   * — so a DOM read could only ever see the newest screenful-plus, and 「从网页
+   * 同步」 silently offered a fraction of the account. The endpoint also carries
+   * two fields the DOM has nowhere: the account's own `pinned` flag (the DOM
+   * only groups those rows under a 「置顶」 heading) and the real `updated_at`,
+   * which is what the reader's list should be ordered and dated by.
+   *
+   * Same authenticated, same-origin request the page itself makes; the page's
+   * own token and cookies are used, nothing is fetched out of band. The
+   * `x-client-*` headers are not optional — without them the server ignores the
+   * cursor and answers with the first page every time (measured), which would
+   * turn pagination into the same truncated list the DOM gave.
+   */
   private async listWebConversationsInner(): Promise<WebChatSummary[]> {
     // Listing the web sidebar is a user-initiated read: start the browser when
     // it is cold. Returning [] here instead made "从网页同步" show an empty
@@ -1710,9 +1869,140 @@ export class DeepSeekWebEngine {
       }
     }
     if (this.page === undefined) return []
+    const fromApi = await this.listWebConversationsViaApi()
+    if (fromApi !== undefined) return fromApi
+    return this.listWebConversationsFromDom()
+  }
+
+  /**
+   * The site's own paginated conversation list.
+   *
+   * @returns the conversations in the web's own order (置顶 first, then newest),
+   *   or `undefined` when the endpoint did not answer and the DOM should be read
+   *   instead. An EMPTY account yields `[]`, which is an answer, not a failure.
+   */
+  private async listWebConversationsViaApi(): Promise<WebChatSummary[] | undefined> {
+    if (!this.isPageAlive()) return undefined
+    try {
+      if (!this.page!.url().startsWith(this.origin())) await this.openDeepSeekPage()
+      /*
+       * EVERYTHING the callback needs arrives as its ARGUMENT.
+       *
+       * playwright serializes this function's source and runs it in the page, so
+       * a reference to a module-level constant is a `ReferenceError` there — not
+       * a compile error, and not a visible one either: the callback's own
+       * try/catch turns it into "the endpoint did not answer", and the reader
+       * silently gets the truncated DOM list this whole path exists to replace.
+       * (Measured live: `x-client-version: WEB_CLIENT_VERSION` in the closure
+       * made every sync fall back to the sidebar, 100 rows and no pins.)
+       * Same rule for helpers: `toEpochMs` is applied on THIS side, from the raw
+       * seconds the callback returns.
+       */
+      const rows = await this.page!.evaluate(async (options: { maxPages: number; clientVersion: string }) => {
+        try {
+          const raw = localStorage.getItem('userToken')
+          const token = raw === null ? '' : (JSON.parse(raw)?.value ?? '')
+          const headers: Record<string, string> = {
+            'x-client-locale': 'zh_CN',
+            'x-client-version': options.clientVersion,
+            'x-client-platform': 'web',
+            'x-client-bundle-id': 'com.deepseek.chat',
+          }
+          if (token !== '') headers.authorization = `Bearer ${token}`
+          const found: Array<{ title: string; sessionId: string; pinned: boolean; updatedAtSeconds: number }> = []
+          const seen = new Set<string>()
+          let cursor = 'lte_cursor.pinned=false'
+          for (let page = 0; page < options.maxPages; page += 1) {
+            const response = await fetch(`/api/v0/chat_session/fetch_page?${cursor}`, { credentials: 'include', headers })
+            if (!response.ok) return page === 0 ? null : found
+            const payload = await response.json()
+            const biz = payload?.data?.biz_data
+            const sessions: unknown = biz?.chat_sessions
+            if (payload?.code !== 0 || !Array.isArray(sessions)) return page === 0 ? null : found
+            for (const entry of sessions as Array<Record<string, unknown>>) {
+              const id = typeof entry?.id === 'string' ? entry.id : ''
+              if (id === '' || seen.has(id)) continue
+              seen.add(id)
+              /*
+               * `updated_at` is the only timestamp this response carries — a row
+               * is `id, title, title_type, pinned, model_type, updated_at` and
+               * nothing else (verified against the live site) — so the
+               * conversation's creation time is not available from here.
+               */
+              const updated = entry?.['updated_at']
+              found.push({
+                title: String(entry?.title ?? ''),
+                sessionId: id,
+                pinned: entry?.pinned === true,
+                updatedAtSeconds: typeof updated === 'number' && Number.isFinite(updated) ? updated : 0,
+              })
+            }
+            if (biz?.has_more !== true || sessions.length === 0) break
+            const oldest = (sessions[sessions.length - 1] as Record<string, unknown> | undefined)?.['updated_at']
+            if (typeof oldest !== 'number' || !Number.isFinite(oldest)) break
+            cursor = `lte_cursor.pinned=false&lte_cursor.updated_at=${String(oldest)}`
+          }
+          return found
+        } catch {
+          return null
+        }
+      }, { maxPages: WEB_CHAT_PAGE_LIMIT, clientVersion: WEB_CLIENT_VERSION }).catch(() => null)
+      if (rows === null || rows === undefined) return undefined
+      /*
+       * Epoch SECONDS (a float, as the endpoint reports them) become epoch ms
+       * here, on this side — a helper called from inside the page callback would
+       * be a `ReferenceError` there (see the note above).
+       *
+       * Ordered here too, rather than trusting the wire: the pinned rows lead,
+       * then the rest by real update time. The web's own order already looks like
+       * this, and a reader comparing the two lists should see the same thing even
+       * if that ever changes.
+       */
+      return rows
+        .map(row => ({
+          title: row.title,
+          sessionId: row.sessionId,
+          pinned: row.pinned,
+          updatedAt: toEpochMs(row.updatedAtSeconds),
+        }))
+        .sort((left, right) => {
+          if (left.pinned !== right.pinned) return left.pinned ? -1 : 1
+          return right.updatedAt - left.updatedAt
+        })
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * The sidebar as rendered — the fallback when the list endpoint is
+   * unavailable (logged out, blocked, or the API changed).
+   *
+   * Only what has been paged in can be read: the sidebar loads rows as it is
+   * scrolled, so this sees the first page and no timestamps. That is exactly why
+   * it is the fallback and not the source.
+   */
+  private async listWebConversationsFromDom(): Promise<WebChatSummary[]> {
+    if (this.page === undefined) return []
     const rows = await this.page.evaluate((selector: string) => {
-      const found: Array<{ title: string; sessionId?: string }> = []
+      const found: Array<{ title: string; sessionId?: string; pinned?: boolean }> = []
       const seen = new Set<string>()
+      /*
+       * The pin flag IS recoverable here after all: the 「置顶」 heading and the
+       * rows it groups share one container, so the group is that heading's
+       * parent subtree. Read once, and only when such a heading exists.
+       */
+      const pinnedIds = new Set<string>()
+      const headings = Array.from(document.querySelectorAll<HTMLElement>('div, span, h1, h2, h3, h4'))
+        .filter(el => el.childElementCount === 0 && (el.textContent ?? '').trim() === '置顶')
+      for (const heading of headings) {
+        const group = heading.parentElement
+        if (group === null) continue
+        for (const anchor of Array.from(group.querySelectorAll<HTMLAnchorElement>(selector))) {
+          const id = (anchor.getAttribute('href') ?? '').split('/a/chat/s/')[1]?.split(/[/?#]/)[0]?.trim() ?? ''
+          if (id !== '') pinnedIds.add(id)
+        }
+      }
       for (const el of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
         const text = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
         // The row's action buttons are icon-only, so a non-empty anchor text is
@@ -1723,11 +2013,12 @@ export class DeepSeekWebEngine {
         const key = id === '' ? `title:${text}` : `id:${id}`
         if (seen.has(key)) continue
         seen.add(key)
-        found.push(id === '' ? { title: text } : { title: text, sessionId: id })
+        const pinned = pinnedIds.has(id)
+        found.push(id === '' ? { title: text, pinned } : { title: text, sessionId: id, pinned })
       }
       // The sidebar is long; the old cap of 50 silently hid half of it.
       return found.slice(0, 200)
-    }, WEB_CHAT_LINK_SELECTOR).catch(() => [] as Array<{ title: string; sessionId?: string }>)
+    }, WEB_CHAT_LINK_SELECTOR).catch(() => [] as Array<{ title: string; sessionId?: string; pinned?: boolean }>)
     return rows
   }
 
@@ -1751,7 +2042,7 @@ export class DeepSeekWebEngine {
    * that was imported short (by an older version) repairs it in place instead
    * of being skipped as a duplicate.
    */
-  async recoverWebConversation(query: string | { title?: string; sessionId?: string }): Promise<RecoverResult> {
+  async recoverWebConversation(query: string | { title?: string; sessionId?: string; pinned?: boolean }): Promise<RecoverResult> {
     /*
      * On the serial queue, because recovering ends in `openWebConversation` —
      * a page navigation. Off the queue it could run while a send was still
@@ -1763,7 +2054,7 @@ export class DeepSeekWebEngine {
     return this.queue.run(() => this.recoverWebConversationInner(query))
   }
 
-  private async recoverWebConversationInner(query: string | { title?: string; sessionId?: string }): Promise<RecoverResult> {
+  private async recoverWebConversationInner(query: string | { title?: string; sessionId?: string; pinned?: boolean }): Promise<RecoverResult> {
     const asked = typeof query === 'string' ? { title: query } : query
     const askedTitle = asked.title?.trim() ?? ''
     const askedId = asked.sessionId?.trim() ?? ''
@@ -1782,6 +2073,16 @@ export class DeepSeekWebEngine {
       /* ------------------------------------------------ 1. identify it */
       let sessionId = askedId
       let title = askedTitle
+      /**
+       * The web's own 置顶 flag, when it is knowable.
+       *
+       * `undefined` means "not known", which is not the same as `false`: the
+       * import mirrors a boolean and leaves the local arrangement alone without
+       * one (see `TranscriptStore.importTranscript`).
+       */
+      let pinned = asked.pinned
+      /** The conversation's real times, from whichever web read supplies them. */
+      let webUpdatedAt: number | undefined
       if (sessionId === '' || title === '') {
         const rows = await this.listWebConversationsInner()
         const match = sessionId !== ''
@@ -1790,6 +2091,8 @@ export class DeepSeekWebEngine {
         if (match === undefined) return { ok: false, error: `未在网页端找到会话「${askedTitle === '' ? askedId : askedTitle}」` }
         sessionId = sessionId !== '' ? sessionId : (match.sessionId ?? '')
         title = title !== '' ? title : match.title
+        if (match.pinned !== undefined) pinned = match.pinned
+        if (match.updatedAt !== undefined && match.updatedAt > 0) webUpdatedAt = match.updatedAt
       }
 
       /* ------------------------------------- 2. history endpoint (fast path) */
@@ -1797,12 +2100,34 @@ export class DeepSeekWebEngine {
       let source: RecoverSource = 'history-api'
       /** Messages the endpoint reported; -1 = it did not answer. */
       let apiMessages = -1
+      let rateLimited = false
+      let webCreatedAt: number | undefined
       if (sessionId !== '') {
         const history = await this.fetchWebHistory(sessionId)
-        if (history !== undefined) {
-          apiMessages = history.messages.length
-          scraped = webMessagesToScraped(history.messages)
-          if (title === '') title = history.title ?? ''
+        if (history.history !== undefined) {
+          apiMessages = history.history.messages.length
+          scraped = webMessagesToScraped(history.history.messages)
+          if (title === '') title = history.history.title ?? ''
+          // The history endpoint's `chat_session` is the better source: it is the
+          // conversation the reader actually opened, with its own times.
+          if (history.history.updatedAt !== undefined) webUpdatedAt = history.history.updatedAt
+          webCreatedAt = history.history.createdAt
+        } else if (history.rateLimited === true) {
+          rateLimited = true
+        }
+      }
+
+      /*
+       * Throttled is not the same as empty, and it is not a reason to go and
+       * navigate the page: the reader is told to wait, and told why. The batch
+       * sync acts on this flag too — see the `/recover` route.
+       */
+      if (rateLimited && scraped.length === 0) {
+        return {
+          ok: false,
+          rateLimited: true,
+          sessionId: sessionId === '' ? undefined : sessionId,
+          error: '网页端接口限流（TOO_MANY_REQUESTS）：同步得太快了。请等一两分钟再试。',
         }
       }
 
@@ -1883,12 +2208,18 @@ export class DeepSeekWebEngine {
         messages,
         ...(sessionId === '' ? {} : { webSessionId: sessionId }),
         /*
-         * The one caller allowed to match by title: this IS a re-sync of a
-         * conversation the web sidebar named, and the DOM-scraped layer has no
-         * session id to match on. Everywhere else a title is not an identity —
-         * see TranscriptStore.importTranscript.
+         * The one caller allowed to match by title — and, failing that, by the
+         * reader's own questions: this IS a re-sync of a conversation the web
+         * sidebar named, and the DOM-scraped layer has no session id to match
+         * on. Everywhere else a title is not an identity — see
+         * TranscriptStore.importTranscript.
          */
         matchByTitle: true,
+        // A boolean MIRRORS the web's 置顶 (true pins, false unpins); undefined
+        // leaves the local arrangement alone.
+        ...(pinned === undefined ? {} : { pinned }),
+        ...(webCreatedAt === undefined ? {} : { createdAt: webCreatedAt }),
+        ...(webUpdatedAt === undefined ? {} : { updatedAt: webUpdatedAt }),
       })
       return {
         ok: true,
@@ -1901,6 +2232,7 @@ export class DeepSeekWebEngine {
         completed: result.completed,
         replaced: result.replaced,
         kept: result.kept,
+        ...(result.merged === undefined ? {} : { merged: result.merged }),
         messageCount: messages.length,
         source,
       }
@@ -1921,40 +2253,82 @@ export class DeepSeekWebEngine {
    * issues on open, made from the app's own page, authorised with the app's
    * own token from `localStorage.userToken`. Omitting the cache parameters
    * makes the server answer with the full message list (`cache_control:
-   * REPLACE`) instead of the delta it sends a warm client. Failure is
-   * deliberately silent — every caller falls through to the cache, then to the
-   * DOM.
+   * REPLACE`) instead of the delta it sends a warm client.
+   *
+   * Failure is normally silent — every caller falls through to the cache, then
+   * to the DOM — with ONE exception: `40029 TOO_MANY_REQUESTS` is reported
+   * separately. A long list read conversation-by-conversation earns that rate
+   * limit part-way through (measured: a 203-conversation sweep was throttled
+   * from about the 100th), and treating it as "the endpoint has nothing" made
+   * the sync open and scrape every remaining conversation instead — minutes of
+   * navigation for a read that was refused, and the reader was never told why.
    */
-  private async fetchWebHistory(sessionId: string): Promise<WebHistory | undefined> {
-    if (!this.isPageAlive()) return undefined
+  private async fetchWebHistory(sessionId: string): Promise<WebHistoryResult> {
+    if (!this.isPageAlive()) return {}
     try {
       // A same-origin fetch needs the page to be on the chat origin.
       if (!this.page!.url().startsWith(this.origin())) {
         await this.openDeepSeekPage()
       }
-      const result = await this.page!.evaluate(async (sid: string) => {
+      /*
+       * The client version arrives as the argument, not from the closure:
+       * playwright runs this source in the page, where a module-level constant
+       * does not exist (see `listWebConversationsViaApi` for the full note and
+       * the measured symptom).
+       */
+      const result = await this.page!.evaluate(async (input: { sid: string; clientVersion: string }) => {
         try {
           const raw = localStorage.getItem('userToken')
           const token = raw === null ? '' : (JSON.parse(raw)?.value ?? '')
-          const response = await fetch(`/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(sid)}`, {
+          const headers: Record<string, string> = {
+            'x-client-locale': 'zh_CN',
+            'x-client-version': input.clientVersion,
+            'x-client-platform': 'web',
+          }
+          if (token !== '') headers.authorization = `Bearer ${token}`
+          const response = await fetch(`/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(input.sid)}`, {
             credentials: 'include',
-            headers: token === '' ? {} : { authorization: `Bearer ${token}` },
+            headers,
           })
-          if (!response.ok) return { ok: false as const, error: `HTTP ${response.status}` }
+          if (!response.ok) return { ok: false as const, code: 0, error: `HTTP ${response.status}` }
           const payload = await response.json()
           const biz = payload?.data?.biz_data
           if (payload?.code !== 0 || biz === undefined || biz === null) {
-            return { ok: false as const, error: `code ${String(payload?.code)} ${String(payload?.msg ?? '')}`.trim() }
+            return {
+              ok: false as const,
+              code: typeof payload?.code === 'number' ? payload.code : 0,
+              error: `code ${String(payload?.code)} ${String(payload?.msg ?? '')}`.trim(),
+            }
           }
-          return { ok: true as const, title: String(biz?.chat_session?.title ?? ''), messages: biz?.chat_messages ?? [] }
+          /*
+           * `chat_session` is the authority on this conversation's own times, and
+           * it reports them in epoch SECONDS. They cross to this side raw and are
+           * converted by `toEpochMs` — a host-side helper, which is exactly what
+           * must not be called from in here.
+           */
+          const session = biz?.chat_session
+          return {
+            ok: true as const,
+            title: String(session?.title ?? ''),
+            messages: biz?.chat_messages ?? [],
+            updatedAtSeconds: typeof session?.updated_at === 'number' ? session.updated_at : 0,
+            createdAtSeconds: typeof session?.inserted_at === 'number' ? session.inserted_at : 0,
+          }
         } catch (error) {
-          return { ok: false as const, error: String(error) }
+          return { ok: false as const, code: 0, error: String(error) }
         }
-      }, sessionId)
-      if (!result.ok) return undefined
-      return { title: result.title, messages: result.messages as WebMessage[] }
+      }, { sid: sessionId, clientVersion: WEB_CLIENT_VERSION })
+      if (!result.ok) return result.code === RATE_LIMIT_CODE ? { rateLimited: true } : {}
+      return {
+        history: {
+          title: result.title,
+          messages: result.messages as WebMessage[],
+          ...(result.createdAtSeconds > 0 ? { createdAt: toEpochMs(result.createdAtSeconds) } : {}),
+          ...(result.updatedAtSeconds > 0 ? { updatedAt: toEpochMs(result.updatedAtSeconds) } : {}),
+        },
+      }
     } catch {
-      return undefined
+      return {}
     }
   }
 
@@ -2738,6 +3112,15 @@ export class DeepSeekWebEngine {
         return { ok: false, error: message, code: 'PAGE_CHANGED', stored: true }
       }
 
+      /*
+       * The page has accepted this turn, so the conversation now EXISTS on the
+       * web under its own session id — and that id is what makes a later sync
+       * recognize this chat instead of importing a second copy of it. Recorded
+       * here, the first moment it is knowable, rather than at the end of the
+       * reply: a stopped or failed turn is still a turn on the web.
+       */
+      await this.stampWebSessionId(chat.id)
+
       const assistantId = randomUUID()
       /*
        * A stop that arrived while this turn was still being typed.
@@ -3101,6 +3484,37 @@ export class DeepSeekWebEngine {
     } finally {
       this.busy = false
       this.busySince = undefined
+    }
+  }
+
+  /**
+   * Record which web conversation a panel chat IS, by reading the id out of the
+   * page's own URL.
+   *
+   * The web puts the conversation into the address bar (`/a/chat/s/<id>`) as
+   * soon as a turn is accepted, and that id is the conversation's only stable
+   * identity. Until this existed, only a RECOVER could set it, so a chat the
+   * reader had been using in the panel had nothing but its title to be
+   * recognized by — and the web names the same conversation with a generated
+   * summary while the panel names it after the first question, so 「从网页同步」
+   * wrote a second local copy of it (measured: 59 of 203 synced conversations
+   * had such a twin). With the id recorded, the next sync merges into this very
+   * chat.
+   *
+   * Best effort by design: a page that has not updated the address yet (or a
+   * future URL shape) simply leaves the id unset, exactly as before this
+   * change. It must never fail the send it is reporting on.
+   *
+   * @param chatId - the local transcript this turn belongs to.
+   */
+  private async stampWebSessionId(chatId: string): Promise<void> {
+    if (!this.isPageAlive()) return
+    try {
+      const sessionId = webSessionIdFromUrl(this.page!.url())
+      if (sessionId === '') return
+      this.store.setWebSessionId(chatId, sessionId)
+    } catch {
+      // Never let a URL read break the turn that has already been accepted.
     }
   }
 

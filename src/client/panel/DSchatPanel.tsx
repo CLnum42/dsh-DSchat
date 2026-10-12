@@ -38,7 +38,7 @@ import {
 import type { DSchatApi } from '../api.ts'
 import {
   CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, MenuIcon,
-  MoreIcon, PencilIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
+  MoreIcon, PencilIcon, PinIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
   SendIcon, SwapIcon, ThinkIcon, TrashIcon, WarnIcon, WebSearchIcon, WhaleMark,
 } from '../icons.tsx'
 import { touchEngineStatus, useEngineStatus } from '../status.ts'
@@ -2335,6 +2335,26 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     })
   }, [api, chats, toast, tr, refreshState])
 
+  /**
+   * Pin / unpin one conversation, then re-read the snapshot.
+   *
+   * The row MOVES between the 置顶 block and the date order, and the toast says
+   * which way. `refreshState` rather than a patched local copy: the list is the
+   * host's, `/state` is already the panel's source for it, and the loopback
+   * round trip is a few milliseconds — an optimistic patch would only add a way
+   * for the copy to disagree with the store.
+   */
+  const togglePin = useCallback(async (chat: DSchatChatView): Promise<void> => {
+    const next = chat.pinned !== true
+    const result = await api.pinChat(chat.id, next).catch(() => undefined)
+    if (result !== undefined && result.ok !== true) {
+      toast(tr('toast.pin.failed', { error: explain(result, '', tr) }), { error: true })
+      return
+    }
+    toast(next ? tr('toast.pin.done', { title: chat.title }) : tr('toast.unpin.done', { title: chat.title }))
+    void refreshState()
+  }, [api, toast, tr, refreshState])
+
   const clearAll = useCallback(async (): Promise<void> => {
     if (!clearArmed) {
       setClearArmed(true)
@@ -2359,12 +2379,17 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     completed?: number
     replaced?: number
     kept?: number
+    merged?: number
   }): string => {
     return [
       (counts.added ?? 0) > 0 ? tr('toast.recover.added', { count: String(counts.added) }) : '',
       (counts.completed ?? 0) > 0 ? tr('toast.recover.completed', { count: String(counts.completed) }) : '',
       (counts.replaced ?? 0) > 0 ? tr('toast.recover.replaced', { count: String(counts.replaced) }) : '',
       (counts.kept ?? 0) > 0 ? tr('toast.recover.kept', { count: String(counts.kept) }) : '',
+      // A folded duplicate is reported even when nothing else changed: a row
+      // disappearing from the list is exactly the kind of thing a reader needs
+      // to be told about, not left to discover.
+      (counts.merged ?? 0) > 0 ? tr('toast.recover.merged', { count: String(counts.merged) }) : '',
     ].filter(part => part !== '').join(' · ')
   }, [tr])
 
@@ -2381,7 +2406,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (sessionId === undefined) return
     setSyncId(chat.id)
     try {
-      const result = await api.recover({ title: chat.title, sessionId }).catch(() => undefined)
+      const result = await api.recover({
+        title: chat.title,
+        sessionId,
+        /*
+         * The web's 置顶 answer, both ways. `pinned: false` is a real
+         * instruction ("the web does not have this pinned"), not a missing
+         * field — see the route. The host also re-reads the flag itself when
+         * the list has to be consulted anyway, and 「从网页同步」 mirrors the
+         * whole account up front, so this stays correct either way.
+         */
+        pinned: chat.pinned === true,
+      }).catch(() => undefined)
       if (result === undefined || result.ok !== true) {
         toast(explain(result, tr('toast.recover.failed', { list: chat.title }), tr), { error: true })
         return
@@ -2405,7 +2441,29 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       toast(explain(listed, tr('send.recoverList'), tr), { error: true })
       return
     }
+    /*
+     * FIRST the arrangement, then the bodies.
+     *
+     * 置顶 and each conversation's real time are already in the list this call
+     * just read, and applying them costs nothing extra — no history is fetched.
+     * Doing it before the loop is what makes the button do something for a
+     * conversation that was imported on an earlier run, which is exactly the
+     * case that reported "网页同步没有同步置顶状态": the two pinned
+     * conversations were already here, so `missing` never mentioned them and the
+     * sync never looked at them again.
+     */
+    const pins = await api.syncPins().catch(() => undefined)
+    if (pins !== undefined && pins.ok === true) {
+      const touched = (pins.pinned ?? 0) + (pins.unpinned ?? 0)
+      if (touched > 0) toast(tr('toast.pins.synced', { pinned: String(pins.pinned ?? 0), unpinned: String(pins.unpinned ?? 0) }), { ttl: 6_000 })
+      // A folded duplicate makes ROWS DISAPPEAR, which a reader must be told
+      // about rather than left to notice.
+      if ((pins.folded ?? 0) > 0) toast(tr('toast.dedupe.done', { count: String(pins.folded) }), { ttl: 8_000 })
+      if (touched > 0 || (pins.retimed ?? 0) > 0 || (pins.folded ?? 0) > 0) void refreshState()
+    }
     if (listed.missing.length === 0) {
+      // Nothing left to import — but the list above may still have been
+      // rearranged, and saying only "已是最新" would hide that.
       toast(tr('toast.recover.empty'))
       return
     }
@@ -2416,6 +2474,13 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * replaced — see TranscriptStore.mergeHistory — which is what lets a second
      * click repair an earlier incomplete import without rewriting the messages
      * the reader already has.
+     *
+     * The loop can be STOPPED by the web itself: the history endpoint throttles
+     * a long run (measured: `40029` from about the hundredth conversation of a
+     * 203-conversation sweep). The host reports that as `rateLimited`, and the
+     * honest answer is to stop and say so rather than send the remaining
+     * requests into a refusal — each of which would otherwise fall through to
+     * opening that conversation in the page.
      */
     const total = listed.missing.length
     let done = 0
@@ -2425,6 +2490,8 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     let completed = 0
     let replaced = 0
     let kept = 0
+    let merged = 0
+    let throttled = false
     let lastProgressAt = 0
     const failures: string[] = []
     for (const item of listed.missing) {
@@ -2442,8 +2509,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       const result = await api.recover({
         title: item.title,
         ...(item.sessionId === undefined ? {} : { sessionId: item.sessionId }),
+        // A boolean, so the web's answer is mirrored both ways.
+        pinned: item.pinned === true,
       }).catch(() => undefined)
       if (result === undefined || result.ok !== true) {
+        if (result?.rateLimited === true) {
+          throttled = true
+          break
+        }
         failures.push(`${item.title}${tr('send.join')}${explain(result, tr('send.unknown'), tr)}`)
         continue
       }
@@ -2453,18 +2526,25 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       completed += result.completed ?? 0
       replaced += result.replaced ?? 0
       kept += result.kept ?? 0
+      merged += result.merged ?? 0
     }
     toast(tr('toast.recover.summary', {
       count: String(recovered),
       total: String(total),
       messages: String(messages),
     }))
-    const detail = syncDetail({ added, completed, replaced, kept })
+    const detail = syncDetail({ added, completed, replaced, kept, merged })
     if (detail !== '') toast(detail, { ttl: 8_000 })
+    if (throttled) {
+      toast(tr('toast.recover.throttled', { done: String(recovered), total: String(total) }), { error: true, ttl: 12_000 })
+    }
     if (failures.length > 0) {
       toast(tr('toast.recover.failed', { list: failures.slice(0, 3).join(tr('send.join')) }), { error: true, ttl: 12_000 })
     }
-  }, [api, toast, tr, syncDetail])
+    // The list changed under the reader: folded duplicates, and the titles of
+    // conversations that arrived for the first time.
+    void refreshState()
+  }, [api, toast, tr, syncDetail, refreshState])
 
   const commitRename = useCallback(async (chat: DSchatTranscript): Promise<void> => {
     const title = renameDraft.trim().replace(/\s+/g, ' ')
@@ -3199,7 +3279,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
           filtered.length === 0
             ? createElement('div', { className: 'dsh-dschat-hint-empty' },
                 chats.length === 0 ? tr('rail.empty') : tr('rail.noMatch'))
-            : filtered.map(chat => (renamingId === chat.id ? renameRow(chat) : chatRow(chat))),
+            : listRows(filtered),
         ),
         createElement(
           'div',
@@ -3279,12 +3359,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * not to have fetched it.
    */
   function chatRow(chat: DSchatChatView): ReactNode {
+    const pinned = chat.pinned === true
     return createElement(
       'div',
       {
         key: chat.id,
         className: 'dsh-dschat-item',
         'data-active': chat.id === viewChat?.id ? 'true' : undefined,
+        'data-pinned': pinned ? 'true' : undefined,
       },
       createElement(
         'div',
@@ -3301,6 +3383,28 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       createElement(
         'div',
         { className: 'dsh-dschat-item-acts' },
+        /*
+         * 置顶, the local counterpart of the web sidebar's own pin. Placed FIRST
+         * in the action run because it is the one action that changes where the
+         * row LIVES rather than what it says, and the row it applies to is the
+         * row the pointer is already on.
+         *
+         * The pinned state is also shown while the pointer is away (see the
+         * `data-pinned` rule in styles.ts), since an action column that only
+         * appears on hover cannot report a state.
+         */
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dschat-mini dsh-dschat-pin',
+            title: pinned ? tr('item.unpin') : tr('item.pin'),
+            'aria-label': pinned ? tr('item.unpin') : tr('item.pin'),
+            'aria-pressed': pinned ? 'true' : 'false',
+            onClick: () => { void togglePin(chat) },
+          },
+          createElement(PinIcon, { filled: pinned }),
+        ),
         /*
          * 「从网页同步」, per row.
          *
@@ -3346,6 +3450,31 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         ),
       ),
     )
+  }
+
+  /**
+   * The rail's rows, with the pinned ones in their own block on top.
+   *
+   * This is the web sidebar's own arrangement, and it is the whole point of a
+   * pin: the conversations a reader keeps coming back to stop drifting down the
+   * list as everything else is used. Pinned rows are ordered newest-pin-first
+   * (`pinnedAt`), which is what the web does with its own pin order; the rest
+   * keep the store's order, which is already most-recently-used first.
+   *
+   * The heading is skipped when nothing is pinned, so a reader who never uses
+   * the feature sees exactly the flat list they saw before.
+   */
+  function listRows(rows: readonly DSchatChatView[]): ReactNode[] {
+    const rendered = (chat: DSchatChatView): ReactNode => (renamingId === chat.id ? renameRow(chat) : chatRow(chat))
+    const pinned = rows.filter(chat => chat.pinned === true)
+      .sort((left, right) => (right.pinnedAt ?? right.updatedAt) - (left.pinnedAt ?? left.updatedAt))
+    const rest = rows.filter(chat => chat.pinned !== true)
+    if (pinned.length === 0) return rest.map(rendered)
+    return [
+      createElement('div', { key: 'group-pinned', className: 'dsh-dschat-list-group' }, tr('rail.pinned')),
+      ...pinned.map(rendered),
+      ...rest.map(rendered),
+    ]
   }
 
   function renameRow(chat: DSchatTranscript): ReactNode {

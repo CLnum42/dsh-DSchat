@@ -36,7 +36,12 @@ const flag = (name, fallback) => {
 const srcDir = join(root, flag('src', 'src/client'))
 
 const CHATS = [
-  { id: 'c1', title: '关于上下文组织的对话', ts: Date.now(), updatedAt: Date.now(), messageCount: 3 },
+  /*
+   * c1 starts PINNED, so the rail's 置顶 block and its control are in the DOM
+   * for the checks at the end of this script. The rows are otherwise the same
+   * three the dismiss checks need.
+   */
+  { id: 'c1', title: '关于上下文组织的对话', ts: Date.now(), updatedAt: Date.now(), messageCount: 3, pinned: true, pinnedAt: Date.now() },
   { id: 'c2', title: '把英文翻译为通顺的中文', ts: Date.now() - 3_600_000, updatedAt: Date.now() - 3_600_000, messageCount: 6 },
   { id: 'c3', title: '总结这份文档的主要内容', ts: Date.now() - 86_400_000, updatedAt: Date.now() - 86_400_000, messageCount: 12 },
 ]
@@ -55,6 +60,8 @@ try {
     import { PANEL_CSS } from ${JSON.stringify(join(srcDir, 'panel/styles.ts'))}
     const pending = () => new Promise(() => undefined)
     const chats = ${JSON.stringify(CHATS)}
+    /* Every pin/unpin the panel sends, for the checks at the end. */
+    window.__pins = []
     function makeApi() {
       const ok = async (extra) => ({ ok: true, ...extra })
       return {
@@ -68,6 +75,21 @@ try {
         openLogin: pending, closeBrowser: pending, setDeepThink: pending, setSearch: pending,
         transfer: pending, exportFile: pending, renameChat: pending, deleteChat: pending,
         clearChats: pending, webChats: pending, recover: pending, restore: pending, transferPreview: pending,
+        /*
+         * 置顶 goes to the host and the HOST is the list's source of truth, so
+         * the stub has to behave like one: record the call, apply it to the
+         * fixture, and let the next /state show the new arrangement. A stub that
+         * only recorded the call would prove the button fires, not that the row
+         * moves.
+         */
+        pinChat: async (chatId, pinned) => {
+          window.__pins.push([chatId, pinned])
+          const row = chats.find(candidate => candidate.id === chatId)
+          if (row !== undefined) {
+            if (pinned) { row.pinned = true; row.pinnedAt = Date.now() } else { delete row.pinned; delete row.pinnedAt }
+          }
+          return ok({ chatId, pinned })
+        },
         /* The panel asks the HOST where the query appears (see the note above
            the filtered memo in the panel); the stub answers "nowhere", which is
            the honest answer for a stub with no message bodies. */
@@ -185,6 +207,58 @@ try {
   await page.waitForTimeout(200)
   await clickCenter('.dsh-dschat-listpop .dsh-dschat-item >> nth=0')
   check('after picking a conversation', await isOpen(), false)
+
+  /* ------------------------------------------------------------- 置顶 */
+  /*
+   * The pin is the local counterpart of the web sidebar's own 置顶, and the
+   * parts that can only be checked in a real render are the ARRANGEMENT (the
+   * pinned block above the date order) and the CONTROL's state.
+   */
+  await clickCenter('.dsh-dschat-tbtn-sessions')
+  check('list reopened for the pin checks', await isOpen(), true)
+
+  const rail = () => page.evaluate(() => {
+    const pop = document.querySelector('.dsh-dschat-listpop')
+    if (pop === null) return null
+    const heading = pop.querySelector('.dsh-dschat-list-group')
+    const items = Array.from(pop.querySelectorAll('.dsh-dschat-item'))
+    const button = (row) => row.querySelector('.dsh-dschat-pin')
+    return {
+      heading: heading === null ? null : (heading.textContent ?? '').trim(),
+      headingBeforeFirstRow: heading !== null && items.length > 0
+        && (heading.compareDocumentPosition(items[0]) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+      order: items.map(row => (row.querySelector('.dsh-dschat-item-title')?.textContent ?? '').trim()),
+      pinned: items.map(row => row.getAttribute('data-pinned') === 'true'),
+      pressed: items.map(row => button(row)?.getAttribute('aria-pressed') ?? null),
+      labels: items.map(row => button(row)?.getAttribute('title') ?? null),
+    }
+  })
+
+  const before = await rail()
+  const headingOk = before !== null && before.heading === '置顶'
+  console.log(`${headingOk ? 'ok  ' : 'FAIL'} the pinned block is labelled: ${JSON.stringify(before?.heading)}`)
+  if (!headingOk) failures.push('no 置顶 heading over the pinned rows')
+  const orderedOk = before !== null && before.order[0] === '关于上下文组织的对话' && before.pinned[0] === true
+  console.log(`${orderedOk ? 'ok  ' : 'FAIL'} the pinned row leads the list: ${JSON.stringify(before?.order)} / ${JSON.stringify(before?.pinned)}`)
+  if (!orderedOk) failures.push('the pinned row is not the first row')
+  const stateOk = before !== null && before.pressed[0] === 'true' && before.labels[0] === '取消置顶'
+    && before.pressed[1] === 'false' && before.labels[1] === '置顶这条会话'
+  console.log(`${stateOk ? 'ok  ' : 'FAIL'} the control reports its state: ${JSON.stringify(before?.pressed)} / ${JSON.stringify(before?.labels)}`)
+  if (!stateOk) failures.push('the pin control does not report pinned vs not')
+
+  /* Pressing the control on the pinned row unpins it and the block goes away. */
+  await page.locator('.dsh-dschat-listpop .dsh-dschat-item').first().hover()
+  await page.waitForTimeout(120)
+  await page.locator('.dsh-dschat-listpop .dsh-dschat-item >> nth=0 >> css=.dsh-dschat-pin').click()
+  await page.waitForTimeout(600)
+  const after = await rail()
+  const unpinnedOk = after !== null && after.heading === null
+  console.log(`${unpinnedOk ? 'ok  ' : 'FAIL'} unpinning removes the block: heading=${JSON.stringify(after?.heading)}`)
+  if (!unpinnedOk) failures.push('the 置顶 heading survived an unpin')
+  const calls = await page.evaluate(() => window.__pins)
+  const callOk = Array.isArray(calls) && calls.length === 1 && calls[0][0] === 'c1' && calls[0][1] === false
+  console.log(`${callOk ? 'ok  ' : 'FAIL'} the press reached the host: ${JSON.stringify(calls)}`)
+  if (!callOk) failures.push('the unpin never reached the host')
 
   console.log(failures.length === 0 ? '\nall dismiss checks passed' : `\n${failures.length} FAILURE(S)`)
   for (const failure of failures) console.error(' -', failure)

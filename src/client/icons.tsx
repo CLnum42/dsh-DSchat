@@ -163,6 +163,21 @@ export function TrashIcon({ size = 14 }: IconProps): ReactNode {
 }
 
 /**
+ * The pin glyph, for a row's 置顶 control — the same idea as the web sidebar's
+ * own pin, so the two lists can be read the same way.
+ *
+ * `filled` is the PINNED state. It switches the svg to a filled path rather than
+ * adding a second shape: a 14px outline pin and a 14px filled pin are easy to
+ * tell apart at a glance, which the state of a toggle has to be.
+ */
+export function PinIcon({ size = 14, filled = false }: IconProps & { filled?: boolean }): ReactNode {
+  const path = 'M9.9 1.8l4.3 4.3-1.5 1.5-.6-.2-2.1 2.1.3 2.7-1.2 1.2-3-3-3.2 3.2-.9-.9 3.2-3.2-3-3L3.4 6.3l2.7.3 2.1-2.1-.2-.6z'
+  return filled
+    ? svg(size, <path d={path} fill="currentColor" stroke="none" />)
+    : svg(size, <path d={path} />)
+}
+
+/**
  * The tick that marks a settings row's state, at 10px.
  *
  * Heavier than {@link STROKE} because at 10px a 1.25 stroke renders as a

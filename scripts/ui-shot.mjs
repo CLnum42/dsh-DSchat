@@ -106,23 +106,28 @@ function fixtures() {
    * Fictional rail rows for `--synthetic`.
    *
    * Only the fields the rail reads matter: title, `messages.length` (the "N 条"
-   * count) and `updatedAt` (the "· X 前" stamp, and the sort order).
+   * count) and `updatedAt` (the "· X 前" stamp, and the sort order). The first
+   * two are PINNED, because the 置顶 block and the pin control are part of the
+   * list's layout: a shot that never renders them cannot show whether the
+   * heading fits, whether the block reads as separate from the date order, or
+   * whether a pinned row is identifiable with the pointer away.
    */
   const syntheticRail = [
-    ['网页端回复里的引用标记怎么渲染', 6, 3 * 60_000],
-    ['从网页恢复会话时推理文本怎么办', 4, 22 * 60_000],
-    ['迁移简报应该包含哪些段落', 9, 95 * 60_000],
-    ['深度思考开关的状态存在哪', 2, 5 * 3_600_000],
-    ['附件落盘之后的清理策略', 7, 9 * 3_600_000],
-    ['会话列表拖宽的边界值', 3, 26 * 3_600_000],
-    ['导出 markdown 的默认落点', 5, 2 * 86_400_000],
-  ].map(([title, count, age]) => ({
+    ['网页端回复里的引用标记怎么渲染', 6, 3 * 60_000, true],
+    ['从网页恢复会话时推理文本怎么办', 4, 22 * 60_000, true],
+    ['迁移简报应该包含哪些段落', 9, 95 * 60_000, false],
+    ['深度思考开关的状态存在哪', 2, 5 * 3_600_000, false],
+    ['附件落盘之后的清理策略', 7, 9 * 3_600_000, false],
+    ['会话列表拖宽的边界值', 3, 26 * 3_600_000, false],
+    ['导出 markdown 的默认落点', 5, 2 * 86_400_000, false],
+  ].map(([title, count, age, pinned]) => ({
     id: `chat-demo-${String(count)}-${String(age)}`,
     title,
     createdAt: now - age,
     updatedAt: now - age,
     model: 'deepseek-chat',
     streaming: false,
+    ...(pinned === true ? { pinned: true, pinnedAt: now - age } : {}),
     /*
      * A web session id, so these rows are the ones that offer 「从网页同步」.
      * Without it the per-row sync action — the only way to top up a conversation

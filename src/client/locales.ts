@@ -107,6 +107,14 @@ export interface DSchatDict {
   'rail.hide': string
   'rail.empty': string
   'rail.noMatch': string
+  /**
+   * The heading over the pinned conversations.
+   *
+   * The same word the web sidebar uses for its own pinned block (「置顶」), so
+   * the two lists read alike. Rows above this heading are the ones the reader
+   * put there by hand.
+   */
+  'rail.pinned': string
   'rail.clear': string
   'rail.clearConfirm': string
 
@@ -128,6 +136,10 @@ export interface DSchatDict {
   'item.sync': string
   'item.rename.ok': string
   'item.rename.cancel': string
+  /** Pin one conversation to the top of the list (HTML `title`/aria text). */
+  'item.pin': string
+  /** The same control once the row IS pinned. */
+  'item.unpin': string
 
   'chats.count': string
   'time.justNow': string
@@ -263,6 +275,11 @@ export interface DSchatDict {
   'toast.rename.failed': string
   'toast.delete.done': string
   'toast.delete.failed': string
+  'toast.pin.done': string
+  'toast.unpin.done': string
+  'toast.pin.failed': string
+  /** Extra line in a sync report: duplicate local copies that were folded. */
+  'toast.recover.merged': string
   'toast.undo': string
   'toast.restored': string
   'toast.clear.done': string
@@ -287,6 +304,29 @@ export interface DSchatDict {
   'toast.recover.completed': string
   'toast.recover.replaced': string
   'toast.recover.kept': string
+  /**
+   * The batch sync stopped because the web throttled the history endpoint.
+   *
+   * Carries the counts so far: a stopped run must say what it DID manage, or
+   * the reader cannot tell "nothing happened" from "most of it happened".
+   */
+  'toast.recover.throttled': string
+  /**
+   * 「从网页同步」 mirrored the web's 置顶 flags.
+   *
+   * `pinned` / `unpinned` are counts of rows that changed, and either can be 0
+   * (a run that only unpinned). Reported separately from the import summary
+   * because it is a different thing: no conversation was read, the list's
+   * ARRANGEMENT was brought in line with the web account.
+   */
+  'toast.pins.synced': string
+  /**
+   * Duplicate local copies of one conversation were folded into one row.
+   *
+   * Separate from the pin line because the reader SEES this one: rows vanish
+   * from the list, and a row disappearing without explanation reads as a bug.
+   */
+  'toast.dedupe.done': string
   'toast.sync.done': string
   'toast.sync.uptodate': string
   'toast.recover.failed': string
@@ -421,6 +461,7 @@ export const zh: DSchatDict = {
   'rail.hide': '关闭会话列表',
   'rail.empty': '还没有对话，点输入框上方的「＋ 新对话」开始',
   'rail.noMatch': '没有匹配的会话',
+  'rail.pinned': '置顶',
   'rail.clear': '清空全部',
   'rail.clearConfirm': '确认清空？',
 
@@ -437,6 +478,8 @@ export const zh: DSchatDict = {
   'item.sync': '从网页同步这条（只补缺失的部分）',
   'item.rename.ok': '确认重命名',
   'item.rename.cancel': '取消',
+  'item.pin': '置顶这条会话',
+  'item.unpin': '取消置顶',
 
   'chats.count': '{count} 条',
   'time.justNow': '刚刚',
@@ -560,6 +603,10 @@ export const zh: DSchatDict = {
   'toast.rename.failed': '重命名失败：{error}',
   'toast.delete.done': '已删除「{title}」',
   'toast.delete.failed': '删除失败：{error}',
+  'toast.pin.done': '已置顶「{title}」',
+  'toast.unpin.done': '已取消置顶「{title}」',
+  'toast.pin.failed': '置顶失败：{error}',
+  'toast.recover.merged': '合并重复 {count} 条',
   'toast.undo': '撤销',
   'toast.restored': '已恢复',
   'toast.clear.done': '已清空全部对话',
@@ -579,6 +626,9 @@ export const zh: DSchatDict = {
   'toast.recover.completed': '补全 {count} 条',
   'toast.recover.replaced': '更新 {count} 条',
   'toast.recover.kept': '本地保留 {count} 条',
+  'toast.recover.throttled': '网页端接口限流，本次只同步了 {done}/{total} 个；等一两分钟后可再点一次继续',
+  'toast.pins.synced': '已按网页端更新置顶：新增 {pinned} 条、取消 {unpinned} 条',
+  'toast.dedupe.done': '合并了 {count} 条重复会话（同一条对话此前存了两份记录）',
   'toast.sync.done': '已同步「{title}」',
   'toast.sync.uptodate': '「{title}」本地已是最新',
   'toast.recover.failed': '部分会话同步失败：{list}',
@@ -698,6 +748,7 @@ export const en: DSchatDict = {
   'rail.hide': 'Close the conversation list',
   'rail.empty': 'No conversations yet — start one with the New chat button above the input',
   'rail.noMatch': 'No matching conversation',
+  'rail.pinned': 'Pinned',
   'rail.clear': 'Clear all',
   'rail.clearConfirm': 'Clear all?',
 
@@ -714,6 +765,8 @@ export const en: DSchatDict = {
   'item.sync': 'Sync this one from the web (adds only what is missing)',
   'item.rename.ok': 'Confirm rename',
   'item.rename.cancel': 'Cancel',
+  'item.pin': 'Pin this conversation to the top',
+  'item.unpin': 'Unpin',
 
   'chats.count': '{count} messages',
   'time.justNow': 'just now',
@@ -837,6 +890,10 @@ export const en: DSchatDict = {
   'toast.rename.failed': 'Rename failed: {error}',
   'toast.delete.done': 'Deleted "{title}"',
   'toast.delete.failed': 'Delete failed: {error}',
+  'toast.pin.done': 'Pinned "{title}"',
+  'toast.unpin.done': 'Unpinned "{title}"',
+  'toast.pin.failed': 'Pin failed: {error}',
+  'toast.recover.merged': '{count} duplicate merged',
   'toast.undo': 'Undo',
   'toast.restored': 'Restored',
   'toast.clear.done': 'Cleared all conversations',
@@ -856,6 +913,9 @@ export const en: DSchatDict = {
   'toast.recover.completed': '{count} completed',
   'toast.recover.replaced': '{count} updated',
   'toast.recover.kept': '{count} kept locally',
+  'toast.recover.throttled': 'The web throttled the read — {done}/{total} synced. Try again in a minute or two to continue',
+  'toast.pins.synced': 'Pins updated from the web: {pinned} pinned, {unpinned} unpinned',
+  'toast.dedupe.done': 'Merged {count} duplicate conversations (each was stored twice)',
   'toast.sync.done': 'Synced “{title}”',
   'toast.sync.uptodate': '“{title}” is already up to date',
   'toast.recover.failed': 'Some conversations could not be synced: {list}',

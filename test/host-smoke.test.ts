@@ -1053,6 +1053,113 @@ test('the state route exposes every field the panel reads', async () => {
 })
 
 /**
+ * 置顶, end to end through the host.
+ *
+ * The pin is the reader's own arrangement of the panel's list (the local
+ * counterpart of the web sidebar's 置顶), so it has to survive the round trip
+ * the panel actually makes: pin a row, re-read `/state`, see the flag on the
+ * SUMMARY the list renders from, unpin, see it gone. The summary is the part
+ * worth pinning here — the list is built from summaries now, and a pin that
+ * only lived in the transcript body would never reach a row.
+ */
+test('a conversation can be pinned and unpinned, and /state carries the flag', async () => {
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-pin-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    mod.apply(ctx, { dataDir, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const find = (path: string) => (routes as Array<{ path: string; handler: Function }>).find(route => route.path === path)!
+    const stateOf = async () => {
+      const res = fakeResponse()
+      await find('/api/dsh-dschat/state').handler(fakeRequest(undefined), res)
+      return res.captured.body as { chats: Array<{ id: string; title: string; pinned?: boolean; pinnedAt?: number }> }
+    }
+    const post = async (path: string, body: unknown) => {
+      const res = fakeResponse()
+      await find(path).handler(fakeRequest(body), res)
+      return res.captured
+    }
+
+    const created = await post('/api/dsh-dschat/new-chat', {})
+    const chatId = (created.body as { chatId?: string }).chatId
+    assert.equal(typeof chatId, 'string', 'a chat exists to pin')
+
+    const pinned = await post('/api/dsh-dschat/pin', { chatId, pinned: true })
+    assert.equal(pinned.status, 200, JSON.stringify(pinned.body))
+    const after = await stateOf()
+    const row = after.chats.find(chat => chat.id === chatId)
+    assert.equal(row?.pinned, true, 'the summary the list renders from carries the pin')
+    assert.equal(typeof row?.pinnedAt, 'number', 'and when it was pinned, so the block can be ordered')
+
+    const unpinned = await post('/api/dsh-dschat/pin', { chatId, pinned: false })
+    assert.equal(unpinned.status, 200, JSON.stringify(unpinned.body))
+    const cleared = (await stateOf()).chats.find(chat => chat.id === chatId)
+    assert.equal(cleared?.pinned, undefined, 'unpinning removes the flag rather than setting it false')
+
+    const missing = await post('/api/dsh-dschat/pin', { chatId: 'no-such-chat' })
+    assert.equal(missing.status, 404, 'pinning a conversation that is not there is a NOT_FOUND, not a silent success')
+
+    /*
+     * `/sync-pins` is the half of a sync that needs no history read, and it is
+     * what makes 「从网页同步」 do something for a conversation that was already
+     * imported. Here there is no browser to read the web account from, so the
+     * list comes back empty — which is itself worth pinning: the route answers
+     * with its counters rather than failing, and the panel's own call is a
+     * best-effort step that must not break the import that follows it.
+     */
+    const synced = await post('/api/dsh-dschat/sync-pins', {})
+    assert.equal(synced.status, 200, JSON.stringify(synced.body))
+    assert.equal(synced.body.ok, true)
+    for (const field of ['matched', 'pinned', 'unpinned', 'retimed']) {
+      assert.equal(typeof (synced.body as Record<string, unknown>)[field], 'number', `sync-pins reports ${field}`)
+    }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+/**
+ * The panel chat records which web conversation it IS.
+ *
+ * Without this, 「从网页同步」 could only match a local chat by title — and the
+ * panel's title (the first question) is not the web's generated summary, so the
+ * sync wrote a second copy of the conversation. The stamp is written by the
+ * engine when a turn is accepted (there is no browser here to accept one), so
+ * what is pinned is the store contract underneath it.
+ */
+test('a chat learns its web session id, and a later sync merges into it', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-stamp-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    const chat = store.createChat('deepseek-chat')
+    store.renameChat(chat.id, '问题')
+    store.appendMessage(chat.id, { id: 'm1', role: 'user', content: '问题', ts: 1 })
+    assert.equal(store.setWebSessionId(chat.id, 'sid-1'), true, 'the id is adopted')
+    assert.equal(store.setWebSessionId(chat.id, 'sid-1'), false, 'and re-stamping the same id is a no-op')
+    assert.equal(store.getChat(chat.id)?.webSessionId, 'sid-1')
+
+    // A recover for that same web conversation now finds THIS chat and merges.
+    store.importTranscript({
+      title: '网页端的自动标题',
+      model: 'deepseek-chat',
+      webSessionId: 'sid-1',
+      messages: [
+        { id: 'w1', role: 'user', content: '问题', ts: 2 },
+        { id: 'w2', role: 'assistant', content: '回答', ts: 3 },
+      ],
+      matchByTitle: true,
+    })
+    assert.equal(store.list().length, 1, 'no second copy of the same conversation')
+    assert.deepEqual(store.list()[0]?.messages.map(message => message.content), ['问题', '回答'])
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+/**
  * Transient browser teardown must never latch a lasting engine error.
  *
  * Reported symptom: the panel showed "引擎错误：无法打开 http:…" and stayed
@@ -1507,6 +1614,14 @@ function historyPayload(count = 4) {
 function webPage(options: {
   /** Answer for the history endpoint; `undefined` = the endpoint failed. */
   history?: unknown
+  /**
+   * Answer for the conversation-list endpoint (`chat_session/fetch_page`).
+   *
+   * `undefined` models "the endpoint did not answer", which is what makes the
+   * engine fall back to reading the sidebar DOM — the path the `rows` option
+   * covers.
+   */
+  listed?: unknown
   /** Answers for successive cache reads (last value repeats). */
   cache?: Array<unknown>
   /** Sidebar rows (omit to model "title not found"). */
@@ -1549,9 +1664,11 @@ function webPage(options: {
     },
     evaluate: async (fn: unknown, arg?: unknown) => {
       const source = String(fn)
-      // The two web-history readers are told apart by their source (each takes
-      // a session id); the selector readers by the argument they are handed.
+      // The three web readers are told apart by their source (the history and
+      // list readers each name their endpoint), and the selector readers by the
+      // argument they are handed.
       if (source.includes('history_messages')) return options.history
+      if (source.includes('chat_session/fetch_page')) return options.listed ?? null
       if (source.includes("'history-message'")) {
         const list = options.cache ?? []
         const value = list.length === 0 ? undefined : list[Math.min(cacheReads, list.length - 1)]
@@ -1641,6 +1758,549 @@ test('recover harvests the DOM when the API and the cache are both empty', async
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
   }
+})
+
+/* --------------------------------------------------- the conversation list */
+
+test('the conversation list comes from the site endpoint, not the rendered sidebar', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-list-api-'))
+  try {
+    /*
+     * This mock stands in for the PAGE, so `listed` is what the in-page reader
+     * returns to the engine: the endpoint's own raw epoch SECONDS, which the
+     * engine converts to ms on its side. (The page callback cannot call the
+     * host's `toEpochMs` — it runs in the browser — so a fixture in ms would
+     * silently test nothing.)
+     *
+     * The DOM `rows` are deliberately a DIFFERENT, poorer answer (no pin, no
+     * times) — if the engine fell back to them the assertions below would fail.
+     */
+    const mocks = webPage({
+      listed: [
+        { title: '置顶会话', sessionId: 'sid-pinned', pinned: true, updatedAtSeconds: 1_791_783_407.525 },
+        { title: '较新的', sessionId: 'sid-new', pinned: false, updatedAtSeconds: 1_791_769_961.782 },
+        { title: '较旧的', sessionId: 'sid-old', pinned: false, updatedAtSeconds: 1_790_867_172.339 },
+      ],
+      rows: [{ title: '只有这一行在 DOM 里', sessionId: 'sid-dom' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir)
+    const list = await engine.listWebConversations()
+
+    assert.deepEqual(list.map(item => item.sessionId), ['sid-pinned', 'sid-new', 'sid-old'],
+      'the whole account, in the web\'s own order (置顶 first)')
+    assert.equal(list[0]?.pinned, true, 'the pin flag survives, which the DOM cannot supply')
+    assert.equal(list[1]?.pinned, false)
+    assert.equal(list[0]?.updatedAt, 1_791_783_407_525, 'epoch seconds become epoch ms')
+    assert.equal(list.some(item => item.sessionId === 'sid-dom'), false, 'the sidebar DOM is not consulted')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('the conversation list falls back to the sidebar DOM when the endpoint does not answer', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-list-dom-'))
+  try {
+    const mocks = webPage({
+      listed: null,
+      rows: [{ title: '标题', sessionId: 'sid-1' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir)
+    const list = await engine.listWebConversations()
+
+    assert.deepEqual(list.map(item => item.sessionId), ['sid-1'], 'the DOM read still lists conversations')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------------------------------------ sync fidelity */
+
+/*
+ * ORDER. The list is what a reader navigates by, and it is ordered by the
+ * conversation's OWN time (置顶 first) rather than by the order mutations
+ * happened to leave in the array.
+ *
+ * The bug this pins: `importTranscript` unshifts each new transcript, and a
+ * batch sync imports the web list newest-first — so the whole import came out
+ * REVERSED, the oldest conversation of the account sitting at the top.
+ * Measured on the reporter's machine: 494 of 504 imported rows in reverse web
+ * order.
+ */
+test('the list is 置顶 first, then newest-used first', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-order-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    const oldest = store.createChat('deepseek-chat')
+    store.renameChat(oldest.id, '最旧的')
+    store.appendMessage(oldest.id, { id: 'a1', role: 'user', content: 'a', ts: 1 })
+    store.importTranscript({
+      title: '中间的', model: 'deepseek-chat', messages: [{ id: 'b1', role: 'user', content: 'b', ts: 2 }],
+      updatedAt: 2_000, createdAt: 2_000,
+    })
+    store.importTranscript({
+      title: '最新的', model: 'deepseek-chat', messages: [{ id: 'c1', role: 'user', content: 'c', ts: 3 }],
+      updatedAt: 3_000, createdAt: 3_000,
+    })
+    // `oldest` was created first (so it sits LAST in the array), and its own
+    // stamp is later than both imports.
+    store.getChat(oldest.id)!.updatedAt = 9_000
+
+    assert.deepEqual(store.list().map(chat => chat.title), ['最旧的', '最新的', '中间的'],
+      'newest-used first, regardless of the order the array was built in')
+
+    store.setPinned(store.list()[2]!.id, true)
+    assert.equal(store.list()[0]?.title, '中间的', 'a pinned conversation leads the list')
+    store.setPinned(store.list()[0]!.id, false)
+    assert.deepEqual(store.list().map(chat => chat.title), ['最旧的', '最新的', '中间的'], 'and drops back when unpinned')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a batch import in web order comes out newest-first, not reversed', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-order-batch-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    // The web's own order: newest conversation first.
+    const web = [
+      { title: '网页最新的', updatedAt: 1_791_783_407_525 },
+      { title: '网页中间的', updatedAt: 1_791_769_961_782 },
+      { title: '网页最旧的', updatedAt: 1_790_867_172_339 },
+    ]
+    for (const [index, row] of web.entries()) {
+      store.importTranscript({
+        title: row.title, model: 'deepseek-chat', webSessionId: `sid-${String(index)}`,
+        messages: [{ id: `m${String(index)}`, role: 'user', content: row.title, ts: row.updatedAt }],
+        createdAt: row.updatedAt, updatedAt: row.updatedAt,
+      })
+    }
+    assert.deepEqual(store.list().map(chat => chat.title), ['网页最新的', '网页中间的', '网页最旧的'],
+      'a sync walks the web list newest-first, and the local list must read the same way')
+    assert.deepEqual(store.list().map(chat => chat.updatedAt), [1_791_783_407_525, 1_791_769_961_782, 1_790_867_172_339],
+      'each conversation keeps the WEB\'s time, not the moment it was imported')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('syncing the list state mirrors 置顶 both ways and repairs real times', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-liststate-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    const synced = store.importTranscript({
+      title: '已同步过的', model: 'deepseek-chat', webSessionId: 'sid-1',
+      messages: [{ id: 'm1', role: 'user', content: '问', ts: 1 }],
+    })
+    // An older-version import: stamped with the sync run, not the conversation.
+    synced.chat.updatedAt = 5_000
+    const localOnly = store.createChat('deepseek-chat')
+    store.renameChat(localOnly.id, '没同步过的')
+
+    const pinnedRun = store.applyWebListState([{ sessionId: 'sid-1', pinned: true, updatedAt: 9_000 }])
+    assert.deepEqual(pinnedRun, { matched: 1, pinned: 1, unpinned: 0, retimed: 1 },
+      'the row was matched, pinned and re-dated')
+    assert.equal(store.getChat(synced.chat.id)?.pinned, true)
+    assert.equal(store.getChat(synced.chat.id)?.updatedAt, 9_000, 'the web\'s own time replaces the import stamp')
+    assert.equal(store.getChat(localOnly.id)?.pinned, undefined, 'a conversation the web never heard of is untouched')
+
+    // A second identical run changes nothing (so it does not rewrite the file).
+    assert.deepEqual(store.applyWebListState([{ sessionId: 'sid-1', pinned: true, updatedAt: 9_000 }]),
+      { matched: 1, pinned: 0, unpinned: 0, retimed: 0 })
+
+    // `false` is an instruction, not a missing field.
+    const unpinnedRun = store.applyWebListState([{ sessionId: 'sid-1', pinned: false, updatedAt: 9_000 }])
+    assert.deepEqual(unpinnedRun, { matched: 1, pinned: 0, unpinned: 1, retimed: 0 })
+    assert.equal(store.getChat(synced.chat.id)?.pinned, undefined, 'unpinning on the web unpins it here')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('folding duplicates keeps the surviving conversation exactly as it was', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-dedupe-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    /*
+     * The legacy shape: the panel's copy (no web id, titled after the first
+     * question) and the copy an old sync wrote beside it (web id, web title).
+     * The two renderings of the same reply differ — the panel's live parser
+     * lists the pages it opened, the fragment copy lists the queries it
+     * searched — and neither contains the other.
+     */
+    const panel = store.createChat('deepseek-chat')
+    store.renameChat(panel.id, '问题一')
+    store.appendMessage(panel.id, { id: 'p1', role: 'user', content: '问题一', ts: 10 })
+    store.appendMessage(panel.id, {
+      id: 'p2', role: 'assistant', ts: 11,
+      content: '<details><summary>思考过程</summary>\n\n浏览 3 个页面\n\n</details>\n\n答案是 A。',
+    })
+    const synced = store.importTranscript({
+      title: '网页端标题', model: 'deepseek-chat', webSessionId: 'sid-1',
+      messages: [
+        { id: 's1', role: 'user', content: '问题一', ts: 12 },
+        {
+          id: 's2', role: 'assistant', ts: 13,
+          content: '<details><summary>思考过程</summary>\n\n搜索到 2 个网页\n\n</details>\n\n答案是 A。',
+        },
+      ],
+    })
+    assert.equal(store.list().length, 2, 'the duplicate is there to begin with')
+
+    assert.equal(store.foldDuplicateConversations(), 1, 'the duplicate is folded')
+    assert.equal(store.list().length, 1, 'one row remains')
+    const survivor = store.list()[0]
+    assert.equal(survivor?.id, panel.id, 'the reader\'s own transcript survives')
+    assert.equal(survivor?.title, '问题一', 'with the title they know it by')
+    assert.equal(survivor?.webSessionId, 'sid-1', 'and it takes over the web identity')
+    assert.equal(store.getChat(synced.chat.id), undefined, 'the synced copy is gone')
+    assert.deepEqual(survivor?.messages.map(message => message.id), ['p1', 'p2'],
+      'the survivor keeps its own messages, ids and order')
+    assert.equal(survivor?.messages[1]?.content,
+      '<details><summary>思考过程</summary>\n\n浏览 3 个页面\n\n</details>\n\n答案是 A。',
+      'and its own TEXT: a differently-rendered trace is not a reason to rewrite the reader\'s message')
+    assert.equal(survivor?.messages[1]?.ts, 11, 'its local timestamp survives too')
+
+    /* A truncated reply IS completed from the other copy — that is the point. */
+    const short = store.createChat('deepseek-chat')
+    store.renameChat(short.id, '问题二')
+    store.appendMessage(short.id, { id: 'q1', role: 'user', content: '问题二', ts: 20 })
+    store.appendMessage(short.id, { id: 'q2', role: 'assistant', content: '答案的前半段，后面被截断了', ts: 21 })
+    store.importTranscript({
+      title: '网页端标题二', model: 'deepseek-chat', webSessionId: 'sid-2',
+      messages: [
+        { id: 'r1', role: 'user', content: '问题二', ts: 22 },
+        { id: 'r2', role: 'assistant', content: '答案的前半段，后面被截断了，这里是完整正文。', ts: 23 },
+      ],
+    })
+    assert.equal(store.foldDuplicateConversations(), 1, 'a truncated copy is the same conversation')
+    const completed = store.getChat(short.id)
+    assert.equal(completed?.messages[1]?.content, '答案的前半段，后面被截断了，这里是完整正文。', 'the full text completes the truncation')
+    assert.equal(completed?.messages[1]?.id, 'q2', 'on the survivor\'s own message')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('folding refuses when the evidence is not specific: two candidates, or a different conversation', async () => {
+  const { TranscriptStore } = await import('../src/store.ts')
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-dedupe-refuse-'))
+  try {
+    const store = new TranscriptStore({ dataDir })
+    const one = store.createChat('deepseek-chat')
+    store.appendMessage(one.id, { id: 'a1', role: 'user', content: '同一个问题', ts: 1 })
+    store.appendMessage(one.id, { id: 'a2', role: 'assistant', content: '同一个回答', ts: 2 })
+    const two = store.createChat('deepseek-chat')
+    store.appendMessage(two.id, { id: 'b1', role: 'user', content: '同一个问题', ts: 3 })
+    store.appendMessage(two.id, { id: 'b2', role: 'assistant', content: '同一个回答', ts: 4 })
+    store.importTranscript({
+      title: '网页端标题', model: 'deepseek-chat', webSessionId: 'sid-1',
+      messages: [
+        { id: 'c1', role: 'user', content: '同一个问题', ts: 5 },
+        { id: 'c2', role: 'assistant', content: '同一个回答', ts: 6 },
+      ],
+    })
+    assert.equal(store.list().length, 3)
+    assert.equal(store.foldDuplicateConversations(), 0, 'two id-less candidates mean the evidence is not specific enough')
+    assert.equal(store.list().length, 3, 'so nothing is folded')
+
+    /* A genuinely different conversation is never folded, however similar. */
+    const other = store.createChat('deepseek-chat')
+    store.appendMessage(other.id, { id: 'd1', role: 'user', content: '完全不同的问题', ts: 7 })
+    store.appendMessage(other.id, { id: 'd2', role: 'assistant', content: '完全不同的回答', ts: 8 })
+    store.importTranscript({
+      title: '另一个网页标题', model: 'deepseek-chat', webSessionId: 'sid-2',
+      messages: [
+        { id: 'e1', role: 'user', content: '另一个问题', ts: 9 },
+        { id: 'e2', role: 'assistant', content: '另一个回答', ts: 10 },
+      ],
+    })
+    assert.equal(store.foldDuplicateConversations(), 0)
+    assert.equal(store.list().length, 5, 'both pairs are left alone')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a recover mirrors 置顶 on an EXISTING transcript and stamps the web\'s times', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-pin-mirror-'))
+  try {
+    const { TranscriptStore } = await import('../src/store.ts')
+    const store = new TranscriptStore({ dataDir })
+    // Already imported by an earlier run: it has the id, a sync-time stamp, no pin.
+    const existing = store.importTranscript({
+      title: '网页标题', model: 'deepseek-chat', webSessionId: 'sid-1',
+      messages: [
+        { id: 'w1', role: 'user', content: '问题', ts: 1 },
+        { id: 'w2', role: 'assistant', content: '回答', ts: 2 },
+      ],
+    })
+    existing.chat.updatedAt = 5_000
+
+    const mocks = webPage({
+      // The page-side reader's own shape: raw seconds from `chat_session`.
+      history: {
+        ok: true, title: '网页标题',
+        messages: [
+          WEB_MESSAGE(1, 'USER', [{ type: 'REQUEST', content: '问题' }]),
+          WEB_MESSAGE(2, 'ASSISTANT', [{ type: 'RESPONSE', content: '回答' }]),
+        ],
+        updatedAtSeconds: 1_791_783_407.525,
+        createdAtSeconds: 1_791_776_056.865,
+      },
+      rows: [{ title: '网页标题', sessionId: 'sid-1' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir, store)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '网页标题', pinned: true })
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.created, false, 'it is the same conversation, not a new row')
+    const stored = store.getChat(existing.chat.id)
+    assert.equal(stored?.pinned, true, 'the web had it pinned, so the EXISTING row is pinned now')
+    assert.equal(stored?.updatedAt, 1_791_783_407_525, 'and dated by the web, not by this sync')
+
+    // `pinned: false` unpins it again — the value mirrors the web either way.
+    const cleared = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '网页标题', pinned: false })
+    assert.equal(cleared.ok, true, cleared.error)
+    assert.equal(store.getChat(existing.chat.id)?.pinned, undefined)
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('recovered messages carry the web\'s own timestamps, not the sync clock', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-ts-'))
+  try {
+    /*
+     * Every recovered message used to be stamped `Date.now()`, so a synced
+     * conversation read as N turns written in the same millisecond and the local
+     * `updatedAt` was the sync run's clock. `inserted_at` is the web's own time.
+     */
+    const mocks = webPage({
+      history: {
+        ok: true,
+        title: '网页标题',
+        messages: [
+          { message_id: 1, role: 'USER', inserted_at: 1_791_776_092.082, fragments: [{ type: 'REQUEST', content: '问题' }] },
+          { message_id: 2, role: 'ASSISTANT', inserted_at: 1_791_776_187.071, fragments: [{ type: 'RESPONSE', content: '回答' }] },
+        ],
+      },
+      rows: [{ title: '网页标题', sessionId: 'sid-1' }],
+    })
+    const { engine, store } = await engineWith(mocks.page, mocks.context, dataDir)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1' })
+    assert.equal(result.ok, true, result.error)
+
+    const messages = store.list()[0]?.messages ?? []
+    assert.deepEqual(messages.map(message => message.ts), [1_791_776_092_082, 1_791_776_187_071],
+      'each message keeps its own web time')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a throttled history read is reported, not papered over by scraping the page', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-throttle-'))
+  try {
+    /*
+     * HTTP 200 with `code: 40029`. Treated as "the endpoint has nothing", the
+     * old path opened the conversation and scraped it — minutes of navigation
+     * per conversation for a read the server had refused. It is a distinct
+     * outcome now, and the batch sync stops on it.
+     */
+    const mocks = webPage({
+      history: { ok: false, code: 40029, error: 'code 40029 TOO_MANY_REQUESTS' },
+      rows: [{ title: '标题', sessionId: 'sid-1' }],
+      harvested: [{ role: 'user', parts: [{ kind: 'body', markdown: '', text: '不该抓到这里' }] }],
+    })
+    const { engine, store } = await engineWith(mocks.page, mocks.context, dataDir)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '标题' })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.rateLimited, true, 'the caller can tell a throttle from a real failure')
+    assert.match(result.error ?? '', /限流|TOO_MANY_REQUESTS/)
+    assert.deepEqual(mocks.gotos, [], 'and the page is never navigated for it')
+    assert.equal(store.list().length, 0, 'nothing was imported from a refused read')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a conversation synced for the first time inherits the web\'s own 置顶', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-pin-'))
+  try {
+    /*
+     * Only a session id is given, so the engine has to read the web's own list
+     * to name the conversation — and it takes the `pinned` flag from the same
+     * answer. That fallback matters for `dschat_recover`, which has no way to
+     * pass one.
+     */
+    const mocks = webPage({
+      history: historyPayload(2),
+      listed: [{ title: '网页标题', sessionId: 'sid-1', pinned: true, updatedAt: 1_791_783_407_525 }],
+      rows: [{ title: '网页标题', sessionId: 'sid-1' }],
+    })
+    const { engine, store } = await engineWith(mocks.page, mocks.context, dataDir)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1' })
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(store.list()[0]?.pinned, true, 'the web had it pinned, so the new local row starts pinned')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a sync adopts an unlinked local chat instead of writing the conversation twice', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-twin-'))
+  try {
+    const { TranscriptStore } = await import('../src/store.ts')
+    const store = new TranscriptStore({ dataDir })
+    /*
+     * The reported shape of the bug: the reader chatted in the PANEL (a chat
+     * with no web id, titled after their first question), then synced the same
+     * conversation from the web, which names it with a generated summary and so
+     * matched nothing. Two rows, one conversation.
+     */
+    const panelChat = store.createChat('deepseek-chat')
+    store.renameChat(panelChat.id, '这个问题是什么？')
+    store.appendMessage(panelChat.id, { id: 'p1', role: 'user', content: '这个问题是什么？', ts: 1 })
+    store.appendMessage(panelChat.id, { id: 'p2', role: 'assistant', content: '这是回答。', ts: 2 })
+
+    const mocks = webPage({
+      history: {
+        ok: true,
+        title: '网页端的自动标题',
+        messages: [
+          WEB_MESSAGE(1, 'USER', [{ type: 'REQUEST', content: '这个问题是什么？' }]),
+          WEB_MESSAGE(2, 'ASSISTANT', [{ type: 'RESPONSE', content: '这是回答。' }]),
+          WEB_MESSAGE(3, 'USER', [{ type: 'REQUEST', content: '那另一个呢？' }]),
+          WEB_MESSAGE(4, 'ASSISTANT', [{ type: 'RESPONSE', content: '另一个回答。' }]),
+        ],
+      },
+      rows: [{ title: '网页端的自动标题', sessionId: 'sid-1' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir, store)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '网页端的自动标题' })
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(store.list().length, 1, 'one row, not two')
+    const survivor = store.list()[0]
+    assert.equal(survivor?.id, panelChat.id, 'the reader\'s own transcript is the one that survives')
+    assert.equal(survivor?.title, '这个问题是什么？', 'with the title they know it by')
+    assert.equal(survivor?.webSessionId, 'sid-1', 'and it now knows which web conversation it is')
+    assert.deepEqual(survivor?.messages.map(message => message.content),
+      ['这个问题是什么？', '这是回答。', '那另一个呢？', '另一个回答。'],
+      'the missing turns came across from the web copy')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a sync folds a duplicate an earlier version already wrote, and reports it', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-legacy-twin-'))
+  try {
+    const { TranscriptStore } = await import('../src/store.ts')
+    const store = new TranscriptStore({ dataDir })
+    const panelChat = store.createChat('deepseek-chat')
+    store.renameChat(panelChat.id, '这个问题是什么？')
+    store.appendMessage(panelChat.id, { id: 'p1', role: 'user', content: '这个问题是什么？', ts: 1 })
+    store.appendMessage(panelChat.id, { id: 'p2', role: 'assistant', content: '这是回答。', ts: 2 })
+    /*
+     * The SECOND row is the one the bug already created: a synced transcript
+     * that knows its web session id, sitting beside the reader's own chat of the
+     * same conversation. Written without `matchByTitle`, which is how it got
+     * there in the first place.
+     */
+    const synced = store.importTranscript({
+      title: '网页端的自动标题',
+      model: 'deepseek-chat',
+      webSessionId: 'sid-1',
+      messages: [
+        { id: 's1', role: 'user', content: '这个问题是什么？', ts: 3 },
+        { id: 's2', role: 'assistant', content: '这是回答。', ts: 4 },
+      ],
+    })
+    assert.equal(store.list().length, 2, 'the duplicate is in place to begin with')
+
+    const mocks = webPage({
+      history: {
+        ok: true,
+        title: '网页端的自动标题',
+        messages: [
+          WEB_MESSAGE(1, 'USER', [{ type: 'REQUEST', content: '这个问题是什么？' }]),
+          WEB_MESSAGE(2, 'ASSISTANT', [{ type: 'RESPONSE', content: '这是回答。' }]),
+          WEB_MESSAGE(3, 'USER', [{ type: 'REQUEST', content: '那另一个呢？' }]),
+          WEB_MESSAGE(4, 'ASSISTANT', [{ type: 'RESPONSE', content: '另一个回答。' }]),
+        ],
+      },
+      rows: [{ title: '网页端的自动标题', sessionId: 'sid-1' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir, store)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '网页端的自动标题' })
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.merged, 1, 'the fold is reported, not done silently')
+    assert.equal(store.list().length, 1, 'the duplicate is gone')
+    assert.equal(store.list()[0]?.id, panelChat.id, 'the reader\'s own transcript is the survivor')
+    assert.equal(store.getChat(synced.chat.id), undefined, 'and the synced copy is the one folded away')
+    assert.equal(store.list()[0]?.webSessionId, 'sid-1', 'the survivor keeps the web identity')
+    assert.deepEqual(store.list()[0]?.messages.map(message => message.content),
+      ['这个问题是什么？', '这是回答。', '那另一个呢？', '另一个回答。'],
+      'nothing either copy held is lost, and the web copy fills the gap')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('a different conversation that merely shares a later question is not folded', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-recover-notwin-'))
+  try {
+    const { TranscriptStore } = await import('../src/store.ts')
+    const store = new TranscriptStore({ dataDir })
+    const other = store.createChat('deepseek-chat')
+    store.renameChat(other.id, '完全不同的开场问题')
+    store.appendMessage(other.id, { id: 'q1', role: 'user', content: '完全不同的开场问题', ts: 1 })
+    store.appendMessage(other.id, { id: 'q2', role: 'assistant', content: '回答', ts: 2 })
+    store.appendMessage(other.id, { id: 'q3', role: 'user', content: '那另一个呢？', ts: 3 })
+    store.appendMessage(other.id, { id: 'q4', role: 'assistant', content: '回答', ts: 4 })
+
+    const mocks = webPage({
+      history: {
+        ok: true,
+        title: '网页端的自动标题',
+        messages: [
+          WEB_MESSAGE(1, 'USER', [{ type: 'REQUEST', content: '这个问题是什么？' }]),
+          WEB_MESSAGE(2, 'ASSISTANT', [{ type: 'RESPONSE', content: '这是回答。' }]),
+          WEB_MESSAGE(3, 'USER', [{ type: 'REQUEST', content: '那另一个呢？' }]),
+          WEB_MESSAGE(4, 'ASSISTANT', [{ type: 'RESPONSE', content: '另一个回答。' }]),
+        ],
+      },
+      listed: [{ title: '网页端的自动标题', sessionId: 'sid-1', pinned: false }],
+      rows: [{ title: '网页端的自动标题', sessionId: 'sid-1' }],
+    })
+    const { engine } = await engineWith(mocks.page, mocks.context, dataDir, store)
+    const result = await engine.recoverWebConversation({ sessionId: 'sid-1', title: '网页端的自动标题' })
+
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.merged, undefined, 'a shared middle question is not an identity')
+    assert.equal(store.list().length, 2, 'the unrelated conversation is left alone')
+    assert.ok(store.getChat(other.id)?.messages.some(message => message.content === '完全不同的开场问题'),
+      'and keeps its own history')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('the web session id is read out of the conversation URL', async () => {
+  const { webSessionIdFromUrl } = await import('../src/engine/engine.ts')
+  assert.equal(webSessionIdFromUrl('https://chat.deepseek.com/a/chat/s/3ee4bb23-ea91-4413-963b-6585d14e113e'),
+    '3ee4bb23-ea91-4413-963b-6585d14e113e')
+  assert.equal(webSessionIdFromUrl('https://chat.deepseek.com/a/chat/s/abc123?foo=1'), 'abc123')
+  assert.equal(webSessionIdFromUrl('https://chat.deepseek.com/a/chat/s/abc123#x'), 'abc123')
+  assert.equal(webSessionIdFromUrl('https://chat.deepseek.com/'), '', 'the home page is not a conversation')
 })
 
 test('recover refuses a title that is not in the sidebar', async () => {
@@ -2339,10 +2999,11 @@ test('a cited reply hands its source table to the panel, and an uncited one stay
  * every migrated harness session. What a handoff owes the coding agent is what
  * the user and the model said; the sources are the web page's business.
  *
- * `sources: true` still turns them back on for the one reader who wants them:
- * the markdown export a person opens.
+ * `sources: true` remains a working render PRIMITIVE, but nothing in the plugin
+ * asks for it any more: 导出 markdown used to, and now renders the conversation
+ * the same way a handoff does (see the second half of this test).
  */
-test('a handoff strips the web references, and the markdown export keeps them', async () => {
+test('a handoff and the markdown export both carry only what was asked and answered', async () => {
   /*
    * `transfer.ts` imports the harness SDK (`@deepseek-ai/dsh-llm` and friends),
    * which only resolves inside a running harness, so it is bundled with those
@@ -2365,9 +3026,10 @@ test('a handoff strips the web references, and the markdown export keeps them', 
       'playwright-core': join(root, 'test/stubs/harness.ts'),
     },
   })
-  const { renderMessagesMarkdown, renderTranscriptMarkdown } = await import(pathToFileURL(outfile).href) as {
+  const { renderMessagesMarkdown, renderTranscriptMarkdown, exportTranscriptFile } = await import(pathToFileURL(outfile).href) as {
     renderMessagesMarkdown: (messages: unknown[], options?: { excludeThinking?: boolean; sources?: boolean }) => string
     renderTranscriptMarkdown: (transcript: unknown, options?: { excludeThinking?: boolean; sources?: boolean }) => string
+    exportTranscriptFile: (input: { transcript: unknown; cwd?: string }) => { filePath: string }
   }
   const messages = [
     { id: 'u1', role: 'user', content: '问', ts: 1 },
@@ -2403,16 +3065,52 @@ test('a handoff strips the web references, and the markdown export keeps them', 
   ])
   assert.ok(legacy.includes('旧格式结尾。'), 'the raw reference spelling is stripped as well')
 
-  /* ---- the reader-facing export ---- */
-  const exported = renderMessagesMarkdown(messages, { sources: true })
+  /* ---- 导出 markdown: the reader's own record of the exchange ---- */
+  /*
+   * The file a person opens used to be the ONE render that kept the citation
+   * table and the reasoning block, so an exported conversation carried the web
+   * search that produced it. It is now the same Q&A render a handoff gets:
+   * questions, answers, and nothing that belongs to the web page.
+   */
+  const exportDir = mkdtempSync(join(tmpdir(), 'dschat-export-md-'))
+  const { filePath } = exportTranscriptFile({
+    cwd: exportDir,
+    transcript: {
+      id: 'chat-abcdef', title: '导出标题', createdAt: 1, updatedAt: 2, model: 'deepseek-chat',
+      messages: [
+        { id: 'u1', role: 'user', content: '问题原文？', ts: 1 },
+        {
+          id: 'a1', role: 'assistant', ts: 2,
+          content: '<details><summary>思考过程</summary>\n\n搜索到 3 个网页\n- 关键词\n\n</details>\n\n答案正文[citation:1]。',
+          sources: [{ url: 'https://a.example/1', title: '甲页' }],
+        },
+      ],
+    },
+  })
+  const exported = readFileSync(join(exportDir, filePath), 'utf8')
+  assert.ok(exported.includes('问题原文？'), 'the question is in the file')
+  assert.ok(exported.includes('答案正文。'), 'and the answer, with its markers removed')
+  assert.equal(exported.includes('参考来源'), false, 'no source footnote in the export')
+  assert.equal(/https?:\/\/a\.example/.test(exported), false, 'no cited URL in the export')
+  assert.equal(exported.includes('[citation:'), false, 'no citation markers in the export')
+  assert.equal(exported.includes('思考过程'), false, 'the R1 scratchpad is not part of the record')
+  assert.equal(exported.includes('搜索到 3 个网页'), false, 'nor is the search trace inside it')
+  rmSync(exportDir, { recursive: true, force: true })
+
+  /*
+   * `sources: true` is still honoured as a primitive — the export simply no
+   * longer asks for it — so a future caller that wants the pages a reply rested
+   * on can still have them.
+   */
+  const withSources = renderMessagesMarkdown(messages, { sources: true })
   assert.match(
-    exported,
+    withSources,
     /> 参考来源：\[1\] \[甲页\]\(https:\/\/a\.example\/1\) · \[2\] \[https:\/\/b\.example\/2\]\(https:\/\/b\.example\/2\)/,
     'sources are numbered to match the markers, with the URL as the fallback label',
   )
-  assert.ok(exported.includes('有依据[citation:1]，也有 [citation:2]。'), 'the export keeps the markers')
+  assert.ok(withSources.includes('有依据[citation:1]，也有 [citation:2]。'), 'the primitive keeps the markers')
   assert.equal(
-    (exported.match(/参考来源/g) ?? []).length, 1,
+    (withSources.match(/参考来源/g) ?? []).length, 1,
     'a reply that cited nothing gets no footnote block',
   )
 

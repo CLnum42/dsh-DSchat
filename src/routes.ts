@@ -396,6 +396,10 @@ export function summarizeChat(chat: DSchatTranscript): DSchatChatSummary {
     streaming: chat.streaming,
     messageCount: chat.messages.length,
     ...(chat.webSessionId === undefined ? {} : { webSessionId: chat.webSessionId }),
+    // The pin is part of the row's identity in the list, so it travels with the
+    // summary: the panel groups on it without fetching any conversation body.
+    ...(chat.pinned === true ? { pinned: true } : {}),
+    ...(chat.pinnedAt === undefined ? {} : { pinnedAt: chat.pinnedAt }),
   }
 }
 
@@ -1310,6 +1314,11 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
          * hid the conversations imported before this plugin stored ids (so
          * their truncated transcripts could never be refreshed), and it also
          * mis-reported two different conversations that share a title.
+         *
+         * `web` now carries each row's own `pinned` flag and real `updatedAt`
+         * (see `listWebConversations`), so the panel can list the whole account
+         * the way the web does — the sidebar DOM it used to read held only the
+         * rows scrolled into view.
          */
         const imported = store.webSessionIds()
         const missing = web.filter(item => item.sessionId === undefined || !imported.has(item.sessionId))
@@ -1331,8 +1340,55 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
         const result = await engine.recoverWebConversation({
           ...(title === undefined ? {} : { title }),
           ...(sessionId === undefined ? {} : { sessionId }),
+          /*
+           * A BOOLEAN mirrors the web's 置顶, both ways: `true` pins, `false`
+           * unpins. Only an absent field means "the caller does not know", in
+           * which case the local arrangement is left alone — so a caller that
+           * has the web's answer (the panel, from `/web-chats`) must send it,
+           * and one that does not (`dschat_recover` with a title) must not.
+           */
+          ...(typeof body?.['pinned'] === 'boolean' ? { pinned: body['pinned'] } : {}),
         })
-        writeJson(res, result.ok ? 200 : 500, result)
+        /*
+         * A throttle answers 429, not 500: the caller is not wrong, it is early.
+         * The batch sync in the panel keys off this to stop instead of grinding
+         * through a hundred more refused reads.
+         */
+        writeJson(res, result.ok ? 200 : (result.rateLimited === true ? 429 : 500), result)
+      },
+    },
+    {
+      /*
+       * Mirror the web's 置顶 flags and conversation times onto the rows already
+       * stored. No history is read, so this is one request for the whole
+       * account — and it is what makes 「从网页同步」 do something for a
+       * conversation it imported on an earlier run.
+       */
+      kind: 'exact',
+      path: '/api/dsh-dschat/sync-pins',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const state = await engine.syncWebListState()
+        writeJson(res, 200, { ok: true, ...state })
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-dschat/pin',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const chatId = stringField(body, 'chatId')
+        if (chatId === undefined) {
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 字段')
+          return
+        }
+        // Absent means "pin": the button that unpins always sends `false`
+        // explicitly, so the simple call is the one that needs no argument.
+        const pinned = body?.['pinned'] !== false
+        const chat = store.setPinned(chatId, pinned)
+        if (chat === undefined) failure(res, 404, 'NOT_FOUND', '找不到该对话记录')
+        else writeJson(res, 200, { ok: true, chatId: chat.id, pinned: pinned })
       },
     },
     {

@@ -99,6 +99,14 @@ export interface ImportResult {
   readonly replaced: number
   /** Stored messages the web copy does not have (kept). */
   readonly kept: number
+  /**
+   * Duplicate local transcripts of this same conversation that were folded into
+   * one (0 or 1). Non-zero means the sync REPAIRED a list that showed the
+   * conversation twice — see {@link TranscriptStore.resolveImportTarget}.
+   */
+  readonly merged?: number
+  /** True when the conversation was created pinned from the web's own 置顶 flag. */
+  readonly pinned?: boolean
 }
 
 interface StoreFile {
@@ -161,6 +169,138 @@ function sameText(left: string, right: string): boolean {
   if (a === '' || b === '') return false
   const [short, long] = a.length <= b.length ? [a, b] : [b, a]
   return short.length >= MIN_PARTIAL_CHARS && long.startsWith(short)
+}
+
+/**
+ * Whether a stored transcript IS the same web conversation as an incoming
+ * import, judged by what was asked rather than by any name.
+ *
+ * The case this exists for: a conversation the reader started in the PANEL and
+ * later synced from the web. The panel names a chat after the first question it
+ * carried; the web names the same conversation with a generated summary — so a
+ * title match can never find it, and before the panel recorded web session ids
+ * at all (see `DeepSeekWebEngine.stampWebSessionId`) a sync simply wrote a
+ * SECOND copy of the conversation under the web's title. Measured on this
+ * machine: 59 of 203 synced conversations had exactly that twin.
+ *
+ * The identity test is the reader's own words, the one part of a turn that
+ * survives a regeneration: the candidate's first question must be the incoming
+ * copy's first question, and every later question it holds must appear in the
+ * incoming copy, in the same order. The opening question is what keeps two
+ * conversations that merely overlap in the middle from being folded together —
+ * the same first question IS the same history; the same third question is not.
+ * A local question the web copy does not contain also refuses the match, since
+ * the merge would otherwise reorder or duplicate the reader's own turns.
+ *
+ * @param candidate - a stored transcript with no web session id yet.
+ * @param incoming - the freshly recovered messages, in order.
+ */
+export function looksLikeSameConversation(candidate: readonly DSchatMessage[], incoming: readonly DSchatMessage[]): boolean {
+  const askedBefore = candidate.filter(message => message.role === 'user').map(message => message.content)
+  const askedNow = incoming.filter(message => message.role === 'user').map(message => message.content)
+  const first = askedBefore[0]
+  const firstNow = askedNow[0]
+  if (first === undefined || firstNow === undefined || !sameText(first, firstNow)) return false
+  let cursor = 0
+  for (const question of askedBefore) {
+    let found = -1
+    for (let index = cursor; index < askedNow.length; index += 1) {
+      const next = askedNow[index]
+      if (next !== undefined && sameText(question, next)) { found = index; break }
+    }
+    if (found < 0) return false
+    cursor = found + 1
+  }
+  return true
+}
+
+/**
+ * Whether two LOCAL transcripts are the same conversation, one being an exact
+ * prefix of the other.
+ *
+ * This is a STRICTER test than {@link looksLikeSameConversation}, and it has to
+ * be: that one compares a local chat against the web's copy of a conversation
+ * already identified by session id, so a weak match can only ever mis-merge two
+ * copies of the same thing. Here both sides are arbitrary local chats and a
+ * wrong answer DELETES a row, so the test is message-by-message — same roles,
+ * same texts, in the same order — rather than question-by-question.
+ *
+ * The first attempt reused the question test with the two sides swapped, and a
+ * dry run over a real 574-row store proved it wrong: a one-question chat matches
+ * ANY conversation that opens with that question, 54 pairs were folded, and 252
+ * messages disappeared (the two copies' contents did not line up, so the merge
+ * kept one side). Pairing on the messages themselves makes a false positive
+ * require two conversations that agree on the same question AND the same answer,
+ * which is the same conversation.
+ *
+ * @param left - one local transcript's messages.
+ * @param right - the other's.
+ */
+export function sameConversationCopies(left: readonly DSchatMessage[], right: readonly DSchatMessage[]): boolean {
+  return isMessagePrefix(left, right) || isMessagePrefix(right, left)
+}
+
+/** Whether `shorter` is the first N messages of `longer`, identically. */
+function isMessagePrefix(shorter: readonly DSchatMessage[], longer: readonly DSchatMessage[]): boolean {
+  if (shorter.length === 0 || shorter.length > longer.length) return false
+  for (let index = 0; index < shorter.length; index += 1) {
+    const a = shorter[index]
+    const b = longer[index]
+    if (a === undefined || b === undefined || a.role !== b.role) return false
+    if (!sameText(a.content, b.content)) return false
+  }
+  return true
+}
+
+/**
+ * Union two prefix-aligned copies of one conversation into the survivor's
+ * message list.
+ *
+ * Deliberately NOT `mergeHistory`: that one exists for merging a WEB copy into
+ * a local transcript, so on a turn whose two texts differ it takes the incoming
+ * one — correct when the incoming side is the server's own record, WRONG here,
+ * where the other side is just another local copy that may be the truncated one.
+ * A dry run over a real store caught exactly that: folding replaced the panel
+ * copy's full reasoning block with the synced copy's shorter rendering, so
+ * messages that existed before the fold were gone after it.
+ *
+ * The rule instead: the SURVIVOR's own text is what the reader has been
+ * reading, so it is kept — with one exception, the case a merge exists for at
+ * all: when the other copy is a longer version of the SAME message (a truncated
+ * reply the web had written out in full), its text completes the survivor's.
+ * Everything about the message object stays: its id, its timestamp, the extras
+ * measured locally.
+ *
+ * Note which difference that leaves alone. The two copies of one reply can
+ * render its reasoning differently — the panel's live parser lists the pages it
+ * opened, while the fragment copy lists the queries it searched — and neither
+ * text contains the other. Choosing "the longer" would silently rewrite the
+ * reader's message; choosing "the survivor's" keeps their record as it was, and
+ * the dropped variant belongs to the copy being folded away.
+ *
+ * @param survivor - the transcript that will be kept.
+ * @param other - the duplicate being folded into it.
+ */
+function unionPrefixCopies(survivor: readonly DSchatMessage[], other: readonly DSchatMessage[]): DSchatMessage[] {
+  const out: DSchatMessage[] = []
+  const total = Math.max(survivor.length, other.length)
+  for (let index = 0; index < total; index += 1) {
+    const keep = survivor[index]
+    const fresh = other[index]
+    if (keep === undefined) {
+      if (fresh !== undefined) out.push(fresh)
+      continue
+    }
+    if (fresh === undefined) {
+      out.push(keep)
+      continue
+    }
+    // `contentKey` ignores the reasoning block and citation markers, so this
+    // compares the ANSWER: a longer one means the survivor's was truncated.
+    const completes = contentKey(fresh.content).length > contentKey(keep.content).length
+    out.push(completes ? { ...keep, content: fresh.content } : keep)
+  }
+  return out
 }
 
 /** What one re-sync did to a stored transcript. */
@@ -482,10 +622,11 @@ export class TranscriptStore {
     this.activeChatId = loaded.activeChatId
     this.acquireLock()
     if (this.activeChatId !== undefined && !this.chats.some(chat => chat.id === this.activeChatId)) {
-      // `chats` is newest-first (`createChat` unshifts), so the newest is at 0.
-      // This used to read `.at(-1)` — the OLDEST conversation — so a store whose
-      // activeChatId had gone stale reopened history at the wrong end.
-      this.activeChatId = this.chats.at(0)?.id
+      // The first row of the LIST, which is what the reader sees at the top:
+      // 置顶 first, then most recently used (see `ordered`). This used to read
+      // `.at(-1)` — the oldest conversation — so a store whose activeChatId had
+      // gone stale reopened history at the wrong end.
+      this.activeChatId = this.ordered()[0]?.id
     }
     /*
      * Repair duplicate message ids at load, before anything can render them.
@@ -756,9 +897,45 @@ export class TranscriptStore {
     return chat
   }
 
-  /** All chats, newest first. */
+  /**
+   * All chats, in the order the list shows them: 置顶 first (most recently
+   * pinned first), then newest-used first.
+   *
+   * The array itself is kept in CREATION order (`createChat` and
+   * `importTranscript` unshift), which is not the same thing and was a real
+   * ordering bug: a batch sync imports conversations newest-web-first, so
+   * unshifting each one left the whole batch REVERSED — the oldest conversation
+   * of the account sitting at the top of the list (measured on this machine:
+   * 494 of 504 imported rows in reverse web order). Ordering is a property of
+   * the list, so it is computed here rather than left to whatever order
+   * mutations happened to leave behind.
+   */
   list(): DSchatTranscript[] {
-    return [...this.chats]
+    return this.ordered()
+  }
+
+  /** `list()`'s order, for the store's own "which chat is first" fallbacks. */
+  private ordered(): DSchatTranscript[] {
+    return [...this.chats].sort((left, right) => {
+      const leftPinned = left.pinned === true
+      const rightPinned = right.pinned === true
+      if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
+      if (leftPinned && rightPinned) {
+        const pinnedDelta = (right.pinnedAt ?? 0) - (left.pinnedAt ?? 0)
+        if (pinnedDelta !== 0) return pinnedDelta
+      }
+      const delta = right.updatedAt - left.updatedAt
+      if (delta !== 0) return delta
+      /*
+       * Equal times keep the order the array already has — newest-CREATED first,
+       * because `createChat` and `importTranscript` unshift. `Array.prototype.sort`
+       * is stable (ES2019), so returning 0 IS the tiebreak; comparing ids here
+       * instead shuffled two conversations created in the same millisecond into
+       * an arbitrary order (caught by the state-route test, which restores two
+       * chats back to back).
+       */
+      return 0
+    })
   }
 
   /**
@@ -806,6 +983,35 @@ export class TranscriptStore {
      * onto an unrelated conversation.
      */
     matchByTitle?: boolean
+    /**
+     * The web account's own 置顶 flag for this conversation.
+     *
+     * It MIRRORS the web: `true` pins the local row, `false` unpins it —
+     * including on a conversation that is already stored. Absent means "this
+     * caller does not know", and then nothing is changed.
+     *
+     * The first version only applied it at creation, on the theory that the pin
+     * is a local arrangement the sync must not fight. That read the requirement
+     * backwards: 置顶 lives on the web account, and the reported symptom was
+     * exactly "网页同步没有同步置顶状态" — the two conversations the reader had
+     * pinned in the browser stayed unpinned here, because they were already
+     * imported and a sync therefore never touched them. A pin made here and not
+     * on the web is the thing that does not survive a sync; the reader can see
+     * that from the list, which is what the sync is for.
+     */
+    pinned?: boolean
+    /**
+     * The conversation's own web times, in epoch ms.
+     *
+     * A recovered transcript used to be stamped with the moment of the IMPORT,
+     * so a batch sync gave every conversation the same `updatedAt` and the list
+     * read as "all of these were used just now" — and, because each import went
+     * to the top of the array, the batch came out in reverse order (measured:
+     * 494 of 504 imported rows). These are the times the list is ordered and
+     * dated by.
+     */
+    createdAt?: number
+    updatedAt?: number
   }): ImportResult {
     const cleanTitle = input.title.trim().replace(/\s+/g, ' ').slice(0, 80) || DEFAULT_CHAT_TITLE
     /*
@@ -816,18 +1022,70 @@ export class TranscriptStore {
      * never survives a restart.
      */
     const incoming = ensureUniqueMessageIds(input.messages).messages
-    const existing = this.findForImport(cleanTitle, input.webSessionId, input.matchByTitle === true)
-    if (existing !== undefined) {
-      let changed = this.activeChatId !== existing.id
-      this.activeChatId = existing.id
-      if (input.webSessionId !== undefined && existing.webSessionId !== input.webSessionId) {
-        existing.webSessionId = input.webSessionId
+    const target = this.resolveImportTarget(cleanTitle, input.webSessionId, input.matchByTitle === true, incoming)
+    if (target.chat !== undefined) {
+      /*
+       * Which of the two records survives a duplicate fold.
+       *
+       * The id-less one, when there is one: it is the chat the READER made and
+       * knows by a title they wrote (or their own first question), and it has
+       * been their handle on the conversation all along. The synced copy that
+       * caused the duplicate is the one that goes — after its messages are
+       * folded in, so nothing it uniquely held is lost.
+       */
+      const survivor = target.twin ?? target.chat
+      const folded = target.twin === undefined ? undefined : target.chat
+      let changed = this.activeChatId !== survivor.id
+      this.activeChatId = survivor.id
+      if (input.webSessionId !== undefined && survivor.webSessionId !== input.webSessionId) {
+        survivor.webSessionId = input.webSessionId
         changed = true
       }
-      const merged = mergeHistory(existing.messages, incoming)
+      /*
+       * The union of the two stored copies first, then the web copy over it, so
+       * the counters describe the SYNC (what the web added to what the reader
+       * had) rather than the bookkeeping of the fold.
+       */
+      const stored = folded === undefined ? survivor.messages : mergeHistory(survivor.messages, folded.messages).messages
+      const merged = mergeHistory(stored, incoming)
       if (merged.changed) {
-        existing.messages = merged.messages
-        existing.updatedAt = Date.now()
+        survivor.messages = merged.messages
+        changed = true
+      }
+      /*
+       * The conversation's own time comes from the WEB copy, not from the clock
+       * this sync happens to run on. That is what makes the list order and the
+       * "· X 前" stamp mean something for a conversation that was imported
+       * rather than chatted in here.
+       *
+       * Applied whenever the caller supplied one — not only when the merge
+       * changed something — because repairing the times of an EXISTING
+       * transcript is exactly the case that was broken: a batch sync had stamped
+       * every one of them with its own import time. A trailing message the web
+       * does not have yet can make the local copy momentarily newer; the merge
+       * keeps that message, and the next sync moves the stamp on.
+       */
+      if (input.updatedAt !== undefined && input.updatedAt > 0 && survivor.updatedAt !== input.updatedAt) {
+        survivor.updatedAt = input.updatedAt
+        changed = true
+      }
+      if (input.pinned !== undefined) {
+        const pinned = input.pinned === true
+        if ((survivor.pinned === true) !== pinned) {
+          if (pinned) {
+            survivor.pinned = true
+            // Keep the moment it was first pinned: the block is ordered by it,
+            // and a re-sync is not a fresh pin.
+            survivor.pinnedAt = survivor.pinnedAt ?? Date.now()
+          } else {
+            delete survivor.pinned
+            delete survivor.pinnedAt
+          }
+          changed = true
+        }
+      }
+      if (folded !== undefined) {
+        this.chats = this.chats.filter(chat => chat.id !== folded.id)
         changed = true
       }
       // The id adoption must be persisted even when the history itself was not
@@ -835,48 +1093,210 @@ export class TranscriptStore {
       // imported.
       if (changed) this.persist()
       return {
-        chat: existing,
+        chat: survivor,
         created: false,
-        updated: merged.changed,
+        updated: merged.changed || folded !== undefined,
         added: merged.added,
         completed: merged.completed,
         replaced: merged.replaced,
         kept: merged.kept,
+        ...(folded === undefined ? {} : { merged: 1 }),
       }
     }
     const now = Date.now()
     const chat: DSchatTranscript = {
       id: `chat-${now.toString(36)}-${randomUUID().slice(0, 6)}`,
       title: cleanTitle,
-      createdAt: now,
-      updatedAt: now,
+      /*
+       * The conversation's own times when the caller has them (a recover does:
+       * the web stores both), the moment of this import otherwise. A batch sync
+       * would otherwise file two years of conversations under one timestamp.
+       */
+      createdAt: input.createdAt !== undefined && input.createdAt > 0 ? input.createdAt : now,
+      updatedAt: input.updatedAt !== undefined && input.updatedAt > 0 ? input.updatedAt : now,
       model: input.model,
       messages: incoming,
       streaming: false,
       ...(input.webSessionId === undefined ? {} : { webSessionId: input.webSessionId }),
+      // 置顶 mirrors the web account (see the input's own note).
+      ...(input.pinned === true ? { pinned: true, pinnedAt: now } : {}),
     }
     this.chats.unshift(chat)
     this.activeChatId = chat.id
     this.persist()
-    return { chat, created: true, updated: false, added: incoming.length, completed: 0, replaced: 0, kept: 0 }
+    return {
+      chat,
+      created: true,
+      updated: false,
+      added: incoming.length,
+      completed: 0,
+      replaced: 0,
+      kept: 0,
+      ...(input.pinned === true ? { pinned: true } : {}),
+    }
   }
 
   /**
-   * Which stored chat an incoming import belongs to.
+   * Fold local DUPLICATES of one web conversation into a single row.
    *
-   * By web session id first, and — only when the caller asked for it and there
-   * is no id — by title. The title branch additionally refuses the default
-   * title and refuses chats that are already tied to a known web conversation,
-   * so it can only ever re-attach an id-less import to another id-less
-   * transcript with a real, matching name.
+   * The repair that `importTranscript`'s twin adoption cannot reach. That one
+   * fires when a conversation is synced, and a conversation an earlier version
+   * already imported is by definition never synced again (`missing` excludes it)
+   * — so on this machine the 59 pairs the old sync created were still there
+   * after the fix, each showing one conversation twice under two titles.
+   *
+   * Neither side needs the web for this: two local transcripts are compared
+   * message-by-message ({@link sameConversationCopies}), and their messages are
+   * unioned. The reader's own record survives — the id-less one, with the title
+   * they know it by — and it takes over the web session id, so the pair becomes
+   * one row that later syncs address correctly.
+   *
+   * Conservative on purpose: exactly ONE id-less candidate, or nothing happens.
+   * A fold is not reversible from the UI, and merging the wrong two
+   * conversations would be worse than leaving a duplicate visible. (The first
+   * version of the test was not conservative enough and was caught by running it
+   * over a real store — see `sameConversationCopies`.)
+   *
+   * @returns how many duplicates were folded away.
    */
-  private findForImport(title: string, webSessionId: string | undefined, matchByTitle: boolean): DSchatTranscript | undefined {
-    if (webSessionId !== undefined && webSessionId !== '') {
-      const byId = this.chats.find(chat => chat.webSessionId === webSessionId)
-      if (byId !== undefined) return byId
+  foldDuplicateConversations(): number {
+    let folded = 0
+    for (const synced of [...this.chats]) {
+      if (synced.webSessionId === undefined) continue
+      if (!this.chats.some(chat => chat.id === synced.id)) continue
+      const candidates = this.chats.filter(candidate =>
+        candidate.id !== synced.id
+        && candidate.webSessionId === undefined
+        && candidate.streaming !== true
+        && candidate.messages.length > 0
+        && synced.messages.length > 0
+        && sameConversationCopies(candidate.messages, synced.messages))
+      if (candidates.length !== 1) continue
+      const twin = candidates[0]
+      if (twin === undefined) continue
+      twin.webSessionId = synced.webSessionId
+      // A dedicated union, not `mergeHistory` — see `unionPrefixCopies` for the
+      // truncation that method caused here.
+      const merged = unionPrefixCopies(twin.messages, synced.messages)
+      if (merged.some((message, index) => message !== twin.messages[index]) || merged.length !== twin.messages.length) {
+        twin.messages = merged
+      }
+      this.chats = this.chats.filter(chat => chat.id !== synced.id)
+      if (this.activeChatId === synced.id) this.activeChatId = twin.id
+      folded += 1
     }
-    if (!matchByTitle || title === DEFAULT_CHAT_TITLE) return undefined
-    return this.chats.find(chat => chat.title === title && chat.webSessionId === undefined)
+    if (folded > 0) this.persist()
+    return folded
+  }
+
+  /**
+   * Mirror the web account's own list state onto the conversations already
+   * stored: which are 置顶, and when each was last used.
+   *
+   * This is the HALF OF A SYNC THAT NEEDS NO HISTORY READ. 「从网页同步」 used
+   * to do nothing at all for a conversation it had already imported — that is
+   * what `missing` means — so a reader who pinned a conversation in the browser,
+   * or who had imported an old transcript before the plugin recorded real
+   * times, could click the button forever and see no change. The list endpoint
+   * already carries both facts for the whole account, so applying them costs one
+   * request and fixes the arrangement of hundreds of rows at once.
+   *
+   * Conversations with no web session id (chatted here and never synced) are not
+   * touched: the web has never heard of them.
+   *
+   * @param rows - the web's list, as `listWebConversations` reports it.
+   */
+  applyWebListState(rows: readonly { sessionId?: string; pinned?: boolean; updatedAt?: number }[]): {
+    matched: number
+    pinned: number
+    unpinned: number
+    retimed: number
+  } {
+    let matched = 0
+    let pinned = 0
+    let unpinned = 0
+    let retimed = 0
+    let changed = false
+    for (const row of rows) {
+      if (row.sessionId === undefined || row.sessionId === '') continue
+      const chat = this.chats.find(candidate => candidate.webSessionId === row.sessionId)
+      if (chat === undefined) continue
+      matched += 1
+      const wanted = row.pinned === true
+      if ((chat.pinned === true) !== wanted) {
+        if (wanted) {
+          chat.pinned = true
+          chat.pinnedAt = chat.pinnedAt ?? Date.now()
+          pinned += 1
+        } else {
+          delete chat.pinned
+          delete chat.pinnedAt
+          unpinned += 1
+        }
+        changed = true
+      }
+      /*
+       * The web's time never lands on a conversation with a reply in flight: the
+       * reply loop is stamping that row as it streams, and a list read taken
+       * seconds ago would drag it backwards mid-turn. The pin is harmless there
+       * (it is not a time), so only the retime is skipped.
+       */
+      if (row.updatedAt !== undefined && row.updatedAt > 0 && chat.updatedAt !== row.updatedAt && chat.streaming !== true) {
+        chat.updatedAt = row.updatedAt
+        retimed += 1
+        changed = true
+      }
+    }
+    if (changed) this.persist()
+    return { matched, pinned, unpinned, retimed }
+  }
+
+  /**
+   * Which stored chat an incoming import belongs to, and whether a duplicate
+   * copy of the same conversation should be folded into it.
+   *
+   * Three tests for the target, in descending order of confidence:
+   *
+   *   1. the web session id — a conversation's real identity;
+   *   2. the exact title, when the caller asked for it and there is no id;
+   *   3. the reader's own questions (see {@link looksLikeSameConversation}) —
+   *      the repair path for a chat the panel created before it recorded web
+   *      session ids. Without it, the first sync after this plugin version
+   *      would still write the twin it should have merged into.
+   *
+   * `twin` is the duplicate found by test 3 when test 1 or 2 already produced a
+   * target: the two copies are the same conversation and the caller folds them
+   * into one. One candidate only — two chats that both look like this
+   * conversation mean the evidence is not specific enough to fold either, and
+   * guessing would merge the reader's history into the wrong record. A chat
+   * with a reply in flight is left alone as well: its merge would race the
+   * streaming write.
+   *
+   * @param incoming - the messages being imported, for the question match.
+   */
+  private resolveImportTarget(title: string, webSessionId: string | undefined, matchByTitle: boolean, incoming: readonly DSchatMessage[]): { chat?: DSchatTranscript; twin?: DSchatTranscript } {
+    const byId = webSessionId !== undefined && webSessionId !== ''
+      ? this.chats.find(chat => chat.webSessionId === webSessionId)
+      : undefined
+    if (!matchByTitle) return byId === undefined ? {} : { chat: byId }
+    const twin = this.uniqueTwin(incoming)
+    if (byId !== undefined) {
+      return twin === undefined || twin.id === byId.id ? { chat: byId } : { chat: byId, twin }
+    }
+    if (title !== DEFAULT_CHAT_TITLE) {
+      const byTitle = this.chats.find(chat => chat.title === title && chat.webSessionId === undefined)
+      if (byTitle !== undefined) return { chat: byTitle }
+    }
+    return twin === undefined ? {} : { chat: twin }
+  }
+
+  /** The single id-less stored chat that is this same web conversation, if any. */
+  private uniqueTwin(incoming: readonly DSchatMessage[]): DSchatTranscript | undefined {
+    const twins = this.chats.filter(chat =>
+      chat.webSessionId === undefined
+      && chat.streaming !== true
+      && looksLikeSameConversation(chat.messages, incoming))
+    return twins.length === 1 ? twins[0] : undefined
   }
 
   /** Web session ids already imported (so the sidebar can mark the rest). */
@@ -963,12 +1383,60 @@ export class TranscriptStore {
     return this.update(id, chat => { chat.title = clean })
   }
 
-  /** Delete one chat; a deleted active chat falls back to the newest remaining. */
+  /**
+   * Record which web conversation this chat IS.
+   *
+   * Written by the engine the moment a panel turn has been accepted by the page
+   * (see `DeepSeekWebEngine.stampWebSessionId`). Until v0.8 nothing set this
+   * outside the recover path, which is why syncing a conversation the reader had
+   * been chatting in created a SECOND local transcript of it: the sync had only
+   * a title to match on, and the panel's title (the first question) is not the
+   * web's generated title.
+   *
+   * Idempotent, and a no-op when the id is already right — a stamp on every turn
+   * must not re-arm the persist debounce for nothing.
+   *
+   * @returns true when the id changed.
+   */
+  setWebSessionId(id: string, webSessionId: string): boolean {
+    const chat = this.chats.find(candidate => candidate.id === id)
+    if (chat === undefined || webSessionId === '' || chat.webSessionId === webSessionId) return false
+    chat.webSessionId = webSessionId
+    this.persist()
+    return true
+  }
+
+  /**
+   * Pin or unpin one conversation (the local counterpart of the web's 置顶).
+   *
+   * `pinnedAt` is refreshed on every pin so the pinned block is ordered by when
+   * the reader actually pinned, newest first — the same way the web orders it.
+   *
+   * Deliberately NOT routed through `update()`: that stamps `updatedAt`, and
+   * rearranging the list is not activity. Pinning would otherwise move the
+   * conversation in the date order too, so unpinning it later would leave it
+   * sitting at the top of the recent list as if it had just been used.
+   */
+  setPinned(id: string, pinned: boolean): DSchatTranscript | undefined {
+    const chat = this.chats.find(candidate => candidate.id === id)
+    if (chat === undefined) return undefined
+    if (pinned) {
+      chat.pinned = true
+      chat.pinnedAt = Date.now()
+    } else {
+      delete chat.pinned
+      delete chat.pinnedAt
+    }
+    this.persist()
+    return chat
+  }
+
+  /** Delete one chat; a deleted active chat falls back to the first row left. */
   deleteChat(id: string): boolean {
     const before = this.chats.length
     this.chats = this.chats.filter(chat => chat.id !== id)
     if (this.chats.length === before) return false
-    if (this.activeChatId === id) this.activeChatId = this.chats.at(0)?.id
+    if (this.activeChatId === id) this.activeChatId = this.ordered()[0]?.id
     this.persist()
     return true
   }

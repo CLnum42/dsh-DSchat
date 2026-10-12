@@ -193,8 +193,18 @@ export interface ApiRecoverResult {
   replaced?: number
   /** Stored messages the web copy does not have. */
   kept?: number
+  /**
+   * Duplicate local copies of this conversation folded into one (0 or 1).
+   *
+   * The sync repairs a list that showed the same conversation twice — see
+   * `TranscriptStore.resolveImportTarget` — and says so, because a row
+   * disappearing without explanation would look like a bug.
+   */
+  merged?: number
   messageCount?: number
   source?: string
+  /** True when the web refused the read with 40029 TOO_MANY_REQUESTS. */
+  rateLimited?: boolean
 }
 
 export class DSchatApi {
@@ -436,6 +446,17 @@ export class DSchatApi {
     return request<{ ok: boolean }>(DSCHAT_API.deleteChat, { chatId })
   }
 
+  /**
+   * Pin or unpin one conversation.
+   *
+   * A local arrangement of the reader's own list, mirroring the web's 置顶 —
+   * `pinned: false` sends the explicit unpin, so the argument is always present
+   * rather than inferred from the route's default.
+   */
+  pinChat(chatId: string, pinned: boolean): Promise<EndpointResult<{ ok: boolean; chatId?: string; pinned?: boolean }>> {
+    return request<{ ok: boolean; chatId?: string; pinned?: boolean }>(DSCHAT_API.pinChat, { chatId, pinned })
+  }
+
   clearChats(): Promise<EndpointResult<{ ok: boolean; count?: number }>> {
     return request<{ ok: boolean; count?: number }>(DSCHAT_API.clearChats, {})
   }
@@ -449,9 +470,26 @@ export class DSchatApi {
    * Recover one web conversation. `sessionId` is preferred (titles repeat and
    * `hasText` matching is a substring match); `title` stays for links that
    * predate it.
+   *
+   * `pinned` is a BOOLEAN that mirrors the web's own 置顶 (true pins, false
+   * unpins) — send it whenever the caller has the web's answer, and omit it when
+   * it does not. An absent field leaves the local arrangement alone.
    */
-  recover(chat: { title?: string; sessionId?: string }): Promise<EndpointResult<ApiRecoverResult>> {
+  recover(chat: { title?: string; sessionId?: string; pinned?: boolean }): Promise<EndpointResult<ApiRecoverResult>> {
     return request<ApiRecoverResult>(DSCHAT_API.recover, chat, TIMEOUT.webList)
+  }
+
+  /**
+   * Align the local list with the web account: fold duplicate rows, then mirror
+   * the web's 置顶 flags and conversation times onto the rows already stored.
+   *
+   * One request, no history read: this is the half of a sync that a conversation
+   * already imported could never get before.
+   */
+  syncPins(): Promise<EndpointResult<{ ok: boolean; matched?: number; pinned?: number; unpinned?: number; retimed?: number; folded?: number }>> {
+    return request<{ ok: boolean; matched?: number; pinned?: number; unpinned?: number; retimed?: number; folded?: number }>(
+      DSCHAT_API.syncPins, {}, TIMEOUT.webList,
+    )
   }
 
   /**

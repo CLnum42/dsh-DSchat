@@ -638,6 +638,27 @@ body[data-ds-dark-theme] .dsh-dschat {
 }
 .dsh-dschat-mini:hover { background: var(--dschat-active); color: var(--dschat-tx); }
 .dsh-dschat-mini-danger:hover { background: color-mix(in srgb, var(--dschat-danger) 14%, transparent); color: var(--dschat-danger); }
+/*
+ * A pinned row reports its state with the pointer away.
+ *
+ * The actions column is hover-only (above), which would hide the pin along with
+ * everything else — so a pinned conversation would look exactly like any other
+ * row until the pointer happened to cross it. On a pinned row the column stays
+ * laid out with the pin ALONE in it; hovering brings back the full run, which is
+ * what keeps the row's width from jumping between the two states.
+ */
+.dsh-dschat-item[data-pinned] .dsh-dschat-item-acts { display: flex; }
+.dsh-dschat-item[data-pinned] .dsh-dschat-pin { display: grid; color: var(--dschat-accent); }
+.dsh-dschat-item[data-pinned]:not(:hover) .dsh-dschat-item-acts > *:not(.dsh-dschat-pin) { display: none; }
+/*
+ * The 「置顶」 heading, borrowed from the web sidebar's own pinned block: a small
+ * uppercase-ish label with the group it names right below it. Same idea as the
+ * 今天 / 昨天 headings the web uses for the rest of the list.
+ */
+.dsh-dschat-list-group {
+  padding: 8px 8px 2px; font-size: 11px; font-weight: 600;
+  color: var(--dschat-tx-3); letter-spacing: .04em;
+}
 .dsh-dschat-hint-empty { padding: 14px 8px; font-size: 12px; color: var(--dschat-tx-3); }
 
 /* ---------- question navigator (right edge) ---------- */
