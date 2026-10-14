@@ -283,7 +283,31 @@ async function bundle(dir) {
         attachmentUrl: record('attachmentUrl', () =>
           'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2256%22%20height%3D%2256%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23cfe0ff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%234176e6%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%2256%22%20height%3D%2256%22%20fill%3D%22url(%23g)%22%2F%3E%3Ccircle%20cx%3D%2220%22%20cy%3D%2220%22%20r%3D%226%22%20fill%3D%22%23ffffff%22%20opacity%3D%220.85%22%2F%3E%3Cpath%20d%3D%22M6%2048l14-16%2010%2012%208-9%2012%2013z%22%20fill%3D%22%23ffffff%22%20opacity%3D%220.75%22%2F%3E%3C%2Fsvg%3E'),
         stop: pending, openLogin: pending, closeBrowser: pending,
-        setDeepThink: pending, setSearch: pending, transfer: pending, exportFile: pending,
+        /*
+         * 分享, answered from the fixture. The real route drives the web page and
+         * returns the created URL; here a URL is handed back so the success path
+         * (copy + toast) can be shot, and window.__state.shareError produces the
+         * failure path the panel answers with the 「改为复制文本」 offer.
+         */
+        share: record('share', async () => (window.__state.shareError
+          ? { ok: false, error: window.__state.shareError }
+          : { ok: true, url: 'https://chat.deepseek.com/share/demo-share-id' })),
+        /*
+         * 导出 markdown, answered like the host would: a file name inside a
+         * directory. The toast names both, and the probe reads back the
+         * messageIds the panel sent — which is what proves the picker's
+         * selection travelled rather than the whole conversation.
+         */
+        exportFile: record('exportFile', async () => ({
+          ok: true, filePath: 'dschat-demo-ab12cd.md', dir: '/Users/demo/Downloads',
+        })),
+        /*
+         * The export destination the reader picks. Answered with the path the
+         * host would resolve, which is what the dialog's field shows back — the
+         * screenshot has to carry a real folder, not an empty box.
+         */
+        setExportDir: record('setExportDir', async (dir) => ({ ok: true, dir })),
+        setDeepThink: pending, setSearch: pending, transfer: pending,
         renameChat: pending, deleteChat: pending, clearChats: pending, webChats: pending,
         recover: pending, restore: pending,
         /*
@@ -451,9 +475,516 @@ try {
         rows: el.querySelectorAll('li').length,
         height: Math.round(el.getBoundingClientRect().height),
       })),
+      /*
+       * The action row under each message.
+       *
+       * This is measured rather than eyeballed in the picture because the two
+       * things the change asked for are geometric: the answer's row must be BELOW
+       * its answer (not floating over the head line), and it must be laid out in
+       * the web page's own order — 复制 · 重新生成 · 喜欢 · 不喜欢 · 分享. The
+       * labels come from the buttons' accessible names, which is what a reader
+       * with a screen reader gets and what the page itself does NOT provide.
+       */
+      actionRows: [...document.querySelectorAll('.dsh-dschat-msg')].map(message => {
+        const row = message.querySelector('.dsh-dschat-msg-acts')
+        if (row === null) return null
+        const body = message.querySelector('.dsh-dschat-msg-body')
+        const rowBox = row.getBoundingClientRect()
+        const bodyBox = body?.getBoundingClientRect()
+        return {
+          role: message.getAttribute('data-role'),
+          mod: row.getAttribute('data-mod'),
+          labels: [...row.querySelectorAll('button')].map(button => button.getAttribute('aria-label')),
+          disabled: [...row.querySelectorAll('button')].filter(button => button.disabled).map(button => button.getAttribute('aria-label')),
+          height: Math.round(rowBox.height),
+          separator: (() => {
+            const sep = row.querySelector('.dsh-dschat-msg-acts-sep')
+            if (sep === null) return null
+            const r = sep.getBoundingClientRect()
+            const style = getComputedStyle(sep)
+            return { w: Math.round(r.width), h: Math.round(r.height), bg: style.backgroundColor }
+          })(),
+          buttonSize: (() => {
+            const first = row.querySelector('button')
+            if (first === null) return null
+            const r = first.getBoundingClientRect()
+            return { w: Math.round(r.width), h: Math.round(r.height) }
+          })(),
+          // How far the row's top sits below the message body's bottom. Negative
+          // would mean the row is back over the text it acts on.
+          belowBody: bodyBox === undefined ? null : Math.round(rowBox.top - bodyBox.bottom),
+        }
+      }).filter(Boolean),
+      /*
+       * WHICH messages have an action row — the arrival gate, measured.
+       *
+       * `actionRows` above drops the messages that have none, which is exactly
+       * the case being checked here: the live fixture (`d-a3`, `streaming: true`)
+       * must have NO row, because its answer is still arriving, while every
+       * finished reply keeps one. Recorded per message id rather than as a count,
+       * because "3 of 4 messages have a row" does not say WHICH one lost it —
+       * and the failure this guards is a row on the one message that must not
+       * have one.
+       */
+      rowsByMessage: [...document.querySelectorAll('.dsh-dschat-msg')].map(message => ({
+        id: message.getAttribute('data-message-id'),
+        role: message.getAttribute('data-role'),
+        hasRow: message.querySelector('.dsh-dschat-msg-acts') !== null,
+      })),
     }
   })
   await shot('01-default')
+
+  /*
+   * One reply on its own, so the new action row is legible.
+   *
+   * The full-panel shot is 1280px wide and the row is 28px tall, which is not
+   * enough to check a glyph's weight or the gap between two controls. Rather than
+   * dismiss whatever happens to be open — this script drives the panel for a few
+   * hundred lines after here and each pass expects its own state — the answer is
+   * CLONED onto an empty layer and cropped, so the picture is of the real row
+   * with nothing over it.
+   */
+  const answerClip = await view.evaluate(() => {
+    const message = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    if (message === null) return null
+    const stage = document.createElement('div')
+    stage.id = 'dsh-dschat-shot-stage'
+    stage.style.cssText = 'position:fixed; inset:0; background: var(--dsw-alias-bg-base); padding: 24px 40px; z-index: 9999;'
+    const clone = message.cloneNode(true)
+    stage.appendChild(clone)
+    document.body.appendChild(stage)
+    const r = clone.getBoundingClientRect()
+    return { x: 0, y: 0, width: 1280, height: Math.min(820, Math.round(r.height) + 70) }
+  })
+  if (answerClip !== null) await shot('01b-answer-actions', { clip: answerClip })
+  // The stage is a full-window layer at z-index 9999: leaving it up would block
+  // every later click in this script (and did — the thinking row's click reported
+  // "div#dsh-dschat-shot-stage intercepts pointer events").
+  await view.evaluate(() => { document.getElementById('dsh-dschat-shot-stage')?.remove() })
+
+  /*
+   * Both rows on their own, at reading size.
+   *
+   * The two rows of a conversation are what this pass is about: an answer's row
+   * (the page's five controls, the group hairline, this panel's two) and the
+   * reader's own row, which now sits UNDER its bubble like the answer's rather
+   * than floating to the left of it on hover. Both are CLONED onto an empty
+   * layer first, because either message can be scrolled out of view and a clip
+   * framed on an off-screen element is a picture of the panel's background.
+   */
+  const rowsClip = await view.evaluate(() => {
+    const assistant = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    const user = document.querySelector('.dsh-dschat-msg[data-role="user"]')
+    if (assistant === null || user === null) return null
+    const stage = document.createElement('div')
+    stage.id = 'dsh-dschat-rows-stage'
+    stage.style.cssText = 'position:fixed; inset:0; background: var(--dsw-alias-bg-base); padding: 16px 32px; z-index: 9999; display: flex; flex-direction: column; gap: 18px;'
+    for (const source of [user, assistant]) {
+      const clone = source.cloneNode(true)
+      // Only the row and what it acts on: the whole answer is 2 000px tall.
+      const body = clone.querySelector('.dsh-dschat-msg-body')
+      if (body !== null) {
+        // Clip the prose so the two ROWS are what the picture shows: the clone
+        // keeps its real layout (the row is the body's sibling), and overflow has
+        // to be hidden or the full answer paints over the row below it.
+        body.style.maxHeight = '96px'
+        body.style.overflow = 'hidden'
+      }
+      stage.appendChild(clone)
+    }
+    document.body.appendChild(stage)
+    return { x: 0, y: 0, width: 1280, height: 340 }
+  })
+  if (rowsClip !== null) await shot('01d-rows', { clip: rowsClip })
+  await view.evaluate(() => { document.getElementById('dsh-dschat-rows-stage')?.remove() })
+  /*
+   * The 反馈 form, opened for real.
+   *
+   * 点踩 is the one action in the row that is not a request — the web page answers
+   * it with a dialog that requires a reason — so it is the one action whose UI
+   * only exists after a click. Driven rather than statically rendered, because the
+   * assertion is about the transition too: the row must survive having a panel
+   * open over it, and the form must be anchored to the row's left edge.
+   *
+   * The answer is scrolled to the BOTTOM of the thread first, and the scroll is
+   * given a beat to settle before the click. The form opens upward, so on an
+   * answer near the top of the transcript there is genuinely no room above the row
+   * — the same geometry every upward panel in this component has — and the click
+   * would otherwise open it off-screen, which is a real (if uninteresting) way for
+   * a screenshot to show the wrong thing.
+   */
+  await view.evaluate(() => {
+    /*
+     * The THREAD's own scroller, scrolled directly. `scrollIntoView` on the
+     * message is not enough: the answer is tall (its reasoning row alone is a
+     * collapsible block), so "block: end" can leave the row it is about far above
+     * the viewport — the form then opens off-screen, which looks like a broken
+     * panel in a picture and is not one.
+     */
+    const answer = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    const scroller = document.querySelector('.dsh-dschat-thread')
+    const row = answer?.querySelector('.dsh-dschat-msg-acts')
+    if (answer === null || scroller === null || row === null || row === undefined) return
+    const rowBox = row.getBoundingClientRect()
+    const scrollerBox = scroller.getBoundingClientRect()
+    /*
+     * Put the row near the BOTTOM of the thread: the form is 286px tall and opens
+     * upward, so the room it needs is above the trigger — a row at a third of the
+     * height still leaves the panel clipped by the top of the transcript.
+     */
+    scroller.scrollTop += (rowBox.top - scrollerBox.top) - scrollerBox.height * 0.75
+    // The geometry this pass is based on: a scroll that silently does nothing
+    // (content fits, an anchor fights it) is otherwise indistinguishable from a
+    // form that opened in the wrong place.
+    return {
+      scrollTop: Math.round(scroller.scrollTop),
+      scrollHeight: Math.round(scroller.scrollHeight),
+      clientHeight: Math.round(scroller.clientHeight),
+      rowTopBefore: Math.round(rowBox.top),
+      rowTopAfter: Math.round(row.getBoundingClientRect().top),
+      scrollerTop: Math.round(scrollerBox.top),
+    }
+  }).then(info => { report.probes.dislikeScroll = info })
+  await view.waitForTimeout(400)
+  report.probes.dislikeForm = await view.evaluate(() => {
+    const answer = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    if (answer === null) return null
+    const row = answer.querySelector('.dsh-dschat-msg-acts')
+    /*
+     * By INDEX, not by label: this bundle mounts the panel with the real
+     * dictionary, so the accessible names are 不喜欢 / Dislike rather than locale
+     * keys — and the row's order is the contract anyway (复制 · 重新生成 · 喜欢 ·
+     * 不喜欢 · 分享), the same order the engine's index-based click relies on.
+     */
+    const buttons = [...(row?.querySelectorAll('button') ?? [])]
+    const dislike = buttons[3]
+    if (dislike === undefined) {
+      return { opened: false, reason: 'no-dislike-control', labels: buttons.map(button => button.getAttribute('aria-label')) }
+    }
+    dislike.click()
+    return { opened: true, label: dislike.getAttribute('aria-label') }
+  })
+  await view.waitForTimeout(260)
+  report.probes.dislikeAnchor = await view.evaluate(() => {
+    const form = document.querySelector('.dsh-dschat-feedback')
+    const row = form?.parentElement
+    if (form === null || row === null || row === undefined) return null
+    const rowStyle = getComputedStyle(row)
+    const formStyle = getComputedStyle(form)
+    return {
+      tag: form.tagName,
+      rowClass: row.className,
+      rowPosition: rowStyle.position,
+      rowTop: Math.round(row.getBoundingClientRect().top),
+      formPosition: formStyle.position,
+      formBottom: formStyle.bottom,
+      formTop: formStyle.top,
+      offsetParent: (form.offsetParent)?.className ?? null,
+      rectTop: Math.round(form.getBoundingClientRect().top),
+      offsetTop: form.offsetTop,
+      offsetHeight: form.offsetHeight,
+    }
+  })
+  report.probes.dislikeAnchorInspect = await view.evaluate(() => {
+    const form = document.querySelector('.dsh-dschat-feedback')
+    if (form === null) return null
+    const chain = []
+    let node = form.parentElement
+    while (node !== null && chain.length < 8) {
+      const style = getComputedStyle(node)
+      const r = node.getBoundingClientRect()
+      chain.push({
+        cls: node.className,
+        pos: style.position,
+        display: style.display,
+        top: Math.round(r.top),
+        height: Math.round(r.height),
+        scrollTop: Math.round(node.scrollTop),
+      })
+      node = node.parentElement
+    }
+    return chain
+  })
+  report.probes.dislikeFormGeometry = await view.evaluate(() => {
+    const form = document.querySelector('.dsh-dschat-feedback')
+    if (form === null) return null
+    const box = el => {
+      const r = el.getBoundingClientRect()
+      return { x: Math.round(r.x), right: Math.round(r.right), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+    }
+    const style = getComputedStyle(form)
+    const actions = form.querySelector('.dsh-dschat-pop-actions')
+    const padLeft = parseFloat(style.paddingLeft)
+    const padRight = parseFloat(style.paddingRight)
+    const formBox = box(form)
+    return {
+      form: formBox,
+      contentRight: Math.round(formBox.right - padRight),
+      contentLeft: Math.round(formBox.left + padLeft),
+      padding: { left: padLeft, right: padRight },
+      actions: actions === null ? null : box(actions),
+      buttons: [...form.querySelectorAll('.dsh-dschat-pop-actions button')].map(button => ({
+        text: button.textContent,
+        box: box(button),
+        overflowRight: Math.round(box(button).right - (formBox.right - padRight)),
+      })),
+      note: form.querySelector('.dsh-dschat-feedback-note') === null ? null : box(form.querySelector('.dsh-dschat-feedback-note')),
+    }
+  })
+  report.probes.dislikeFormOpen = await view.evaluate(() => {
+    const form = document.querySelector('.dsh-dschat-feedback')
+    if (form === null) return { present: false }
+    const answer = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    const row = answer?.querySelector('.dsh-dschat-msg-acts')
+    const formBox = form.getBoundingClientRect()
+    const rowBox = row?.getBoundingClientRect()
+    return {
+      present: true,
+      title: form.querySelector('.dsh-dschat-pop-title')?.textContent ?? null,
+      reasons: [...form.querySelectorAll('.dsh-dschat-feedback-reason')].map(button => ({
+        text: button.textContent,
+        checked: button.getAttribute('aria-checked'),
+      })),
+      hasNote: form.querySelector('.dsh-dschat-feedback-note') !== null,
+      actions: [...form.querySelectorAll('.dsh-dschat-pop-actions button')].map(button => button.textContent),
+      /* Left-aligned with the row it belongs to, and above it. */
+      offsetFromRowLeft: rowBox === undefined ? null : Math.round(formBox.left - rowBox.left),
+      opensUpward: rowBox === undefined ? null : formBox.bottom <= rowBox.top + 2,
+      onScreen: formBox.top >= 0 && formBox.left >= 0,
+      /* Where the form actually is, so the picture can be framed around it. */
+      box: {
+        x: Math.round(formBox.left),
+        y: Math.round(formBox.top),
+        w: Math.round(formBox.width),
+        h: Math.round(formBox.height),
+      },
+    }
+  })
+  /*
+   * Frame the picture on the FORM (and the row it belongs to) rather than on a
+   * guessed rectangle: where the panel lands depends on which answer was scrolled
+   * to, and a fixed clip is exactly how a shot ends up showing the conversation
+   * list instead of the thing being checked.
+   */
+  const formProbe = report.probes.dislikeFormOpen
+  const formClip = formProbe?.present === true && formProbe.box !== undefined
+    ? {
+        x: Math.max(0, Math.min(formProbe.box.x - 40, 1280 - 10)),
+        y: Math.max(0, formProbe.box.y - 40),
+        width: Math.min(1280, formProbe.box.w + 160),
+        height: Math.min(820, formProbe.box.h + 120),
+      }
+    : { x: 240, y: 240, width: 1000, height: 520 }
+  /*
+   * Get the conversation list out of the way for the picture, without changing
+   * any state the rest of the script depends on: the list is closed by clicking
+   * its own trigger, exactly as a reader closes it. Nothing here asserts on the
+   * list being open, but leaving it up would cover half the form.
+   */
+  await view.evaluate(() => {
+    if (document.querySelector('.dsh-dschat-listpop') !== null) {
+      document.querySelector('.dsh-dschat-tbtn-sessions')?.click()
+    }
+  })
+  await view.waitForTimeout(220)
+  report.probes.dislikeFormBeforeShot = await view.evaluate(() => {
+    const form = document.querySelector('.dsh-dschat-feedback')
+    if (form === null) return { present: false }
+    const r = form.getBoundingClientRect()
+    return { present: true, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+  })
+  await shot('01c-dislike-form', { clip: formClip })
+  // Escape is one of the two documented ways out; the other is a click outside.
+  await view.keyboard.press('Escape')
+  await view.waitForTimeout(180)
+  report.probes.dislikeFormClosedByEscape = await view.evaluate(
+    () => document.querySelector('.dsh-dschat-feedback') === null,
+  )
+
+  /*
+   * The 分享 PICKER, and the two-step shape it exists for.
+   *
+   * 分享 is the one control that PUBLISHES (a link anyone can open), so it must
+   * not act on the click that opens it: this drives the click, asserts the picker
+   * with the page's own warning is what appeared, asserts NOTHING was sent yet,
+   * then exercises the SELECTION — the binding (both halves of a turn carry the
+   * same checked state), the count, and the ids that finally reach the route.
+   *
+   * The whole point of the change this probe guards is that one 分享 can cover
+   * several exchanges, so the interesting assertions are the ones about the
+   * multi-turn list, not the confirm button alone.
+   */
+  report.probes.shareOpen = await view.evaluate(() => {
+    const answer = document.querySelector('.dsh-dschat-msg[data-role="assistant"]')
+    const row = answer?.querySelector('.dsh-dschat-msg-acts')
+    const buttons = [...(row?.querySelectorAll('button') ?? [])]
+    const share = buttons[4]
+    if (share === undefined) return { opened: false, labels: buttons.map(button => button.getAttribute('aria-label')) }
+    share.click()
+    return { opened: true, label: share.getAttribute('aria-label') }
+  })
+  await view.waitForTimeout(220)
+  /*
+   * The picker, read as data: how many turns it offers, which are ticked, and —
+   * the binding — whether the two rows of every turn AGREE. `bound` is the whole
+   * contract of the request in one field.
+   */
+  const readPicker = () => view.evaluate(() => {
+    const card = document.querySelector('.dsh-dschat-qa-card')
+    if (card === null) return { present: false }
+    const turns = [...card.querySelectorAll('.dsh-dschat-qa-turn')]
+    const box = card.getBoundingClientRect()
+    return {
+      present: true,
+      title: card.querySelector('.dsh-dschat-qa-title')?.textContent ?? null,
+      warning: card.querySelector('.dsh-dschat-share-warning')?.textContent ?? null,
+      turns: turns.length,
+      bound: turns.map(turn => {
+        const states = [...turn.querySelectorAll('.dsh-dschat-qa-row')].map(row => row.getAttribute('aria-checked'))
+        return { states, same: new Set(states).size === 1 }
+      }),
+      checkedRows: card.querySelectorAll('.dsh-dschat-qa-row[aria-checked="true"]').length,
+      allChecked: card.querySelector('.dsh-dschat-qa-all')?.getAttribute('aria-checked') ?? null,
+      count: card.querySelector('.dsh-dschat-qa-count')?.textContent ?? null,
+      actions: [...card.querySelectorAll('.dsh-dschat-pop-actions button')].map(button => button.textContent),
+      /* Opening the picker must NOT have published anything. */
+      sent: (window.__calls ?? []).filter(call => call.name === 'share').length,
+      onScreen: box.top >= 0 && box.left >= 0,
+      /* The rows must scroll inside the card, not push the footer off it. */
+      footerVisible: (() => {
+        const footer = card.querySelector('.dsh-dschat-pop-actions')
+        if (footer === null) return false
+        const r = footer.getBoundingClientRect()
+        return r.top >= box.top && r.bottom <= box.bottom + 1
+      })(),
+    }
+  })
+  report.probes.sharePickerOpen = await readPicker()
+  const shareClip = await view.evaluate(() => {
+    const card = document.querySelector('.dsh-dschat-qa-card')
+    if (card === null) return null
+    const r = card.getBoundingClientRect()
+    return {
+      x: Math.max(0, Math.round(r.left) - 40),
+      y: Math.max(0, Math.round(r.top) - 40),
+      width: Math.min(1280, Math.round(r.width) + 160),
+      height: Math.min(820, Math.round(r.height) + 120),
+    }
+  })
+  if (shareClip !== null) await shot('01e-share-picker', { clip: shareClip })
+  /*
+   * Tick a second exchange by pressing its ANSWER row — the half the request
+   * calls out explicitly ("clear the answer and the question follows"). Both
+   * halves of that turn must flip together, and the count must follow the turns.
+   */
+  report.probes.sharePickerToggled = await view.evaluate(() => {
+    const turns = [...document.querySelectorAll('.dsh-dschat-qa-turn')]
+    const second = turns[1]
+    if (second === undefined) return { toggled: false, turns: turns.length }
+    second.querySelector('.dsh-dschat-qa-row-answer')?.click()
+    return { toggled: true, turns: turns.length }
+  })
+  await view.waitForTimeout(120)
+  report.probes.sharePickerAfterToggle = await readPicker()
+  // Confirm: the stub answers with a URL, and the panel copies it. The ids the
+  // panel sends are the assertion that the selection reached the route.
+  await view.evaluate(() => {
+    const card = document.querySelector('.dsh-dschat-qa-card')
+    const confirm = [...(card?.querySelectorAll('.dsh-dschat-pop-actions button') ?? [])].at(-1)
+    confirm?.click()
+  })
+  await view.waitForTimeout(400)
+  report.probes.shareConfirmed = await view.evaluate(() => ({
+    modalGone: document.querySelector('.dsh-dschat-qa-card') === null,
+    calls: (window.__calls ?? []).filter(call => call.name === 'share'),
+    toast: [...document.querySelectorAll('.dsh-dschat-toast')].at(-1)?.textContent ?? null,
+  }))
+
+  /*
+   * The ··· menu first: opening it is the only way to see what it holds, and the
+   * read has to happen in a SECOND evaluate — React re-renders on its own tick,
+   * so reading the menu in the same turn as the click finds an empty document
+   * and proves nothing.
+   */
+  await view.evaluate(() => {
+    [...document.querySelectorAll('.dsh-dschat-header button')]
+      .find(item => item.getAttribute('aria-haspopup') === 'menu')?.click()
+  })
+  await view.waitForTimeout(160)
+  report.probes.moreMenu = await view.evaluate(() => {
+    const items = [...document.querySelectorAll('.dsh-dschat-pop-menu .dsh-dschat-menu-item')]
+      .map(item => (item.textContent ?? '').trim())
+    ;[...document.querySelectorAll('.dsh-dschat-header button')]
+      .find(item => item.getAttribute('aria-haspopup') === 'menu')?.click()
+    return { items, hasExport: items.some(item => item.includes('导出')) }
+  })
+  await view.waitForTimeout(160)
+
+  /*
+   * 导出 markdown: the button's new home, the picker's default, and the ids.
+   *
+   * It used to be an entry under the title bar's 「···」 with no question to ask.
+   * It is now the action row's LAST control and opens the same picker with
+   * everything ticked — so what this checks is that the button is on the row, the
+   * default really is "all", and the selection reaches the export route.
+   */
+  report.probes.exportButton = await view.evaluate(() => {
+    const button = document.querySelector('.dsh-dschat-tbtn-export')
+    if (button === null) return { present: false }
+    const row = button.closest('.dsh-dschat-actions')
+    const labelled = [...(row?.querySelectorAll('.dsh-dschat-tbtn') ?? [])]
+    button.click()
+    return {
+      present: true,
+      label: button.textContent,
+      title: button.getAttribute('title'),
+      last: labelled.at(-1) === button,
+      rowButtons: labelled.map(item => item.textContent),
+    }
+  })
+  await view.waitForTimeout(220)
+  report.probes.exportPickerOpen = await readPicker()
+  /*
+   * 导出到: the destination row, which only the EXPORT face of the picker has
+   * (a public link has no local folder to choose). Measured rather than assumed
+   * present: the field must show the path the host resolved, and both halves must
+   * be inside the card rather than wrapped out of it.
+   */
+  report.probes.exportPickerOpen.destination = await view.evaluate(() => {
+    const card = document.querySelector('.dsh-dschat-qa-card')
+    const input = document.querySelector('.dsh-dschat-export-dir-input')
+    const choose = document.querySelector('.dsh-dschat-export-dir-choose')
+    const label = document.querySelector('.dsh-dschat-export-dir-label')
+    if (input === null || choose === null) return { present: false }
+    const cardBox = card?.getBoundingClientRect()
+    const box = input.getBoundingClientRect()
+    const chooseBox = choose.getBoundingClientRect()
+    return {
+      present: true,
+      label: label?.textContent ?? null,
+      value: input.value,
+      placeholder: input.getAttribute('placeholder'),
+      chooseLabel: choose.textContent,
+      /* Both halves inside the card's own box: a wrapped-out control is off-card. */
+      insideCard: cardBox !== undefined && box.right <= cardBox.right + 1 && chooseBox.right <= cardBox.right + 1,
+      onScreen: box.top >= 0 && chooseBox.bottom <= window.innerHeight,
+    }
+  })
+  const exportClip = await view.locator('.dsh-dschat-qa-card').boundingBox()
+  if (exportClip !== null) await shot('01f-export-picker', { clip: exportClip })
+  await view.evaluate(() => {
+    const card = document.querySelector('.dsh-dschat-qa-card')
+    const confirm = [...(card?.querySelectorAll('.dsh-dschat-pop-actions button') ?? [])].at(-1)
+    confirm?.click()
+  })
+  await view.waitForTimeout(400)
+  report.probes.exportConfirmed = await view.evaluate(() => ({
+    modalGone: document.querySelector('.dsh-dschat-qa-card') === null,
+    calls: (window.__calls ?? []).filter(call => call.name === 'exportFile'),
+    /* The NEWEST toast: earlier ones from other passes may still be on screen. */
+    toast: [...document.querySelectorAll('.dsh-dschat-toast')].at(-1)?.textContent ?? null,
+  }))
 
   /*
    * The two faces of a reasoning row, driven for real.
@@ -480,14 +1011,23 @@ try {
       const head = row.querySelector('.dsh-dschat-think-head')
       const body = row.querySelector('.dsh-dschat-think-body')
       const r = row.getBoundingClientRect()
+      const style = getComputedStyle(row)
       return {
         open: row.getAttribute('data-open') ?? null,
+        phase: row.getAttribute('data-phase') ?? null,
+        headMounted: head !== null,
         head: head === null ? null : (head.textContent ?? '').trim(),
+        headFocusable: head === null ? null : head.getAttribute('tabindex'),
         body: body !== null,
         bodyText: (body?.textContent ?? '').trim().slice(0, 24),
         rowHeight: Math.round(r.height),
         aria: (head ?? body)?.getAttribute('aria-expanded') ?? null,
         cursor: body === null ? null : getComputedStyle(body.firstElementChild ?? body).cursor,
+        /* The animated track: what makes the fold a movement rather than a swap. */
+        rows: style.gridTemplateRows,
+        transition: style.transitionProperty,
+        /* A face on its way out is not focusable, and is hidden from readers. */
+        bodyHidden: body === null ? null : body.getAttribute('aria-hidden'),
       }
     })
     // Start from rest, whichever face the pass above left behind.
@@ -495,26 +1035,30 @@ try {
       const row = view.locator('.dsh-dschat-think').first()
       if (await row.getAttribute('data-open') === null) break
       await view.locator('.dsh-dschat-think-body').first().click({ position: { x: 40, y: 12 } })
-      await view.waitForTimeout(150)
+      await view.waitForTimeout(260)
     }
     const collapsed = await read()
     await shot('02-thinking-collapsed')
-    // Open it by its line.
+    // Open it by its line, and read once MID-FLIGHT (the fold is 200ms).
     const line = view.locator('.dsh-dschat-think-head').first()
     if (await line.count() > 0) {
       await line.click()
-      await view.waitForTimeout(200)
+      await view.waitForTimeout(70)
     }
+    const midOpen = await read()
+    await view.waitForTimeout(260)
     const expanded = await read()
     await shot('02b-thinking-open-body-only')
     // Close it by pressing the text, which is the only collapse control left.
     const body = view.locator('.dsh-dschat-think-body').first()
     if (await body.count() > 0) {
       await body.click({ position: { x: 40, y: 12 } })
-      await view.waitForTimeout(200)
+      await view.waitForTimeout(70)
     }
+    const midClose = await read()
+    await view.waitForTimeout(260)
     const reclosed = await read()
-    return { collapsed, expanded, reclosed }
+    return { collapsed, midOpen, expanded, midClose, reclosed }
   })()
   await shot('02c-thinking-recollapsed')
 

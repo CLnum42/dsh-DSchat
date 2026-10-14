@@ -304,3 +304,95 @@ export function SwapIcon({ size = 14 }: IconProps): ReactNode {
   </>)
 }
 
+/**
+ * 重新生成 — a circular arrow, heavier than {@link RefreshIcon} beside it.
+ *
+ * The two glyphs are the same idea and must not be: `RefreshIcon` sits in the
+ * header and re-reads the panel's own state, while this one is one of the
+ * answer's actions and asks the MODEL for a different answer. The difference is
+ * carried by weight and closure — this arrow is a full circle with a plain head,
+ * drawn at the action row's own 1.4 rather than the header's 1.25 — so the two
+ * are never confused at a glance even though they share a page.
+ */
+export function RegenerateIcon({ size = 14 }: IconProps): ReactNode {
+  return svg(size, <>
+    <path d="M13.3 8a5.3 5.3 0 1 1-1.55-3.75" />
+    <path d="M13.5 2.3v3.2h-3.2" />
+  </>, { strokeWidth: 1.4 })
+}
+
+/**
+ * 点赞 / 点踩 — one thumb, mirrored.
+ *
+ * `down` MIRRORS the same path (translate + scale(1,-1)) rather than rotating it
+ * 180° about the box centre, and the difference is not academic: the glyph is
+ * drawn in the box's upper half (a thumb, with the fist below it), so a rotation
+ * — which maps y to 16-y — moved the whole shape down by 16px and the 点踩 control
+ * rendered visibly lower than its neighbours in the same row (caught in the
+ * rendered check, not by eye on the page). A horizontal mirror is exact.
+ *
+ * `filled` is the pressed state: the page marks a chosen rating by filling the
+ * glyph, and a coloured outline at 14px is not a state a reader can see.
+ */
+export function ThumbIcon({ size = 14, down = false, filled = false }: IconProps & { down?: boolean; filled?: boolean }): ReactNode {
+  const path = 'M4.3 14.2V7.1l3.1-5.4a1.1 1.1 0 0 1 2 .7l-.5 3.2h2.9a1.5 1.5 0 0 1 1.45 1.9l-1.25 5.3a1.7 1.7 0 0 1-1.65 1.3H4.3Zm0 0H2.2a.9.9 0 0 1-.9-.9V8a.9.9 0 0 1 .9-.9h2.1'
+  return svg(size,
+    down
+      ? <g transform="translate(0 16) scale(1 -1)">{filled ? <path d={path} fill="currentColor" /> : <path d={path} />}</g>
+      : (filled ? <path d={path} fill="currentColor" /> : <path d={path} />),
+  )
+}
+
+/**
+ * 分享 — the web app's own share arrow, taken VERBATIM from the live page.
+ *
+ * The path is the one the page's sixth action-row control carries (16-box,
+ * `fill="currentColor"`, a single path — measured off chat.deepseek.com and
+ * recorded in docs/probe-2026-10-14-reply-actions.md). It replaced a
+ * hand-drawn node-with-two-leaves: the reader asked for the official glyph, and
+ * a share control that looks different from the one on the page it mirrors is
+ * the kind of difference that reads as "a different button".
+ *
+ * Filled rather than stroked, like every glyph the page draws — see the note on
+ * {@link ClipIcon} for the same reasoning applied to the paperclip.
+ */
+export function ShareIcon({ size = 14 }: IconProps): ReactNode {
+  return svg(size, <path
+    fill="currentColor"
+    stroke="none"
+    d="M7.95889 1.52285C7.95888 0.826234 8.76055 0.467983 9.27669 0.875208L9.37524 0.967191L15.1317 7.18358C15.5582 7.64419 15.5582 8.35614 15.1317 8.81676L9.37524 15.0331C8.87034 15.578 7.95888 15.2205 7.95889 14.4775V10.8207C7.10614 10.8432 6.31361 10.9316 5.45468 11.2515C4.39484 11.6463 3.18248 12.413 1.64676 13.9425C1.4533 14.135 1.18329 14.1696 0.969086 14.0908C0.74748 14.0091 0.547307 13.7879 0.54859 13.4844L0.55516 13.1315C0.618924 11.3494 1.11153 9.29838 2.27656 7.63787C3.45289 5.96147 5.29554 4.71635 7.95889 4.54797V1.52285ZM9.20911 5.13366C9.20999 5.50567 8.9031 5.77687 8.56523 5.77755C5.99383 5.78282 4.33736 6.8762 3.29964 8.35496C2.54519 9.43014 2.10739 10.7283 1.9152 11.9939C3.04749 11.0323 4.0569 10.4385 5.01917 10.0801C6.29638 9.60449 7.4406 9.56343 8.56429 9.56295C8.9178 9.5628 9.20894 9.84909 9.20911 10.2068L9.20817 13.3737L14.1837 8.00017L9.20817 2.62571L9.20911 5.13366Z"
+  />, { fill: 'currentColor' })
+}
+
+/**
+ * 导出 markdown — an arrow into a tray.
+ *
+ * The tray is what separates it from a plain down-arrow: 「导出」 here writes a
+ * FILE, and the shape says so in the one way the row has room for. Drawn on the
+ * same 16-box stroke grid as {@link SwapIcon} and {@link MenuIcon} beside it, so
+ * the action row keeps one optical weight, with the arrow heavier than the tray
+ * because the arrow is the verb and the tray is where it lands.
+ */
+export function DownloadIcon({ size = 14 }: IconProps): ReactNode {
+  return svg(size, <>
+    <path d="M8 2.4v7.1" />
+    <path d="M5.3 6.9L8 9.6l2.7-2.7" />
+    <path d="M2.9 11.3v1.2a1.1 1.1 0 0 0 1.1 1.1h8a1.1 1.1 0 0 0 1.1-1.1v-1.2" />
+  </>, { strokeWidth: 1.4 })
+}
+
+/**
+ * 选择文件夹 — a folder, for the export dialog's destination picker.
+ *
+ * A folder rather than a second download arrow: the button next to it does the
+ * exporting, and this one answers a different question ("which folder?"), which
+ * is what the shape has to say — two arrows side by side would read as two ways
+ * to export. Drawn on the same 16-box grid as the glyphs above, at the panel's
+ * {@link STROKE} weight, with the tab on the left as every file manager draws it.
+ */
+export function FolderIcon({ size = 14 }: IconProps): ReactNode {
+  return svg(size, <>
+    <path d="M1.9 4.4a1.2 1.2 0 0 1 1.2-1.2h2.6l1.4 1.7h5.4a1.2 1.2 0 0 1 1.2 1.2v6.1a1.2 1.2 0 0 1-1.2 1.2H3.1a1.2 1.2 0 0 1-1.2-1.2z" />
+  </>)
+}
+

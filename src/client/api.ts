@@ -4,11 +4,21 @@
  * fenced on the host.
  */
 
-import { DSCHAT_API, type DSchatErrorCode, type TransferMode, type TransferPreview, type DSchatState, type DSchatTail, type DSchatTranscript, type WakeResult, type WebChatSummary } from '../protocol.ts'
+import { DSCHAT_API, type DSchatApiCode, type DSchatErrorCode, type TransferMode, type TransferPreview, type DSchatState, type DSchatTail, type DSchatTranscript, type WakeResult, type WebChatSummary } from '../protocol.ts'
 
-/** Shape every /api/dsh-dschat response carries: ok plus optional error. */
+/**
+ * Shape every /api/dsh-dschat response carries: ok, plus the failure's code and
+ * detail.
+ *
+ * The code is part of the CONTRACT, not a nicety: every failed route answers
+ * with one (see `failure` on the host side), the panel renders its own
+ * localized sentence from it (`explain`), and callers that have to tell one
+ * failure from another — a host half that predates a field answers
+ * `BAD_REQUEST` — read it directly.
+ */
 interface ApiResult {
   ok: boolean
+  code?: DSchatApiCode
   error?: string
 }
 
@@ -371,6 +381,69 @@ export class DSchatApi {
     return request<{ ok: boolean; chatId?: string; stored?: boolean; code?: DSchatErrorCode }>(DSCHAT_API.send, { text, images }, TIMEOUT.send)
   }
 
+  /**
+   * 重新生成 one answer: re-ask its question on the web page and replace the
+   * stored reply.
+   *
+   * The reply is NOT deleted here — the host removes it the moment the page
+   * accepts the turn, and the panel's poll then shows the question waiting for
+   * its new answer. Deleting it optimistically on this side would show the same
+   * thing a few milliseconds sooner and lose the answer when the submit failed.
+   */
+  regenerate(chatId: string, messageId: string): Promise<EndpointResult<{ ok: boolean; error?: string; code?: DSchatErrorCode }>> {
+    return request<{ ok: boolean; error?: string; code?: DSchatErrorCode }>(
+      DSCHAT_API.regenerate, { chatId, messageId }, TIMEOUT.send,
+    )
+  }
+
+  /**
+   * 点赞 / 点踩 one answer on the WEB page (see DSCHAT_API.feedback).
+   *
+   * `rating` is three-valued on purpose: `null` clears the feedback, which is
+   * the page's own toggle behaviour and the only way to take a mis-click back.
+   *
+   * `reason` and `note` exist because 点踩 on the page is not a request: it opens
+   * a 反馈 dialog that requires a reason, and nothing reaches the account until
+   * 提交. The panel collects both, and the host types them into that dialog, so
+   * the rating that lands says what the reader meant.
+   */
+  feedback(
+    chatId: string,
+    messageId: string,
+    rating: 'like' | 'dislike' | null,
+    options?: { reason?: 'harmful' | 'false' | 'unhelpful' | 'other'; note?: string; clearing?: 'like' | 'dislike' },
+  ): Promise<EndpointResult<{ ok: boolean; error?: string; code?: DSchatErrorCode; state?: 'like' | 'dislike' | 'none' }>> {
+    return request<{ ok: boolean; error?: string; code?: DSchatErrorCode; state?: 'like' | 'dislike' | 'none' }>(
+      DSCHAT_API.feedback,
+      {
+        chatId,
+        messageId,
+        rating,
+        ...(options?.reason === undefined ? {} : { reason: options.reason }),
+        ...(options?.note === undefined || options.note === '' ? {} : { note: options.note }),
+        ...(options?.clearing === undefined ? {} : { clearing: options.clearing }),
+      },
+      TIMEOUT.webList,
+    )
+  }
+
+  /**
+   * 分享 the chosen answers: create a PUBLIC link covering all of them (see
+   * DSCHAT_API.share).
+   *
+   * A LIST, not one id: the page's own 分享 is a selection mode, and the picker
+   * hands over exactly the turns the reader confirmed.
+   *
+   * The budget is generous because the route drives the page's own flow (locate
+   * every answer, open the selection bar, tick the rest, confirm) and the page
+   * can take a moment to paint each step; the host's own budget is 45 s.
+   */
+  share(chatId: string, messageIds: readonly string[]): Promise<EndpointResult<{ ok: boolean; url?: string; error?: string; created?: boolean }>> {
+    return request<{ ok: boolean; url?: string; error?: string; created?: boolean }>(
+      DSCHAT_API.share, { chatId, messageIds }, TIMEOUT.webList,
+    )
+  }
+
   stop(): Promise<EndpointResult<{ ok: boolean }>> {
     return request<{ ok: boolean }>(DSCHAT_API.stop, {})
   }
@@ -429,13 +502,39 @@ export class DSchatApi {
   /**
    * Export one conversation to markdown.
    *
-   * `cwd` is deliberately omitted by the panel: the host writes into its
-   * configured export directory (the OS download folder by default) and reports
-   * both the file name and the directory it landed in. The parameter stays for
-   * callers that do want a specific target — a script, or a future 「导出到…」.
+   * `cwd` is deliberately omitted by the panel: the host writes into the
+   * directory it resolved (the folder the reader picked last time, the
+   * configured default, or the OS download folder) and reports both the file
+   * name and the directory it landed in. The parameter stays for callers that do
+   * want a specific target — a script, or a test — and it must name a directory
+   * INSIDE that resolved one, which is the fence the export route applies.
+   *
+   * `messageIds` is the picker's selection, in transcript order; omitting it
+   * exports the whole conversation (the behaviour before the picker existed).
    */
-  exportFile(chatId: string, cwd?: string): Promise<EndpointResult<{ ok: boolean; filePath?: string; dir?: string }>> {
-    return request<{ ok: boolean; filePath?: string; dir?: string }>(DSCHAT_API.exportFile, { chatId, cwd })
+  exportFile(
+    chatId: string,
+    cwd?: string,
+    /** The picker's selection in transcript order; omit for the whole chat. */
+    messageIds?: readonly string[],
+  ): Promise<EndpointResult<{ ok: boolean; filePath?: string; dir?: string }>> {
+    return request<{ ok: boolean; filePath?: string; dir?: string }>(
+      DSCHAT_API.exportFile,
+      { chatId, cwd, ...(messageIds === undefined ? {} : { messageIds }) },
+    )
+  }
+
+  /**
+   * Remember which folder 「导出 markdown」 writes into.
+   *
+   * The answer carries the RESOLVED absolute path — the host may have expanded a
+   * relative one against the home directory, or created the folder — so the
+   * panel shows what will actually be written into rather than what was typed.
+   * A path that cannot be created comes back as a failure with the real reason,
+   * and nothing is remembered.
+   */
+  setExportDir(dir: string): Promise<EndpointResult<{ ok: boolean; dir?: string }>> {
+    return request<{ ok: boolean; dir?: string }>(DSCHAT_API.exportDir, { dir })
   }
 
   renameChat(chatId: string, title: string): Promise<EndpointResult<{ ok: boolean }>> {

@@ -37,14 +37,25 @@ import {
 } from '../../protocol.ts'
 import type { DSchatApi } from '../api.ts'
 import {
-  CaretIcon, ChatIcon, CheckIcon, ClipIcon, CloseIcon, CopyIcon, DeepThinkIcon, MenuIcon,
-  MoreIcon, PencilIcon, PinIcon, PlusIcon, QuoteIcon, RefreshIcon, SearchIcon,
-  SendIcon, SwapIcon, ThinkIcon, TrashIcon, WarnIcon, WebSearchIcon, WhaleMark,
+  ChatIcon, CheckIcon, ClipIcon, CloseIcon, DeepThinkIcon, DownloadIcon, FolderIcon, MenuIcon,
+  MoreIcon, PencilIcon, PinIcon, PlusIcon, RefreshIcon,
+  SearchIcon, SendIcon, SwapIcon, TrashIcon, WarnIcon,
+  WebSearchIcon, WhaleMark,
 } from '../icons.tsx'
 import { touchEngineStatus, useEngineStatus } from '../status.ts'
 import { Markdown, Thinking } from './Markdown.tsx'
 import { DSchatStatus } from './DSchatStatus.tsx'
-import { firstLine, replyBody, thinkingBody } from './reply.ts'
+import { firstLine, replyBody, shareText, thinkingBody } from './reply.ts'
+import { MessageActions, type FeedbackReason, type Reaction } from './answer-actions.tsx'
+import {
+  QaPicker,
+  qaTurns,
+  selectableTurns,
+  selectedMessageIds,
+  selectedTurns,
+  selectionShareText,
+  type QaTurn,
+} from './qa-picker.tsx'
 
 /** Interpolate `{placeholder}`s in a localized template. */
 function fmt(template: string, values: Record<string, string>): string {
@@ -94,6 +105,30 @@ export function explain(
       return detail !== undefined && detail !== '' ? detail : fallback
     }
   }
+}
+
+/**
+ * The sentence for a failed answer-level action, with the stale-host case named.
+ *
+ * The two halves of this plugin are loaded independently: the browser half is
+ * fetched from disk on every page load, while the host half is a module
+ * generation that only a Harness RESTART replaces. So a reader who upgrades and
+ * refreshes meets a panel whose 重新生成 / 喜欢 buttons post to a host that does
+ * not serve them yet, and a bare 「404」 says nothing about the one thing that
+ * fixes it. This is the same pairing the wake path already handles (see
+ * `engine.notice.staleHost`).
+ *
+ * @param result - the failed response.
+ * @param fallback - the action's own sentence, used for every other failure.
+ * @param tr - locale accessor, already bound to the plugin namespace.
+ */
+function staleHostOr(
+  result: { code?: string; error?: string } | undefined,
+  fallback: string,
+  tr: (key: string, values?: Record<string, string>) => string,
+): string {
+  if (/HTTP 404/.test(result?.error ?? '')) return tr('engine.notice.staleHostAction')
+  return `${fallback}：${explain(result, '', tr)}`.replace(/：$/, '')
 }
 
 /**
@@ -232,6 +267,16 @@ interface Toast {
 }
 
 /**
+ * What the Q&A picker is open FOR.
+ *
+ * 分享 publishes the chosen turns as a public link; 导出 writes the chosen turns
+ * into a markdown file. They share one picker, one selection and one binding
+ * rule (see qa-picker.tsx) because the choice is the same question in both
+ * cases — only the verb at the bottom differs.
+ */
+type QaPurpose = 'share' | 'export'
+
+/**
  * One message waiting for its turn in front of the web page.
  *
  * `id` is local and exists for React keys and for cancelling exactly one row —
@@ -256,6 +301,7 @@ interface QueuedMessage {
  * as an error — it only has to keep the draft and let the reader sign in.
  */
 type EnsureReadyResult = { ok: true } | { ok: false; reason: 'login' | 'failed' | 'cooldown' }
+
 
 /** How often the panel polls /state — the whole-store reconciliation snapshot. */
 /**
@@ -475,13 +521,14 @@ const TAIL_AFTER_SEND_MS = 8_000
 /**
  * Breathing room above a question the panel has just anchored (px).
  *
- * The scroll target is the row's own top edge, and a row begins with its head
- * line (「你 · 14:07」) — flush against the top of the box that head is inside a
- * hairline the reader cannot tell from a clipped line. 12px is the same gap the
- * thread's own padding uses at the other end, so an anchored question and a
- * pinned transcript start their content the same distance down.
+ * Zero on purpose: the anchored question IS the first line of the viewport. The
+ * thread's own 22px lead-in is a RESTING gap — it is what the first message of a
+ * short conversation sits under — while a send asks for a reading position: the
+ * question at the very top, everything the model is about to say below it. A
+ * gap here would reintroduce exactly what the reader cannot see: a few pixels of
+ * the PREVIOUS answer above the question they just asked.
  */
-const ANCHOR_TOP_GAP = 12
+const ANCHOR_TOP_GAP = 0
 
 /**
  * How far the transcript may sit from the anchored position before the panel
@@ -525,6 +572,22 @@ const WAKE_RETRY_COOLDOWN_MS = 10_000
  * one start" is the property this path exists to keep.
  */
 const WAKE_FRESH_MS = 2_000
+
+/**
+ * How long after one automatic start the next panel OPENING may ask for another
+ * (ms).
+ *
+ * The opening itself now starts the web page (see the auto-start effect), and
+ * the shell unmounts this panel whenever the reader looks at another one. Without
+ * a shared deadline, flipping between panels would relaunch the browser on every
+ * visit — and, worse, it would undo 「关闭浏览器」: the reader closes the window,
+ * switches away, comes back, and the browser they just dismissed is back.
+ *
+ * 30 s covers a burst of panel switching and still leaves "I want it up again"
+ * one click away. The explicit 「重试启动」 button bypasses this entirely, because
+ * it IS a direct request.
+ */
+const AUTO_START_INTERVAL_MS = 30_000
 
 /** One row of the shell's session list (`main`'s `useSessions` snapshot). */
 interface HarnessSessionRow {
@@ -774,6 +837,38 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   const transferPopRef = useRef<HTMLDivElement | null>(null)
   const lampPopRef = useRef<HTMLDivElement | null>(null)
   const morePopRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * The empty block that lets an anchored question reach the TOP of the view.
+   *
+   * A scroll position is clamped at `scrollHeight - clientHeight`, so a question
+   * with less than one screenful of answer under it CANNOT be scrolled to the
+   * top — the browser stops short and leaves the question partway down. That is
+   * the whole of the reported 「第二条提问没有跳到最顶端」: the anchor was taken and
+   * applied, it simply had nowhere to go, and every arriving token then grew
+   * `scrollHeight` and dragged the transcript with it.
+   *
+   * The fix is the space the layout was missing, and it is exactly as tall as
+   * the gap between the question and the bottom of the view: with it,
+   * `scrollHeight` is always `clientHeight + questionTop`, the question lands on
+   * the top edge, and as the answer grows the block shrinks by the same amount —
+   * `scrollHeight` does not change, so `scrollTop` does not either and the
+   * viewport is perfectly still while the reader reads.
+   *
+   * Written imperatively (not through state) on purpose: the height and the
+   * scroll that depends on it have to land in the SAME frame, or the panel paints
+   * one frame at the old position first.
+   */
+  const spacerRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * The row the bottom space is currently being kept for, if any.
+   *
+   * The space outlives the anchor (see `clearAnchor`), so it needs an owner of
+   * its own: this names the question whose answer is still growing into it, and
+   * the effect re-sizes the space for that row on every tick until either the
+   * answer fills the viewport (nothing left to borrow) or the reader scrolls
+   * back into the content (nothing left to protect).
+   */
+  const roomRowRef = useRef<string | undefined>(undefined)
   const pinnedRef = useRef(true)
   /*
    * The question the viewport is ANCHORED to, if any (see the scroll effect).
@@ -798,6 +893,22 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * exactly the view the anchor exists to replace.
    */
   const anchorAppliedTopRef = useRef<number | undefined>(undefined)
+  /**
+   * The anchored row's own top edge, in content coordinates, as last placed.
+   *
+   * This is the other half of "did the reader move it?". A position change alone
+   * cannot answer that question, because the transcript can move under its own
+   * weight: the navigator's gutter appearing narrows the reading column, every
+   * message re-wraps, content ABOVE the anchored question changes height, and
+   * the browser's own scroll anchoring adjusts `scrollTop` to keep the visible
+   * text still. That reads as a 200px "scroll the reader made" when nobody
+   * touched anything.
+   *
+   * What separates the two is whether the ROW moved with it: a re-wrap moves both
+   * the row (its `contentTop`) and the scroll position by the same amount, while
+   * a reader's scroll moves only the position. See `readerMovedViewport`.
+   */
+  const anchorRowTopRef = useRef<number | undefined>(undefined)
   /*
    * A send that has not produced a message yet.
    *
@@ -818,11 +929,35 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    */
   const pendingAnchorRef = useRef<number | true | undefined>(undefined)
   /**
+   * Which conversation that pending send belongs to.
+   *
+   * The pending anchor survives a conversation SWITCH, because one kind of send
+   * IS a switch: the first message of a conversation that did not exist when it
+   * was sent (a fresh install, an empty list, a brand-new chat the host creates
+   * on the way in). Clearing the pending anchor on every switch — which is what
+   * this ref replaced — threw the reader's own anchor away in exactly that case:
+   * the view fell back to following the end, so the question never reached the
+   * top and every arriving token moved the transcript.
+   *
+   * This ref is what tells the two switches apart. It is set from the send's own
+   * answer (the chat the host filed the question in), so it MATCHES the
+   * conversation the panel is switching TO when the switch is the send, and it
+   * does not match when the reader opened some other conversation while a send
+   * was in flight — that anchor is stale and is dropped. A count cannot decide
+   * that: both conversations have user rows.
+   */
+  const pendingAnchorChatRef = useRef<string | undefined>(undefined)
+  /**
    * How many user messages the transcript held when the anchor was last taken.
    *
    * Consecutive sends in one conversation have to raise the bar, not clear it:
    * cleared, the second send's pending count would sit below the rows already on
    * screen and satisfy itself against the FIRST question.
+   *
+   * It is per CONVERSATION, and is reset when the view switches: the count of
+   * the conversation the reader just left says nothing about the one they are
+   * looking at, and carrying it over made the first question of a new chat fail
+   * the very test the pending anchor uses (1 new row against a floor of 4).
    */
   const anchorFloorRef = useRef(0)
   /*
@@ -1241,6 +1376,12 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         if (cancelled || context.ok !== true) return
         setWorkspaces(context.workspaces ?? [])
         setCwd(context.cwd)
+        /*
+         * The export destination the host resolved — the reader's last pick, the
+         * configured setting, or ~/Downloads. Shown in the export dialog and
+         * used for the seed of its editable field; never chosen here.
+         */
+        if (context.settings?.exportDir !== undefined) setExportDir(context.settings.exportDir)
       } catch {
         // Targets simply stay empty; the transfer still works ungrouped.
       }
@@ -1631,6 +1772,92 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   }, [])
 
   /**
+   * Release the anchor, keeping whatever bottom space is still load-bearing.
+   *
+   * The two are NOT the same lifetime, which is the one subtlety of this
+   * mechanism. The anchor is the panel's license to move the viewport; the space
+   * is what makes the anchored position REACHABLE, and taking it back moves the
+   * viewport too — the browser clamps `scrollTop` down to the new maximum. That
+   * is fine when the reader has scrolled back into the content (their position
+   * does not depend on the space any more) and a jolt when they have not: they
+   * wheel up 100px from a question whose answer is two lines long, and the whole
+   * transcript lurches because the space they were sitting in disappeared.
+   *
+   * So this only drops the anchor. The space is re-decided on the next tick by
+   * the effect's own rule — see `keepRoom` — and it survives exactly as long as
+   * removing it would move the reader.
+   */
+  const clearAnchor = useCallback((): void => {
+    anchorIdRef.current = undefined
+    anchorAppliedTopRef.current = undefined
+    anchorRowTopRef.current = undefined
+  }, [])
+
+  /**
+   * How much empty space the transcript needs for `row` to reach the top (px).
+   *
+   * Solved from the one equation that matters: a scroll can only reach
+   * `scrollHeight - clientHeight`, so the row's own top (`contentTop`) is
+   * reachable exactly when `scrollHeight >= clientHeight + contentTop`. The
+   * block already on screen is subtracted first, because it is part of
+   * `scrollHeight` and must not be counted twice.
+   *
+   * @param list - the scroll box.
+   * @param row - the row that has to end up against the top edge.
+   * @returns the block's height, never negative.
+   */
+  const spacerFor = useCallback((list: HTMLElement, row: Element): number => {
+    const current = spacerRef.current?.offsetHeight ?? 0
+    const content = list.scrollHeight - current
+    return Math.max(0, Math.round(list.clientHeight + contentTop(list, row) - content))
+  }, [contentTop])
+
+  /** Write the bottom block's height (0 gives it back). */
+  const setRoom = useCallback((height: number): void => {
+    const spacer = spacerRef.current
+    if (spacer !== null && Math.abs(height - spacer.offsetHeight) > 1) spacer.style.height = `${height}px`
+  }, [])
+
+  /**
+   * Give the bottom space back, whatever the reader is doing.
+   *
+   * For the moves that take the viewport somewhere else on purpose — a
+   * navigator click, 「↓ 最新」, a search landing, another conversation — because
+   * those positions are measured from `scrollHeight` and a screenful of borrowed
+   * space would aim them past the end of the conversation.
+   */
+  const dropRoom = useCallback((): void => {
+    roomRowRef.current = undefined
+    setRoom(0)
+  }, [setRoom])
+
+  /**
+   * Did the READER move the viewport away from where the anchor put it?
+   *
+   * Two things have to be true: the transcript is not where we left it, and the
+   * anchored row has not moved with it. The second test is what tells a reader's
+   * scroll apart from the transcript re-laying itself out — the navigator's
+   * gutter appearing, a window resize, a font landing late — which moves the row
+   * AND the scroll position together (the browser's scroll anchoring sees to the
+   * second half) and would otherwise look like a 200px scroll nobody made.
+   *
+   * Asking this from the EFFECT as well as from the scroll handler is what makes
+   * the answer reliable: a scroll event is coalesced per frame and reports only
+   * the latest position, so a reader's move that lands in the same frame as our
+   * own re-apply is invisible to a handler that only ever sees the position
+   * AFTER we moved it back.
+   *
+   * @param list - the scroll box.
+   * @param row - the anchored row.
+   */
+  const readerMovedViewport = useCallback((list: HTMLElement, row: Element): boolean => {
+    const applied = anchorAppliedTopRef.current
+    if (applied === undefined || Math.abs(list.scrollTop - applied) <= ANCHOR_DRIFT_PX) return false
+    const placed = anchorRowTopRef.current
+    return placed === undefined || Math.abs(contentTop(list, row) - placed) <= ANCHOR_DRIFT_PX
+  }, [contentTop])
+
+  /**
    * Put a question's head at the top of the viewport.
    *
    * This is the whole of the 「新提问置顶」 behaviour: after a send, the question
@@ -1638,6 +1865,10 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * answer streams into the space BELOW it. Reading an answer from its first
    * line no longer costs a scroll — and, just as important, arriving tokens no
    * longer push the text being read up the screen.
+   *
+   * The caller is responsible for the bottom block that makes the position
+   * REACHABLE (see {@link spacerFor}); without it the browser clamps the scroll
+   * and this returns a view with the question partway down the screen.
    *
    * @param id - the user message to align.
    * @param behavior - 'smooth' for a navigator click, instant for a send.
@@ -1654,10 +1885,12 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     /*
      * What the browser will actually apply: the requested top, clamped to the
      * scrollable range. Recorded for the scroll handler rather than re-measured
-     * there — see `anchorAppliedTopRef`.
+     * there — see `anchorAppliedTopRef`. The row's own top is recorded beside it
+     * so a later tick can tell a reader's scroll from a re-wrap.
      */
     if (behavior === 'auto') {
       anchorAppliedTopRef.current = Math.min(top, Math.max(0, list.scrollHeight - list.clientHeight))
+      anchorRowTopRef.current = contentTop(list, target)
     }
     return true
   }, [contentTop])
@@ -1674,6 +1907,11 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (jumpId !== undefined) {
       const target = list.querySelector(`[data-message-id="${jumpId}"]`)
       if (target !== null) {
+        // A search jump owns the viewport: an anchor would take it back on the
+        // next tick, and a screenful of borrowed space would leave the
+        // transcript scrollable past the row the reader asked to see.
+        clearAnchor()
+        dropRoom()
         pinnedRef.current = false
         target.scrollIntoView({ block: 'center' })
         // A landing mark, so the reader can see WHICH row the search found
@@ -1687,13 +1925,27 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     const switched = prevChatRef.current !== viewChatId
     prevChatRef.current = viewChatId
     if (switched) {
-      // A different conversation has no anchor: it opens at its end, as before.
-      // This runs BEFORE the pending send is consumed, because a send can BE
-      // what switched the conversation (the first message of a brand-new chat):
-      // clearing afterwards threw away the anchor the reader had just asked for.
-      anchorIdRef.current = undefined
-      anchorAppliedTopRef.current = undefined
-      pendingAnchorRef.current = undefined
+      /*
+       * A different conversation has no anchor: it opens at its end, as before.
+       * This runs BEFORE the pending send is consumed, because a send can BE
+       * what switched the conversation (the first message of a brand-new chat):
+       * clearing afterwards threw away the anchor the reader had just asked for.
+       *
+       * The pending anchor itself survives when that is the case. `deliver`
+       * stamps it with the chat the host filed the question in, so the two
+       * switches are told apart here: the send's own switch (matching chat, keep
+       * the anchor and let the consume block below take it) versus the reader
+       * opening another conversation mid-send (mismatch, drop it — anchoring a
+       * stale question into someone else's transcript is worse than not
+       * anchoring).
+       */
+      clearAnchor()
+      dropRoom()
+      anchorFloorRef.current = 0
+      if (pendingAnchorChatRef.current !== viewChatId) {
+        pendingAnchorRef.current = undefined
+        pendingAnchorChatRef.current = undefined
+      }
     }
     /*
      * Consume a pending send.
@@ -1713,18 +1965,71 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         && (pendingAnchor === true || users.length > Math.max(pendingAnchor, anchorFloorRef.current))
       if (isNew) {
         pendingAnchorRef.current = undefined
+        pendingAnchorChatRef.current = undefined
         anchorIdRef.current = last.getAttribute('data-message-id') ?? undefined
         anchorFloorRef.current = users.length
       }
     }
     if (anchorIdRef.current !== undefined) {
-      // Instant on purpose: this runs on every streamed token, and a smooth
-      // scroll per token would never settle.
-      if (alignQuestion(anchorIdRef.current)) return
-      // The anchor's row is gone (a recover replaced the transcript): fall back
-      // to following the end rather than leaving the reader parked.
-      anchorIdRef.current = undefined
-      anchorAppliedTopRef.current = undefined
+      const row = list.querySelector(`[data-message-id="${anchorIdRef.current}"]`)
+      if (row === null) {
+        // The anchor's row is gone (a recover replaced the transcript): fall back
+        // to following the end rather than leaving the reader parked.
+        clearAnchor()
+      } else if (readerMovedViewport(list, row)) {
+        /*
+         * The reader has the wheel — a scrollbar drag, a keystroke, a script.
+         * This is checked here, before re-applying, and not only in the scroll
+         * handler: scroll events are coalesced per frame and carry the LATEST
+         * position, so a reader's move that shares a frame with our own re-apply
+         * is reported to the handler as "still where we put it" — and the move
+         * is silently undone. Asking the question before we move anything cannot
+         * be raced.
+         */
+        clearAnchor()
+      } else {
+        /*
+         * The space that makes the position reachable, sized for THIS row and
+         * then applied before the scroll that uses it — see `spacerRef`. It is
+         * rewritten on every tick, and while the answer grows it shrinks by
+         * exactly as much: `scrollHeight` stays put, so `scrollTop` does too.
+         */
+        roomRowRef.current = anchorIdRef.current
+        setRoom(spacerFor(list, row))
+        /*
+         * Instant on purpose: this runs on every streamed token, and a smooth
+         * scroll per token would never settle. Landing here IS 「新提问置顶」, and
+         * it returns — the pin below must not move a viewport the anchor owns.
+         */
+        if (alignQuestion(anchorIdRef.current)) return
+        clearAnchor()
+      }
+    }
+    /*
+     * The bottom space, once the anchor is gone.
+     *
+     * It is kept for one reason only: taking it back would CLAMP the reader's
+     * position, because they are parked at (or past) the end of the content and
+     * the space is what makes that position legal. Two things end it —
+     *
+     *   · the answer grows into the space, until there is none left to keep;
+     *   · the reader scrolls back into the content, where their position no
+     *     longer depends on it.
+     *
+     * — and both are the same test, which is why this is one branch and not two
+     * pieces of state. Until then the space is re-sized for that same row every
+     * tick, so an arriving token shrinks it by exactly as much as it grows the
+     * content: `scrollHeight` does not move, and neither does the reader's view.
+     */
+    const room = roomRowRef.current
+    if (room !== undefined) {
+      const row = list.querySelector(`[data-message-id="${room}"]`)
+      const borrowed = spacerRef.current?.offsetHeight ?? 0
+      const contentEnd = list.scrollHeight - borrowed
+      const parked = list.scrollTop > contentEnd - list.clientHeight
+      const wanted = row === null || !parked ? 0 : spacerFor(list, row)
+      if (wanted === 0) dropRoom()
+      else setRoom(wanted)
     }
     if (switched || (pinnedRef.current && Date.now() >= jumpUntilRef.current)) {
       list.scrollTop = list.scrollHeight
@@ -1736,7 +2041,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * answers. Arriving here also means the reader was already pinned to the
      * end — a reader who scrolled up to read is not yanked away by it.
      */
-  }, [state, viewChatId, jumpId, launchError, alignQuestion])
+  }, [state, viewChatId, jumpId, launchError, alignQuestion, clearAnchor, dropRoom, setRoom, spacerFor, readerMovedViewport])
 
   /**
    * Everything the transcript's scroll position has to keep true.
@@ -1785,15 +2090,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     setThreadScrolls(current => (current === scrolls ? current : scrolls))
     const anchor = anchorIdRef.current
     if (anchor !== undefined) {
-      const applied = anchorAppliedTopRef.current
-      if (list.querySelector(`[data-message-id="${anchor}"]`) === null) {
+      const row = list.querySelector(`[data-message-id="${anchor}"]`)
+      if (row === null) {
         // The anchor's row is gone (a recover replaced the transcript).
-        anchorIdRef.current = undefined
-        anchorAppliedTopRef.current = undefined
-      } else if (applied !== undefined && Math.abs(list.scrollTop - applied) > ANCHOR_DRIFT_PX) {
-        // The reader scrolled away from the anchor we set.
-        anchorIdRef.current = undefined
-        anchorAppliedTopRef.current = undefined
+        clearAnchor()
+        dropRoom()
+      } else if (readerMovedViewport(list, row)) {
+        // The reader scrolled away from the anchor we set. Only the anchor is
+        // released here: the bottom space is what makes their new position legal
+        // while the answer is still short, so it is the next tick that decides
+        // whether it is still needed (see the effect's `room` branch) — dropping
+        // it here would clamp the very scroll the reader just made.
+        clearAnchor()
       }
     }
     /*
@@ -1811,20 +2119,52 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       }
       setNavIndex(current => (current === index ? current : index))
     }
-  }, [contentTop])
+  }, [contentTop, readerMovedViewport])
+
+  /**
+   * The reader's own gesture on the transcript: hand the viewport over at once.
+   *
+   * `onThreadScroll` already drops the anchor when the position has moved far
+   * enough to be the reader's own doing, but that test IS a tolerance — a 20px
+   * drag reads as noise, and the next streamed tick pulls the text back under
+   * the reader's cursor. A wheel or a touch is not a guess about intent: it is
+   * the reader, they may move a single pixel if that is what they wanted, and
+   * once they have, nothing moves the transcript again until they say so
+   * (「↓ 最新」, a navigator click, or the next send).
+   *
+   * `pinnedRef` goes false with the anchor, because the scroll event this
+   * gesture is about to produce has not landed yet: without it, an anchored turn
+   * whose answer is short enough to sit near the end would be re-pinned to the
+   * bottom for the one frame in between.
+   *
+   * The bottom space is deliberately NOT dropped here — that is the whole point
+   * of `clearAnchor` keeping it: the reader is almost always parked inside it at
+   * this moment (the answer is shorter than the view), and taking it back would
+   * clamp the scroll they just made.
+   */
+  const releaseAnchor = useCallback((): void => {
+    if (anchorIdRef.current === undefined) return
+    clearAnchor()
+    pinnedRef.current = false
+  }, [clearAnchor])
 
   /** The 「↓ 最新」 pill: hand the viewport back to the newest line. */
   const jumpToLatest = useCallback((): void => {
     const list = listRef.current
     if (list === null) return
-    anchorIdRef.current = undefined
-    anchorAppliedTopRef.current = undefined
+    /*
+     * The block goes FIRST: the target below is measured from `scrollHeight`,
+     * and leaving a screenful of borrowed space in it would aim the smooth
+     * scroll past the end of the conversation.
+     */
+    clearAnchor()
+    dropRoom()
     pinnedRef.current = true
     jumpUntilRef.current = Date.now() + JUMP_SETTLE_MS
     jumpTargetRef.current = Math.max(0, list.scrollHeight - list.clientHeight)
     setAtBottom(true)
     list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' })
-  }, [])
+  }, [clearAnchor, dropRoom])
 
   /**
    * A navigator click: jump to one question, and let the reader see it land.
@@ -1837,14 +2177,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * way.
    */
   const jumpToQuestion = useCallback((id: string): void => {
-    anchorIdRef.current = undefined
-    anchorAppliedTopRef.current = undefined
+    // The borrowed space goes too: `alignQuestion` measures against the row, and
+    // a screenful of space under it would be scrolled past on the way.
+    clearAnchor()
+    dropRoom()
     pinnedRef.current = false
     jumpUntilRef.current = Date.now() + JUMP_SETTLE_MS
     setAtBottom(false)
     if (alignQuestion(id, 'smooth')) setFlashId(id)
     else setJumpId(id)
-  }, [alignQuestion])
+  }, [alignQuestion, clearAnchor, dropRoom])
 
   /**
    * Keep `threadScrolls` honest when the transcript changes without a scroll.
@@ -1906,6 +2248,24 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    *   not be swallowed by the cooldown a previous failure armed.
    */
   const wakeRef = useRef<Promise<EnsureReadyResult> | null>(null)
+  /**
+   * Two guards for the OPENING auto-start.
+   *
+   * The sidebar button is the plugin's front door, so opening the panel is a
+   * request for the web page — the reader should not have to click 「重试启动」
+   * first. The attempt is still carefully bounded:
+   *
+   *   - `autoStartedRef` makes it ONE attempt per render of this panel, so the
+   *     snapshot poll cannot re-arm it on every tick;
+   *   - `lastAutoStartRef` keeps the NEXT mount from asking again right away, so
+   *     a reader flipping between panels is not a browser-launch loop;
+   *   - a failure is NOT retried, because the notice on screen carries the
+   *     reason and the button — see WAKE_RETRY_COOLDOWN_MS and `launchError`.
+   */
+  const autoStartedRef = useRef(false)
+  /** When the last auto-start attempt was made (epoch ms, 0 = never). */
+  const lastAutoStartRef = useRef(0)
+
   /**
    * When a start last SUCCEEDED (epoch ms).
    *
@@ -2020,10 +2380,12 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * reader is retrying THAT exchange and should be looking at it.
      */
     pendingAnchorRef.current = true
+    pendingAnchorChatRef.current = chat.id
     tailUntilRef.current = Date.now() + TAIL_AFTER_SEND_MS
     const result = await api.send(lastUser.content, lastUser.attachments).catch(() => undefined)
     if (result !== undefined && result.ok !== true) {
       pendingAnchorRef.current = undefined
+      pendingAnchorChatRef.current = undefined
       toast(explain(result, '', tr), { error: true })
     } else void refreshState()
   }, [chats, viewChatId, busy, api, toast, refreshState])
@@ -2093,8 +2455,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * snapshot: it is the same list the effect counts, so a poll that was
      * already in flight cannot make the two disagree. See the effect's "consume
      * a pending send" block.
+     *
+     * The chat stamp starts as the conversation on screen and is corrected below
+     * with the chat the host actually filed the question in. That correction is
+     * what carries the anchor across the switch a first send causes: the panel
+     * only learns the new conversation's id from this response, and the scroll
+     * effect would otherwise read the switch as "the reader opened something
+     * else" and drop the anchor — the defect this stamp exists to fix.
      */
     pendingAnchorRef.current = listRef.current?.querySelectorAll('[data-role="user"]').length ?? 0
+    pendingAnchorChatRef.current = viewChatIdRef.current
     // Start tailing now rather than when /state next reports busy: the gap
     // between Enter and the first token is exactly when a stalled panel looks
     // broken. The deadline expires on its own, so a send that fails cannot
@@ -2111,11 +2481,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       // pending flag left standing would anchor the NEXT render to whatever
       // user message happened to be last.
       pendingAnchorRef.current = undefined
+      pendingAnchorChatRef.current = undefined
       toast(String(error), { error: true })
       return 'failed'
     }
     if (result.ok === true) {
-      if (result.chatId !== undefined) setViewChatId(result.chatId)
+      if (result.chatId !== undefined) {
+        // Stamped BEFORE the view switches, so the scroll effect — which runs on
+        // the render that switch triggers — already knows the anchor belongs to
+        // the conversation being switched to.
+        pendingAnchorChatRef.current = result.chatId
+        setViewChatId(result.chatId)
+      }
       // The first exchange pins the chat's title and the user message is already
       // stored, so pull the snapshot now instead of waiting out the slow poll.
       void refreshState()
@@ -2124,6 +2501,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (result.code === 'BUSY') {
       // The queue owns this message now; its own send raises the flag again.
       pendingAnchorRef.current = undefined
+      pendingAnchorChatRef.current = undefined
       return 'busy'
     }
     if (result.stored === true) {
@@ -2143,6 +2521,7 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * come up", which is a different sentence and is already on screen.
      */
     pendingAnchorRef.current = undefined
+    pendingAnchorChatRef.current = undefined
     toast(explain(result, tr('toast.send.failed'), tr), { error: true })
     return 'failed'
   }, [api, ensureReady, refreshState, retry, toast, tr])
@@ -2212,6 +2591,55 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     setLaunchError(undefined)
     await ensureReady({ force: true })
   }, [ensureReady])
+
+  /**
+   * The opening auto-start: clicking the sidebar's DSchat button IS the request
+   * to start the web page.
+   *
+   * The shell mounts this panel when its sidebar row is selected, so this effect
+   * is exactly "the reader opened DSchat" — the entry point of the whole plugin.
+   * Before this, the page only came up on the first gesture in the composer (a
+   * focus, a keystroke, a send) or on an explicit 「重试启动」, so the panel opened
+   * onto a transcript with no engine behind it and the reader had to guess which
+   * of those two things to do.
+   *
+   * It waits for `state !== null`, i.e. for the first snapshot: starting the
+   * browser is a 45 s `page.goto` on a cold profile, and there is no reason to
+   * pay for it before the panel knows whether the engine is already up. A
+   * snapshot that reports a live engine returns long before the wake path (see
+   * `ensureReady`'s fresh-start short circuit), so no second launch happens
+   * either.
+   */
+  useEffect(() => {
+    if (autoStartedRef.current || state === null) return
+    if (loggedIn === true && engineLive) {
+      // Already up: nothing to start, and the attempt is spent.
+      autoStartedRef.current = true
+      return
+    }
+    /*
+     * A failed start is on screen with its reason. This effect must not re-ask
+     * and bury that notice under another 45 s attempt the reader already watched
+     * fail — the notice's own button is the retry.
+     */
+    if (launchError !== undefined) return
+    /*
+     * One attempt per SESSION, not per mount.
+     *
+     * The shell unmounts this panel whenever the reader looks at another one, so
+     * a mount-scoped guard alone would relaunch the browser on every visit back
+     * — including right after the reader deliberately closed it (「关闭浏览器」
+     * in the 「···」 menu). A shared deadline makes the difference between "I
+     * opened DSchat" and "I keep reopening DSchat".
+     */
+    if (Date.now() - lastAutoStartRef.current < AUTO_START_INTERVAL_MS) {
+      autoStartedRef.current = true
+      return
+    }
+    autoStartedRef.current = true
+    lastAutoStartRef.current = Date.now()
+    void ensureReady()
+  }, [state, loggedIn, engineLive, launchError, ensureReady])
 
   const send = useCallback(async (): Promise<void> => {
     const text = draft.trim()
@@ -2285,14 +2713,457 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (result !== undefined && result.ok !== true) toast(explain(result, tr('send.openLogin'), tr), { error: true })
   }, [api, toast])
 
+  /**
+   * Put text on the clipboard and say what happened.
+   *
+   * The toast used to fire on the CATCH arm too, so a refused clipboard write
+   * (the page not focused, a missing permission, an insecure context) reported
+   * 「已复制」 while the clipboard still held whatever was in it before. That is
+   * the one failure a copy action must not have: the reader pastes the wrong
+   * thing somewhere and has no reason to suspect why.
+   *
+   * `navigator.clipboard` is the modern path; the `execCommand` fallback is what
+   * covers a WebView that exposes the API but refuses the permission. When both
+   * fail the reader is told, and told what to do instead.
+   */
   const copyText = useCallback(async (text: string, message: string): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(text)
-      toast(message)
-    } catch {
-      toast(message)
+    if (await writeClipboard(text)) toast(message)
+    else toast(tr('toast.copyFailed'), { error: true })
+  }, [toast, tr])
+
+  /* ------------------------------------------------- answers: actions on one reply */
+
+  /**
+   * The answer whose 重新生成 is in flight, if any.
+   *
+   * One at a time on purpose: the page answers one question at a time, so a
+   * second press while the first is generating has nothing to act on. Held as
+   * the message id rather than a boolean so the spinner lands on the button that
+   * was pressed.
+   */
+  const [regeneratingId, setRegeneratingId] = useState<string | undefined>(undefined)
+  /**
+   * The rating each answer currently shows, and the one being sent.
+   *
+   * `reactions` is what the reader SEES; the truth lives on their DeepSeek
+   * account and the page does not expose it in a readable form (the buttons have
+   * no pressed attribute — see the engine's feedback note), so the panel mirrors
+   * what IT has sent this session. A rating given in the browser window is
+   * therefore not reflected here, and the honest label on every toast says so.
+   */
+  const [reactions, setReactions] = useState<Record<string, Reaction>>({})
+  /** The message a rating is currently being sent for, if any. */
+  const [feedbackId, setFeedbackId] = useState<string | undefined>(undefined)
+  /**
+   * The 反馈 form: which answer it is for, and what the reader picked.
+   *
+   * 点踩 on the web page is not a request — it opens a dialog that requires a
+   * reason — so the panel asks first and sends both together (see
+   * `setFeedback`). Keeping the target as the whole message rather than an id
+   * means the close-then-submit path cannot act on a different answer than the
+   * one whose control was pressed.
+   */
+  const [dislikeTarget, setDislikeTarget] = useState<DSchatMessage | undefined>(undefined)
+  const [dislikeReason, setDislikeReason] = useState<FeedbackReason>('unhelpful')
+  const [dislikeNote, setDislikeNote] = useState('')
+  /**
+   * The Q&A picker: WHICH turns 分享 would publish, or 导出 would write.
+   *
+   * Both features are "choose some of this conversation and do something with
+   * it", and the choice is the same question in both cases, so there is one
+   * picker, one selection, and one binding rule (see qa-picker.tsx):
+   *
+   *   - `qaPurpose` says which verb is waiting at the bottom of the list;
+   *   - `qaSelection` holds TURN ids. 分享 opens with the turn whose 分享 control
+   *     was pressed — the web page's own behaviour, where one 分享 selects that
+   *     question+answer pair and 全选 adds the rest — while 导出 opens with
+   *     EVERYTHING ticked, because "export the conversation" is the normal case;
+   *   - `qaBusy` covers the one round trip (publish, or write the file).
+   *
+   * 分享 is the one control here with a consequence outside the panel: it calls
+   * `POST /api/v0/share/create` and produces a URL anyone can open. The picker
+   * carries the page's own warning sentence (see `share.warning`, from the web
+   * app's `shareCreateLinkInform`) for exactly that reason — publishing on the
+   * click that opened the list is the accident this exists to prevent.
+   */
+  const [qaPurpose, setQaPurpose] = useState<QaPurpose | undefined>(undefined)
+  const [qaSelection, setQaSelection] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [qaBusy, setQaBusy] = useState(false)
+  /**
+   * Where 导出 writes, and what the dialog currently shows.
+   *
+   * `exportDir` is the HOST's resolved answer (`/context` → `settings.exportDir`,
+   * which already folds in the folder the reader picked last time), and
+   * `exportDirDraft` is the editable copy inside the dialog. Two values rather
+   * than one because the two questions are different: the host decides where a
+   * file LANDS, and the draft is what the reader is trying out. The draft is
+   * committed to the host on 导出 (see `runQa`) so a folder that was typed but
+   * never used is not remembered as if it had been.
+   */
+  const [exportDir, setExportDir] = useState<string | undefined>(undefined)
+  const [exportDirDraft, setExportDirDraft] = useState('')
+
+  /** The open conversation's turns, grouped once per transcript change. */
+  const qaTurnList = useMemo(() => qaTurns(viewChat?.messages ?? []), [viewChat])
+
+  /** Close the 反馈 form without sending anything. */
+  const closeDislike = useCallback((): void => {
+    setDislikeTarget(undefined)
+    setDislikeNote('')
+    setDislikeReason('unhelpful')
+  }, [])
+
+  /** Close the picker without sharing or exporting anything. */
+  const closeQa = useCallback((): void => {
+    setQaPurpose(undefined)
+    setQaSelection(new Set<string>())
+  }, [])
+
+  /**
+   * The 反馈 form's two escape hatches.
+   *
+   * Escape and a click outside are what every other dismissible surface here
+   * answers to (the 「运行状态」 card, the two popovers), and a form with neither
+   * is a trap: it covers part of the answer it is about, and the only way out
+   * would be the 取消 button.
+   */
+  useEffect(() => {
+    if (dislikeTarget === undefined) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      closeDislike()
     }
-  }, [toast])
+    const onPointer = (event: MouseEvent): void => {
+      const node = event.target
+      if (!(node instanceof Element)) return
+      // Inside the form, or on a control of the row it belongs to (which would be
+      // an immediate re-open): leave it standing.
+      if (node.closest('.dsh-dschat-feedback') !== null) return
+      if (node.closest('.dsh-dschat-msg-acts') !== null) return
+      closeDislike()
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onPointer)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onPointer)
+    }
+  }, [dislikeTarget, closeDislike])
+
+  /*
+   * The picker's own way out. Escape only: it is a modal with a backdrop, so the
+   * backdrop's click is handled where the backdrop is (see `qaModal`), and a
+   * document-level pointer rule would have to re-derive which surface the press
+   * landed in for no benefit.
+   */
+  useEffect(() => {
+    if (qaPurpose === undefined) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      closeQa()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [qaPurpose, closeQa])
+
+  /**
+   * 重新生成: ask the web page for a different answer to this reply's question.
+   *
+   * Anchored like a send, because the reader is looking at this turn and the new
+   * answer grows in its place. The old answer disappears from the transcript on
+   * the host's side the moment the page accepts the turn, which is why the
+   * snapshot is refreshed as soon as the route answers.
+   */
+  const regenerate = useCallback(async (message: DSchatMessage): Promise<void> => {
+    const chat = viewChat
+    if (chat === undefined || regeneratingId !== undefined) return
+    if (busy || streaming) {
+      toast(tr('msg.regenerate.busy'))
+      return
+    }
+    /*
+     * The page has to be up for the turn to be typed into it. A failure here has
+     * already put its reason on screen (see `ensureReady`); the toast names the
+     * action so the reader connects the two.
+     */
+    const ready = await ensureReady()
+    if (ready.ok !== true) {
+      toast(tr('msg.regenerate.failed'), { error: true })
+      return
+    }
+    setRegeneratingId(message.id)
+    pendingAnchorRef.current = true
+    pendingAnchorChatRef.current = chat.id
+    tailUntilRef.current = Date.now() + TAIL_AFTER_SEND_MS
+    try {
+      const result = await api.regenerate(chat.id, message.id)
+      if (result.ok !== true) {
+        pendingAnchorRef.current = undefined
+        pendingAnchorChatRef.current = undefined
+        toast(staleHostOr(result, tr('msg.regenerate.failed'), tr), { error: true })
+        return
+      }
+      toast(tr('msg.regenerated'))
+    } catch (error) {
+      pendingAnchorRef.current = undefined
+      pendingAnchorChatRef.current = undefined
+      toast(`${tr('msg.regenerate.failed')}：${String(error)}`, { error: true })
+    } finally {
+      setRegeneratingId(undefined)
+      void refreshState()
+    }
+  }, [viewChat, regeneratingId, busy, streaming, ensureReady, api, toast, tr, refreshState])
+
+  /**
+   * 点赞 / 点踩: press the WEB page's own control for this answer.
+   *
+   * The pressed control is sent explicitly (`rating: null` clears), because the
+   * panel cannot read the page's current state — the controls carry no
+   * `aria-pressed`, they are identified by their tooltip, and the page's own
+   * toggle only exists inside the page. Sending the intent rather than "toggle"
+   * is what makes a double click idempotent instead of a flip-flop.
+   *
+   * 点踩 additionally carries a `reason` and a `note`: on the page it opens a 反馈
+   * dialog that requires a reason, and nothing reaches the account until 提交.
+   * Those come from {@link dislikeTarget}, which the row's 不喜欢 control opens.
+   */
+  const setFeedback = useCallback(async (
+    message: DSchatMessage,
+    rating: Reaction,
+    options?: { reason?: FeedbackReason; note?: string; clearing?: 'like' | 'dislike' },
+  ): Promise<void> => {
+    const chat = viewChat
+    if (chat === undefined || feedbackId !== undefined) return
+    setFeedbackId(message.id)
+    try {
+      // `rating` is three-valued here and `null` on the wire: JSON has no
+      // `undefined`, and an absent field would read as "missing" rather than as
+      // the deliberate "clear the rating" it is.
+      const result = await api.feedback(chat.id, message.id, rating ?? null, options)
+      if (result.ok !== true) {
+        toast(staleHostOr(result, tr('msg.feedback.failed'), tr), { error: true })
+        return
+      }
+      const landed: Reaction = result.state === 'like'
+        ? 'like'
+        : (result.state === 'dislike' ? 'dislike' : undefined)
+      setReactions(current => ({ ...current, [message.id]: landed }))
+      toast(landed === 'like'
+        ? tr('msg.feedback.liked')
+        : (landed === 'dislike' ? tr('msg.feedback.disliked') : tr('msg.feedback.cleared')))
+    } catch (error) {
+      toast(`${tr('msg.feedback.failed')}：${String(error)}`, { error: true })
+    } finally {
+      setFeedbackId(undefined)
+    }
+  }, [viewChat, feedbackId, api, toast, tr])
+
+  /**
+   * Run the picker's verb on the chosen turns: 分享 (publish a public link) or
+   * 导出 (write a markdown file).
+   *
+   * 分享 has three outcomes, and each one says something different to the
+   * reader:
+   *
+   *   - created: the URL is copied, so the reader can paste it straight away;
+   *   - failed BEFORE anything was published: the toast offers the text excerpt
+   *     instead, which is what 分享 used to do and is still the useful
+   *     degradation when the page cannot be driven;
+   *   - failed AFTER the create click may have landed (`created` unverified): the
+   *     toast says the link may exist and where to remove it. Hiding that would
+   *     leave a public URL the reader never learns about.
+   *
+   * 导出 is the old one-click action with a selection in front of it: the same
+   * route, the same toast — the file name now depends on the choice (see
+   * `exportTranscriptFile`).
+   */
+  const runQa = useCallback(async (): Promise<void> => {
+    const purpose = qaPurpose
+    const chat = viewChat
+    if (purpose === undefined || chat === undefined || qaBusy) return
+    const turns = qaTurns(chat.messages)
+    const ids = selectedMessageIds(turns, qaSelection, purpose)
+    if (ids.length === 0) return
+    setQaBusy(true)
+    try {
+      if (purpose === 'export') {
+        /*
+         * The folder first, then the file.
+         *
+         * The dialog lets the reader change the destination (the native picker,
+         * or a path typed by hand), and the host is the one that remembers it —
+         * so a changed draft is committed BEFORE the export, and a folder the
+         * host refuses stops the export instead of silently writing somewhere
+         * else. Nothing is remembered until this moment: a folder that was tried
+         * and then cancelled is not a choice.
+         */
+        const wanted = exportDirDraft.trim()
+        if (wanted !== '' && wanted !== exportDir) {
+          const saved = await api.setExportDir(wanted).catch(() => undefined)
+          if (saved === undefined || saved.ok !== true || saved.dir === undefined) {
+            // Stale host named too: see the note in `chooseExportDir`. The dialog
+            // stays open, because the reader still has a folder to fix.
+            toast(staleHostOr(saved, tr('toast.export.dirFailed'), tr), { error: true })
+            return
+          }
+          setExportDir(saved.dir)
+          setExportDirDraft(saved.dir)
+        }
+        /*
+         * No cwd: the destination is the folder the host resolved (the reader's
+         * last choice, the configured setting, or the download folder), not
+         * whatever project the last harness session had open. The toast then
+         * names the file AND the folder, because "已导出到 dschat-….md" told the
+         * reader nothing about where to find it.
+         */
+        const result = await api.exportFile(chat.id, undefined, ids).catch(() => undefined)
+        closeQa()
+        if (result === undefined || result.ok !== true || result.filePath === undefined) {
+          toast(tr('toast.export.failed', { error: explain(result, '', tr) }), { error: true })
+          return
+        }
+        toast(tr('toast.export.done', {
+          file: result.dir === undefined ? result.filePath : `${result.dir}/${result.filePath}`,
+        }))
+        return
+      }
+      const result = await api.share(chat.id, ids)
+      if (result.ok === true && typeof result.url === 'string' && result.url !== '') {
+        closeQa()
+        await copyText(result.url, tr('share.done'))
+        return
+      }
+      closeQa()
+      /*
+       * A host half that predates this feature answers in one of TWO ways, and
+       * both mean the same thing to the reader:
+       *
+       *   - no route at all (a host older still) answers 404;
+       *   - the 0.10 host HAS `/share` but reads a single `messageId`, so the
+       *     picker's `messageIds` list looks like a missing field and the route
+       *     answers 400 BAD_REQUEST.
+       *
+       * "Restart Harness" is the whole message either way: the panel is fetched
+       * from disk on every page load, the host only on restart.
+       */
+      const staleHost = /HTTP 404/.test(result.error ?? '') || result.code === 'BAD_REQUEST'
+      const detail = staleHost
+        ? tr('engine.notice.staleHostAction')
+        : (result.error !== undefined && result.error !== ''
+            ? result.error
+            : explain(result, tr('share.title'), tr))
+      toast(detail, {
+        error: true,
+        action: {
+          label: tr('share.copyText'),
+          run: () => { void copyText(selectionShareText(chatTitleOf(viewChat, tr), turns, qaSelection), tr('msg.shared')) },
+        },
+      })
+    } catch (error) {
+      closeQa()
+      toast(String(error), { error: true })
+    } finally {
+      setQaBusy(false)
+    }
+  }, [qaPurpose, qaSelection, qaBusy, viewChat, api, tr, toast, copyText, closeQa, exportDir, exportDirDraft])
+
+  /**
+   * Open the picker for 分享, with the pressed turn already ticked.
+   *
+   * That default is the WEB PAGE's own behaviour rather than a convenience: its
+   * 分享 control calls `enterSelection(sessionId, [messageId])`, which selects
+   * that answer and its question — 「已选择 1 组对话」 — leaving 全选 and the
+   * per-message checkboxes to extend it. Anything else here would make the panel
+   * and the page disagree about what one 分享 means.
+   */
+  const openSharePicker = useCallback((message: DSchatMessage): void => {
+    const turns = qaTurns(viewChat?.messages ?? [])
+    const turn = turns.find(candidate =>
+      candidate.id === message.id || candidate.answers.some(answer => answer.id === message.id))
+    setQaSelection(new Set(turn === undefined ? [] : [turn.id]))
+    setQaPurpose('share')
+  }, [viewChat])
+
+  /**
+   * Open the picker for 导出, with EVERYTHING ticked.
+   *
+   * 导出 is a whole-conversation verb whose normal case is "the whole
+   * conversation"; the list is there for the reader who wants part of it, not to
+   * make them re-select what they already have.
+   */
+  const openExportPicker = useCallback((): void => {
+    const turns = qaTurns(viewChat?.messages ?? [])
+    setQaSelection(new Set(selectableTurns(turns, 'export').map(turn => turn.id)))
+    // The dialog starts on the folder the host will actually write into — the one
+    // the reader picked last time, when there was one — so the field and the
+    // 「已导出到 …」 toast cannot disagree. Blank only while `/context` has not
+    // answered yet, and the host then resolves the destination by itself.
+    setExportDirDraft(exportDir ?? '')
+    setQaPurpose('export')
+  }, [viewChat, exportDir])
+
+  /**
+   * Ask the OS for a folder, and make it the export destination.
+   *
+   * Committed straight away rather than on 导出: the reader who pressed the
+   * button has already made the choice, and showing the resolved absolute path
+   * back in the field is the only confirmation the dialog gives. A path the host
+   * cannot create is refused HERE, with the reason, instead of at the export.
+   *
+   * A null answer means "no folder chosen" — the reader cancelled, or the shell
+   * has no directory picker in this deployment — and both leave the field alone.
+   */
+  const chooseExportDir = useCallback(async (): Promise<void> => {
+    const path = await pickDirectory()
+    if (path === null || path.trim() === '') return
+    setExportDirDraft(path)
+    const result = await api.setExportDir(path).catch(() => undefined)
+    if (result === undefined || result.ok !== true || result.dir === undefined) {
+      // `staleHostOr` names the case this feature is most likely to meet in the
+      // field: the panel is fetched from disk on every page load, the host half
+      // only on a Harness restart, so a reader who upgrades meets a 404 here
+      // first. "Restart Harness" is the actionable sentence; a bare 404 is not.
+      toast(staleHostOr(result, tr('toast.export.dirFailed'), tr), { error: true })
+      return
+    }
+    setExportDir(result.dir)
+    setExportDirDraft(result.dir)
+  }, [pickDirectory, api, toast, tr])
+
+  /**
+   * Flip one turn.
+   *
+   * The BINDING lives here, and it is the whole rule: a selection holds turn
+   * ids, every row of a turn (its question and each of its answers) reads the
+   * same flag, and pressing any of them runs this. There is no state in which a
+   * question is chosen without its answer, or the other way round — see the
+   * module note in qa-picker.tsx.
+   */
+  const toggleQa = useCallback((turnId: string): void => {
+    setQaSelection(current => {
+      const next = new Set(current)
+      if (next.has(turnId)) next.delete(turnId)
+      else next.add(turnId)
+      return next
+    })
+  }, [])
+
+  /** 全选 / 全不选 for the picker's head control. */
+  const setAllQa = useCallback((on: boolean): void => {
+    const purpose = qaPurpose ?? 'export'
+    const turns = qaTurns(viewChat?.messages ?? [])
+    setQaSelection(on ? new Set(selectableTurns(turns, purpose).map(turn => turn.id)) : new Set<string>())
+  }, [qaPurpose, viewChat])
+
+  /** Send the 反馈 form: the rating and the reason travel together. */
+  const submitDislike = useCallback(async (): Promise<void> => {
+    const message = dislikeTarget
+    if (message === undefined) return
+    const note = dislikeNote.trim()
+    closeDislike()
+    await setFeedback(message, 'dislike', { reason: dislikeReason, note })
+  }, [dislikeTarget, dislikeReason, dislikeNote, closeDislike, setFeedback])
+
 
   const removeChat = useCallback(async (chat: DSchatTranscript): Promise<void> => {
     const index = chats.findIndex(item => item.id === chat.id)
@@ -2554,25 +3425,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     if (result !== undefined && result.ok !== true) toast(tr('toast.rename.failed', { error: explain(result, '', tr) }), { error: true })
     else toast(tr('toast.rename.done'))
   }, [renameDraft, api, toast, tr])
-
-  const exportFile = useCallback(async (): Promise<void> => {
-    if (viewChat === undefined) return
-    /*
-     * No cwd: the destination is the host's setting (the download folder by
-     * default), not whatever project the last harness session had open. The
-     * toast then names the file AND the folder, because "已导出到 dschat-….md"
-     * told the reader nothing about where to find it — the exact complaint that
-     * moved the default into 下载.
-     */
-    const result = await api.exportFile(viewChat.id).catch(() => undefined)
-    if (result === undefined || result.ok !== true || result.filePath === undefined) {
-      toast(tr('toast.export.failed', { error: explain(result, '', tr) }), { error: true })
-      return
-    }
-    toast(tr('toast.export.done', {
-      file: result.dir === undefined ? result.filePath : `${result.dir}/${result.filePath}`,
-    }))
-  }, [viewChat, api, toast, tr])
 
   /**
    * Step one of the hand-off: build the text and SHOW it. Writes nothing.
@@ -3081,6 +3933,16 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               ref: listRef,
               onScroll: onThreadScroll,
               /*
+               * A wheel or a touch on the transcript is the reader taking the
+               * viewport, and it is taken NOW rather than after the position has
+               * moved far enough to be recognised as theirs (see
+               * `releaseAnchor`). Both are real gestures; a programmatic
+               * `scrollTo` fires neither, so this cannot trigger on our own
+               * scrolls.
+               */
+              onWheel: releaseAnchor,
+              onTouchStart: releaseAnchor,
+              /*
                * The navigator needs a column of its own, and it must be a COLUMN
                * rather than an overlay: a 34px capsule floating over a 320px
                * panel sits on top of the text. The flag is on the scroller so
@@ -3091,6 +3953,19 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
               'data-nav': questions.length >= 2 && threadScrolls ? 'true' : undefined,
             },
             createElement('div', { className: 'dsh-dschat-thread-inner' }, thread()),
+            /*
+             * The anchored question's bottom block — see `spacerRef`. Rendered
+             * always (0 height while nothing is anchored) so that sizing it is a
+             * plain style write with no re-render, and so the node the anchor
+             * measures and the node the layout uses are the same one. It is a
+             * SIBLING of the reading column rather than a child, so it takes no
+             * part in that column's flex gap.
+             */
+            createElement('div', {
+              className: 'dsh-dschat-thread-spacer',
+              ref: spacerRef,
+              'aria-hidden': 'true',
+            }),
           ),
           questionNav(),
           latestPill(),
@@ -3151,6 +4026,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         createElement(DSchatStatus, { api, tt, t }),
       ),
     ),
+
+    /*
+     * The Q&A picker, for 分享 and for 导出. Rendered at the ROOT rather than
+     * inside a message (where the old 分享 confirmation lived) because it is not
+     * about one message any more: it lists the whole conversation, and the
+     * transcript behind it stays readable while it is up.
+     */
+    qaModal(),
   )
 
   /* ------------------------------------------------------------- sections */
@@ -3730,6 +4613,220 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
     )
   }
 
+  /**
+   * The 反馈 form for the answer whose 不喜欢 was pressed.
+   *
+   * It exists because the web page's 点踩 is a DIALOG, not a request: four
+   * required reasons, an optional note, and nothing submitted until 提交. The
+   * panel asks here and hands both to the host, which types them into that same
+   * dialog (see the engine's `reactInner`) — so the rating that reaches the
+   * reader's DeepSeek account says what they actually meant, instead of a reason
+   * the plugin picked for them.
+   *
+   * It renders INSIDE the answer's action row, which is its containing block: the
+   * form opens upward off the row it belongs to, the way every other panel in
+   * this component opens off its trigger.
+   */
+  function dislikeForm(): ReactNode {
+    const reasons: Array<[FeedbackReason, string]> = [
+      ['harmful', 'feedback.reason.harmful'],
+      ['false', 'feedback.reason.false'],
+      ['unhelpful', 'feedback.reason.unhelpful'],
+      ['other', 'feedback.reason.other'],
+    ]
+    return createElement(
+      'div',
+      { className: 'dsh-dschat-feedback dsh-dschat-pop', role: 'dialog', 'aria-label': tr('feedback.title') },
+      createElement('p', { className: 'dsh-dschat-pop-title' }, tr('feedback.title')),
+      createElement('p', { className: 'dsh-dschat-sub' }, tr('feedback.sub')),
+      createElement(
+        'div',
+        { className: 'dsh-dschat-feedback-reasons', role: 'radiogroup', 'aria-label': tr('feedback.title') },
+        reasons.map(([value, key]) => createElement(
+          'button',
+          {
+            key: value,
+            type: 'button',
+            role: 'radio',
+            'aria-checked': dislikeReason === value ? 'true' : 'false',
+            className: 'dsh-dschat-feedback-reason',
+            'data-on': dislikeReason === value ? 'true' : undefined,
+            onClick: () => setDislikeReason(value),
+          },
+          tr(key),
+        )),
+      ),
+      createElement('textarea', {
+        className: 'dsh-dschat-feedback-note',
+        'aria-label': tr('feedback.note'),
+        placeholder: tr('feedback.note.placeholder'),
+        value: dislikeNote,
+        rows: 3,
+        maxLength: 500,
+        onInput: (event: { currentTarget: HTMLTextAreaElement }) => setDislikeNote(event.currentTarget.value),
+      }),
+      createElement(
+        'div',
+        { className: 'dsh-dschat-pop-actions' },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dschat-btn dsh-dschat-btn-ghost',
+            onClick: closeDislike,
+          },
+          tr('feedback.cancel'),
+        ),
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+            disabled: feedbackId !== undefined,
+            onClick: () => { void submitDislike() },
+          },
+          feedbackId === dislikeTarget?.id ? tr('msg.feedback.working') : tr('feedback.submit'),
+        ),
+      ),
+    )
+  }
+
+  /**
+   * The Q&A picker, as a modal: which turns 分享 publishes or 导出 writes.
+   *
+   * A modal rather than a row popover, and that is a consequence of what the
+   * feature became. 分享 used to confirm ONE answer, which fits a form hanging
+   * under that answer's own row; choosing among the whole conversation does not
+   * — the list can be longer than the row it would open from, and an overlay
+   * anchored to one message would cover the very transcript the reader is
+   * choosing from. 导出 has no row to hang from at all. One centred card serves
+   * both, and it is the same card the 「运行状态」 modal already uses.
+   *
+   * The primary button is 创建链接 / 导出, and 取消 is the default-looking
+   * control: publishing is not something to make easy to do by accident.
+   */
+  function qaModal(): ReactNode {
+    const purpose = qaPurpose
+    if (purpose === undefined) return null
+    const sharing = purpose === 'share'
+    const title = sharing ? tr('share.title') : tr('export.pick.title')
+    const chosen = selectedMessageIds(qaTurnList, qaSelection, purpose)
+    return createElement(
+      'div',
+      {
+        className: 'dsh-dschat-modal',
+        role: 'dialog',
+        'aria-modal': true,
+        'aria-label': title,
+        // A click on the backdrop closes it; a click inside the card does not.
+        onClick: (event: { target: unknown; currentTarget: unknown }) => {
+          if (event.target === event.currentTarget) closeQa()
+        },
+      },
+      createElement(
+        'div',
+        { className: 'dsh-dschat-modal-card dsh-dschat-qa-card' },
+        createElement('button', {
+          type: 'button',
+          className: 'dsh-dschat-modal-close',
+          title: tr('item.rename.cancel'),
+          'aria-label': tr('item.rename.cancel'),
+          onClick: closeQa,
+        }, createElement(CloseIcon, { size: 12 })),
+        createElement('p', { className: 'dsh-dschat-qa-title' }, title),
+        createElement(
+          'p',
+          { className: sharing ? 'dsh-dschat-share-warning' : 'dsh-dschat-qa-note' },
+          sharing ? tr('share.warning') : tr('export.pick.note'),
+        ),
+        !sharing && createElement(
+          /*
+           * 导出到 — the destination, which is part of "export this". 分享 has no
+           * equivalent row on purpose: a public link has no local target to
+           * choose.
+           *
+           * Both halves are here because either one alone fails a reader: the
+           * button is the only way to find a folder you do not remember the path
+           * of, and the field is the only way to paste one (and the only way to
+           * change the destination when this deployment has no native directory
+           * picker at all — `pickDirectory` answers null there).
+           */
+          'div',
+          { className: 'dsh-dschat-export-dir' },
+          createElement(
+            'label',
+            { className: 'dsh-dschat-export-dir-label', htmlFor: 'dsh-dschat-export-dir' },
+            tr('export.dir'),
+          ),
+          createElement(
+            'div',
+            { className: 'dsh-dschat-export-dir-row' },
+            createElement('input', {
+              id: 'dsh-dschat-export-dir',
+              className: 'dsh-dschat-export-dir-input',
+              type: 'text',
+              value: exportDirDraft,
+              placeholder: tr('export.dir.placeholder'),
+              spellCheck: false,
+              autoComplete: 'off',
+              title: exportDirDraft,
+              onChange: (event: { target: { value: string } }) => setExportDirDraft(event.target.value),
+              // Enter in the field means "done typing"; the value is committed by
+              // 导出, which is the only moment a folder becomes the remembered one.
+              onKeyDown: (event: { key: string; preventDefault: () => void; currentTarget: { blur: () => void } }) => {
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                event.currentTarget.blur()
+              },
+            }),
+            createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-dschat-btn dsh-dschat-btn-ghost dsh-dschat-export-dir-choose',
+                title: tr('export.dir.choose.hint'),
+                onClick: () => { void chooseExportDir() },
+              },
+              createElement(FolderIcon, { size: 14 }),
+              tr('export.dir.choose'),
+            ),
+          ),
+        ),
+        createElement(QaPicker, {
+          turns: qaTurnList,
+          selected: qaSelection,
+          onToggle: toggleQa,
+          onAll: () => setAllQa(true),
+          onNone: () => setAllQa(false),
+          mode: purpose,
+          answerLabel: modelLabel,
+          tr,
+        }),
+        createElement(
+          'div',
+          { className: 'dsh-dschat-pop-actions' },
+          createElement(
+            'button',
+            { type: 'button', className: 'dsh-dschat-btn dsh-dschat-btn-ghost', onClick: closeQa },
+            tr('share.cancel'),
+          ),
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-dschat-btn dsh-dschat-btn-primary',
+              disabled: qaBusy || chosen.length === 0,
+              onClick: () => { void runQa() },
+            },
+            qaBusy
+              ? (sharing ? tr('share.creating') : tr('export.creating'))
+              : (sharing ? tr('share.confirm') : tr('export.pick.confirm')),
+          ),
+        ),
+      ),
+    )
+  }
+
   function messageNode(message: DSchatMessage, key: string, index: number): ReactNode {
     const isUser = message.role === 'user'
     const who = isUser ? tr('msg.you') : modelLabel
@@ -3775,34 +4872,83 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
      * with nothing after it would be worse than no button at all.
      */
     const quoted = isUser ? (message.content.split('\n')[0] ?? '').trim() : firstLine(message.content)
-    // Copy leads for BOTH roles so the row's first control never moves between
-    // messages; the role-specific actions follow it. The reasoning gets its own
-    // button rather than riding along in 复制, which is what the reader expects
-    // from every other assistant UI.
-    const actions: Array<{ key: string; title: string; icon: ReactNode; run: () => void }> = isUser
-      ? [
-          { key: 'copy', title: tr('msg.copy'), icon: createElement(CopyIcon, {}), run: () => { void copyText(reply, tr('toast.copied')) } },
-          { key: 'edit', title: tr('msg.edit'), icon: createElement(PencilIcon, {}), run: () => { setDraft(message.content); inputRef.current?.focus() } },
-        ]
-      : [
-          { key: 'copy', title: tr('msg.copy'), icon: createElement(CopyIcon, {}), run: () => { void copyText(reply, tr('toast.copied')) } },
-          ...(thinking === ''
-            ? []
-            : [{
-                key: 'copy-thinking',
-                title: tr('msg.copyThinking'),
-                icon: createElement(ThinkIcon, {}),
-                run: () => { void copyText(thinking, tr('toast.thinkingCopied')) },
-              }]),
-          ...(quoted === ''
-            ? []
-            : [{
-                key: 'quote',
-                title: tr('msg.quote'),
-                icon: createElement(QuoteIcon, {}),
-                run: () => { setDraft(`> ${quoted}\n\n`); inputRef.current?.focus() },
-              }]),
-        ]
+
+    /*
+     * The answer's action row — 复制 · 重新生成 · 喜欢 · 不喜欢 · 分享, plus the
+     * panel's own 复制思考过程 / 引用到输入框. It is built in its own module
+     * because the ORDER is both the reader's contract and the wire protocol (the
+     * host clicks the page's buttons by index), and because the row's EXISTENCE is
+     * part of that contract too: a reply that is still arriving renders no row at
+     * all (`arriving` below). See answer-actions.tsx.
+     */
+    const acts = createElement(MessageActions, {
+      isUser,
+      reply,
+      thinking,
+      quoted,
+      share: shareText(chatTitleOf(viewChat, tr), quoted, reply),
+      tr,
+      // The panel's `streaming` OR the engine's `busy`: the page renders one
+      // answer at a time and either flag alone means a turn is in flight.
+      busy: busy || streaming,
+      /*
+       * The answer's OWN state, not the turn's: while this message is still
+       * arriving the row does not exist at all (see answer-actions.tsx). It is
+       * the message flag rather than `busy`/`streaming` on purpose — those are
+       * panel-wide, so gating on them would take the controls off every FINISHED
+       * answer in the transcript for as long as any turn runs. A stopped turn or
+       * a failed one writes `streaming: false` with the partial text, so the row
+       * appears the moment the text stops changing, which is what "完整回答" means
+       * here.
+       */
+      arriving: message.streaming === true,
+      regeneratingId,
+      messageId: message.id,
+      reaction: reactions[message.id],
+      feedbackId,
+      onCopyReply: () => { void copyText(reply, tr('toast.copied')) },
+      onCopyThinking: () => { void copyText(thinking, tr('toast.thinkingCopied')) },
+      onQuote: () => { setDraft(`> ${quoted}\n\n`); inputRef.current?.focus() },
+      onEdit: () => { setDraft(message.content); inputRef.current?.focus() },
+      /*
+       * 分享 does NOT copy. It opens the picker, because the page's own 分享
+       * publishes a link anyone can open (see `runQa`). The picker opens with
+       * THIS turn ticked — the page's own `enterSelection(sessionId, [id])` —
+       * and the reader can add the rest there. The text excerpt is still
+       * reachable — as the fallback the failure toast offers.
+       */
+      onShare: () => {
+        closeDislike()
+        openSharePicker(message)
+      },
+      onRegenerate: () => { void regenerate(message) },
+      onLike: () => {
+        // Clearing carries WHICH rating is being cleared: the page's toggle is on
+        // the button that was pressed, so the host must press that same one.
+        const current = reactions[message.id]
+        void setFeedback(message, current === 'like' ? undefined : 'like', current === 'like' ? { clearing: 'like' } : undefined)
+      },
+      /*
+       * 不喜欢 opens the 反馈 form rather than sending: the page requires a reason
+       * and submits nothing without one. An answer already rated down, though,
+       * clears on the spot — that is the page's own toggle, and asking for a
+       * reason to REMOVE a rating would be nonsense.
+       */
+      onDislike: () => {
+        if (reactions[message.id] === 'dislike') void setFeedback(message, undefined, { clearing: 'dislike' })
+        else {
+          setDislikeTarget(message)
+          setDislikeReason('unhelpful')
+          setDislikeNote('')
+        }
+      },
+      /*
+       * One overlay at a time, and only on the row it belongs to. 点踩's form is
+       * the only one left here: 分享 became a modal (see `qaModal`), because a
+       * selection over the whole conversation does not fit under one row.
+       */
+      ...(dislikeTarget?.id === message.id ? { overlay: dislikeForm() } : {}),
+    })
 
     const body = createElement(
       'div',
@@ -3907,16 +5053,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       ),
     )
 
-    const acts = createElement(
-      'div',
-      { className: 'dsh-dschat-msg-acts' },
-      actions.map(action => createElement(
-        'button',
-        { key: action.key, type: 'button', title: action.title, 'aria-label': action.title, onClick: action.run },
-        action.icon,
-      )),
-    )
-
     return createElement(
       'div',
       {
@@ -3939,18 +5075,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         createElement('span', null, new Date(message.ts).toLocaleTimeString()),
       ),
       /*
-       * Placement differs by role because the CONTENT does.
+       * The body, then its row of controls — the SAME two-part shape for both
+       * roles, and the same order the reader meets them in.
        *
-       * An assistant message is full-width prose, so its row rides the head line
-       * at the message's right edge. A user message is a narrow right-aligned
-       * bubble: anchoring its row to the message box parked it at the far LEFT,
-       * hundreds of pixels from the bubble. Wrapping the bubble makes the row's
-       * containing block the bubble itself, so `right: 100%` puts it just outside
-       * the bubble at any width.
+       * An answer is full-width prose and its row sits in flow directly under it,
+       * as on chat.deepseek.com. The reader's own bubble used to be wrapped in a
+       * `.dsh-dschat-msg-line` so its row could be absolutely positioned just
+       * outside the bubble on hover; the row is now in flow under the bubble for
+       * both roles, which is what the reader asked for and what removes the
+       * wrapper entirely. The bubble's width cap moved onto the body itself (see
+       * the stylesheet) — it was the wrapper's only other job.
        */
-      isUser
-        ? createElement('div', { className: 'dsh-dschat-msg-line' }, body, acts)
-        : createElement(Fragment, null, body, acts),
+      createElement(Fragment, null, body, acts),
     )
   }
 
@@ -4449,8 +5585,8 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
   }
 
   /**
-   * The action row: 会话列表 / 新对话 on the left, 「⇄ DSH 迁移」 at the right
-   * end.
+   * The action row: 会话列表 / 新对话 on the left, 「⇄ DSH 迁移」 and
+   * 「导出 markdown」 at the right end.
    *
    * 会话列表 lives here rather than in the title bar, and that is a decision
    * about WHERE ITS PANEL OPENS rather than about where the button looks best.
@@ -4471,11 +5607,14 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
    * has the space, and it means the panel's verbs are readable without hovering
    * anything.
    *
-   * Grouping is unchanged: browsing on the left, handing the conversation off
-   * at the right end, so the row still finishes on its terminal action. The
+   * Grouping: browsing on the left, then the two verbs that take something OUT
+   * of this panel — 迁移 (into a harness session) and 导出 (into a markdown
+   * file) — at the right end, in that order and for that reason: the migration
+   * is the bigger move and has been the row's terminal action since it was
+   * added, so the export lands beside it rather than pushing it inward. The
    * engine menu is NOT here — it lives at the title bar's right end (see
-   * {@link moreMenu}), because those four entries are about the panel and its
-   * browser rather than about this conversation.
+   * {@link moreMenu}), because 运行状态 / 打开登录窗口 / 关闭浏览器 are about the
+   * panel and its browser rather than about this conversation.
    */
   function actions(): ReactNode {
     return createElement(
@@ -4563,25 +5702,53 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
       ),
       createElement('div', { className: 'dsh-dschat-spacer' }),
       transferPopover(),
+      /*
+       * 导出 markdown, at the row's very end.
+       *
+       * It used to be an entry under the title bar's 「···」, next to 运行状态 —
+       * and that was the wrong home for the same reason 迁移 is on this row: it
+       * is a verb about THIS conversation. What made the old placement look
+       * reasonable was that the export used to be one bare click with nothing to
+       * decide; it is a selection now, so the button opens the picker (default:
+       * everything ticked) and the reader who wants the conversation in a file
+       * no longer has to go looking in a menu.
+       *
+       * `dsh-dschat-tbtn-export` is a MARKER class the render tests and the
+       * design scripts select on, in the same spirit as
+       * `dsh-dschat-tbtn-transfer`: it carries no styling of its own.
+       */
+      createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-dschat-tbtn dsh-dschat-tbtn-export',
+          title: tr('action.export.hint'),
+          'aria-label': tr('action.export.hint'),
+          disabled: viewChat === undefined || qaTurnList.length === 0,
+          onClick: openExportPicker,
+        },
+        createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(DownloadIcon, { size: 15 })),
+        createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('action.export')),
+      ),
     )
   }
 
   /**
-   * The engine menu: 运行状态 / 导出 markdown / 打开登录窗口 / 关闭浏览器.
+   * The engine menu: 运行状态 / 打开登录窗口 / 关闭浏览器.
    *
    * It has moved twice, and the two moves were about two different things.
    * v0.4 took it off the title bar and hung it on the state lamp, reasoning that
    * these entries describe the engine and the lamp is what reports the engine.
    * v0.4.1 put it back on the action row, because a 7px dot reads as a readout
-   * rather than as a button and the menu therefore had no VISIBLE home — 导出
-   * markdown is something a reader goes looking for.
+   * rather than as a button and the menu therefore had no VISIBLE home.
    *
-   * It now sits at the title bar's right end, which is where it started and
-   * where it belongs: 运行状态 reads and 导出 markdown writes the PANEL's own
-   * state, 打开登录窗口 and 关闭浏览器 drive its browser — none of the four is
-   * about the conversation, and every one of them is the kind of thing a title
-   * bar's 「···」 holds. The action row keeps the conversation's verbs, and the
-   * reader who is writing a message never has to aim past them.
+   * It now sits at the title bar's right end, and 导出 markdown has LEFT it: the
+   * export is a verb about THIS conversation, so it belongs on the action row
+   * beside 会话列表 / 新对话 / 迁移 (see `actions`), where the reader is already
+   * looking. What stays here — 运行状态 reads the PANEL's own state, 打开登录
+   * 窗口 and 关闭浏览器 drive its browser — is about the panel and its engine
+   * rather than about the conversation, which is exactly what a title bar's
+   * 「···」 holds.
    *
    * The lamp keeps its own panel, now just the status sentence (see
    * {@link lampMenu}), and it opens downward from the same strip.
@@ -4608,7 +5775,6 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         'div',
         { className: 'dsh-dschat-pop dsh-dschat-pop-menu' },
         moreItem('status', tr('status.title'), () => setStatusOpen(true)),
-        moreItem('export', tr('action.exportFile'), () => { void exportFile() }),
         moreItem('login', tr('action.openLogin'), () => { void openLogin() }, loggedIn === true),
         moreItem('close', tr('action.closeBrowser'), () => { void api.closeBrowser().catch(() => undefined) }, (state?.engine ?? 'stopped') === 'stopped'),
       ),
@@ -4703,13 +5869,18 @@ export function DSchatPanel(props: DSchatPanelProps): ReactNode {
         /*
          * The swap glyph makes the button findable at the row's right end
          * without the words: it reads as "hand this over", which is what both
-         * migration modes do. The two labels are separate spans so the row's
-         * own `gap` spaces them evenly — a bare text node beside an icon has no
-         * box to be spaced by.
+         * hand-off modes do. The two labels are separate spans so the row's own
+         * `gap` spaces them evenly — a bare text node beside an icon has no box
+         * to be spaced by.
+         *
+         * There is deliberately NO disclosure caret on the right. This button
+         * opens a POPOVER, and a caret is the one mark that promises an inline
+         * fold: it made 接力 look like a thing with an expanded and a collapsed
+         * state, when what it does is open a menu upward. The menu itself, its
+         * heading and `aria-expanded` already say that.
          */
         createElement('span', { className: 'dsh-dschat-tbtn-glyph' }, createElement(SwapIcon, { size: 14 })),
         createElement('span', { className: 'dsh-dschat-tbtn-text' }, tr('transfer.short')),
-        createElement('span', { className: 'dsh-dschat-tbtn-caret' }, createElement(CaretIcon, {})),
       ),
       transferOpen && createElement(
         'div',
@@ -4889,3 +6060,60 @@ function relativeTime(ts: number, tr: (key: string, values?: Record<string, stri
   // the only correct way to write it.
   return new Date(ts).toLocaleDateString()
 }
+
+/**
+ * Write `text` to the system clipboard, reporting whether it landed.
+ *
+ * Two paths, because the modern one is not always allowed: the async Clipboard
+ * API rejects when the document is not focused or the permission was denied, and
+ * a WebView can expose the API and still refuse the write. `execCommand('copy')`
+ * is deprecated and still the only fallback for that case — it needs a real
+ * selection, hence the off-screen textarea.
+ *
+ * @param text - what to put on the clipboard.
+ * @returns true when one of the two paths reported success.
+ */
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // Fall through to the legacy path.
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    // Off-screen but still selectable: `display:none` and `visibility:hidden`
+    // both make `select()` a no-op in some engines.
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const copied = document.execCommand('copy')
+    area.remove()
+    return copied
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The title of the conversation on screen, or the product's own name.
+ *
+ * A brand-new conversation has no title yet (`新的对话` until the first exchange
+ * names it), which is not a title anybody wants in a shared excerpt — the
+ * fallback is DeepSeek's own name, the way the panel labels the model.
+ *
+ * @param chat - the conversation being rendered, if the snapshot has one yet.
+ * @param tr - locale accessor, already bound to the plugin namespace.
+ */
+function chatTitleOf(chat: DSchatChatView | undefined, tr: (key: string) => string): string {
+  const title = chat?.title?.trim() ?? ''
+  // The untitled placeholder is the engine's own literal (see `ensureActiveChat`
+  // on the host); comparing to it is what keeps it out of a shared excerpt.
+  if (title === '' || title === '新的对话') return tr('msg.model')
+  return title
+}
+

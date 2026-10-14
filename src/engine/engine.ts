@@ -37,7 +37,7 @@ import type {
   WakeResult,
   WebChatSummary,
 } from '../protocol.ts'
-import { hasAnswerBody, sourcesOf } from '../protocol.ts'
+import { answerBody, hasAnswerBody, sourcesOf } from '../protocol.ts'
 import { serializeToMarkdown } from './html-md.ts'
 import { checkAttachments, describeRejections } from '../attachments.ts'
 
@@ -685,6 +685,124 @@ function commonPrefixLength(a: string, b: string): number {
   let index = 0
   while (index < limit && a[index] === b[index]) index += 1
   return index
+}
+
+/**
+ * The URL a share id stands for.
+ *
+ * Derived from the PAGE's own origin rather than a hardcoded host: the link the
+ * app itself builds is `new URL('/share/' + id, location.href).href` (see the
+ * probe's bundle reading), and a deployment that moved to another origin would
+ * otherwise get links pointing at the old one.
+ *
+ * @param shareId - the id `POST /api/v0/share/create` answered with.
+ * @param pageUrl - the live page's URL, used for its origin.
+ */
+export function shareUrlFrom(shareId: string, pageUrl: string): string {
+  try {
+    return new URL(`/share/${shareId}`, pageUrl).href
+  } catch {
+    return `https://chat.deepseek.com/share/${shareId}`
+  }
+}
+
+/**
+ * The sentence for a failed 点赞 / 点踩, from the page walk's own reason code.
+ *
+ * `reason` is deliberately terse (it crosses the page boundary inside a JSON
+ * value), so the sentence the reader sees is composed here, where the code is
+ * still in hand.
+ */
+export function ratingFailureSentence(reason: string): string {
+  if (reason.startsWith('controls:')) {
+    return `网页端这条回复的操作栏有 ${reason.slice('controls:'.length)} 个按钮，与预期的 6 个不符，为避免点错已取消。`
+  }
+  switch (reason) {
+    case 'no-submit': return '网页端的反馈弹窗里没有找到「提交」按钮，已取消本次评价。'
+    case 'no-dialog': return '网页端的反馈弹窗没有出现，已取消本次评价。'
+    case 'no-reasons': return '网页端的反馈弹窗里没有找到原因选项，已取消本次评价。'
+    case 'not-found':
+      return '没有在网页端找到与这条回复一致的答案（可能在网页端被重新生成或删除过），为避免评错已取消。'
+    default: return `网页端评价没有完成（${reason}）。`
+  }
+}
+
+/**
+ * The sentence for a failed 分享.
+ *
+ * Every reason here means NOTHING WAS PUBLISHED — the one exception
+ * (`pressed-no-link`) is handled by the caller, because it is the case where the
+ * link may exist and the reader has to be told how to find and remove it.
+ */
+export function shareFailureSentence(reason: string): string {
+  if (reason.startsWith('controls:')) {
+    return `网页端这条回复的操作栏有 ${reason.slice('controls:'.length)} 个按钮，与预期的 6 个不符，为避免点错已取消。`
+  }
+  /*
+   * The multi-turn aborts. `selection:a/b` is the count guard — the page says it
+   * holds a different number of 组对话 than the reader chose — and it is the one
+   * that must never be read as "分享没做完": nothing was created, and the panel
+   * should say why, because a silent failure would invite a retry that could
+   * succeed with the WRONG set.
+   */
+  if (reason.startsWith('selection:')) {
+    const [got = '?', want = '?'] = reason.slice('selection:'.length).split('/')
+    return `网页端选择模式里确认到的问答是 ${got} 组，与所选的 ${want} 组不一致，为避免分享错内容已取消，没有创建链接。`
+  }
+  if (reason.startsWith('checkbox:')) {
+    return '网页端没有选中其中一条回复（选择框点击没有生效），分享已取消，没有创建链接。'
+  }
+  if (reason.startsWith('not-found:')) {
+    return `所选的问答里有 ${reason.slice('not-found:'.length)} 组没有在网页端找到（可能被重新生成或删除过），分享已取消。`
+  }
+  switch (reason) {
+    case 'not-found':
+      return '没有在网页端找到与这条回复一致的答案（可能在网页端被重新生成或删除过），分享已取消。'
+    case 'no-bar':
+      return '点击「分享」后网页端没有进入选择模式（页面可能已改版），分享已取消。'
+    case 'no-create-control':
+      return '网页端的选择栏里没有找到「创建分享链接」，分享已取消。'
+    case 'no-dialog':
+      return '网页端没有弹出创建分享链接的确认框，分享已取消。'
+    case 'no-confirm-control':
+      return '网页端的确认框里没有找到「创建并复制」，分享已取消。'
+    default: return `分享没有完成（${reason}），没有创建链接。`
+  }
+}
+
+/**
+ * How much of an answer is compared when locating it in the live page.
+ *
+ * 24 letters/digits is far past the point two different answers can open alike —
+ * a real answer turns over inside its first sentence — and short enough to be
+ * reached before the page's own intro line, a citation marker or a code fence
+ * would have to be reproduced exactly.
+ */
+const ANSWER_MATCH_CHARS = 24
+
+/**
+ * What to look for in the page for one stored answer.
+ *
+ * The stored message and the DOM row are two RENDERINGS of one answer: one is
+ * markdown, the other re-serialized HTML, and they differ in whitespace,
+ * emphasis markers, code fences and citation chips. Comparing letters and digits
+ * only, over a prefix, survives every one of those differences.
+ *
+ * `prefixed` says whether the sample is a TRUNCATION of the answer's normalized
+ * form — the page then compares the same number of characters, so a stored copy
+ * that is only a few characters long cannot match every answer on the page.
+ *
+ * The reasoning wrapper is stripped first: the panel's own two actions already
+ * go through that split (see reply.ts), and the page renders the reasoning in a
+ * SEPARATE element, so a sample taken from the `<details>` block would match
+ * nothing at all.
+ */
+export function answerMatchExpectation(content: string): { sample: string; prefixed: boolean } {
+  const letters = normalizeReplyText(answerBody(content))
+  if (letters === '') return { sample: '', prefixed: true }
+  return letters.length <= ANSWER_MATCH_CHARS
+    ? { sample: letters, prefixed: false }
+    : { sample: letters.slice(0, ANSWER_MATCH_CHARS), prefixed: true }
 }
 
 /** True when a fragment type is the R1 reasoning (THINK / THINKING). */
@@ -2943,7 +3061,971 @@ export class DeepSeekWebEngine {
     })
   }
 
-  private async sendImpl(text: string, wait: boolean, images?: string[]): Promise<SendResult> {
+  /**
+   * 重新生成: ask the web page for a new answer to the LAST question.
+   *
+   * The difference from `retry` (which the panel also has) is what happens to
+   * the transcript. A retry is for a turn that never produced an answer, so it
+   * appends the question again; a regenerate has an answer already, and the
+   * reader's intent is to REPLACE it. That means:
+   *
+   *   - the stored question is REUSED, not appended a second time
+   *     (`options.reuseLastUser` in `sendImpl`). The web page itself is fine
+   *     either way, but a second copy in the transcript would show the question
+   *     twice and leave a turn the sync cannot line up with the web copy;
+   *   - the previous answer is deleted, so the panel shows one reply to one
+   *     question rather than two.
+   *
+   * The old answer is deleted only after the page has ACCEPTED the turn. The
+   * order matters: a submit that never reached the page answers `ok: false`, and
+   * removing the reader's answer then would turn a failed click into data loss.
+   * The page streams the replacement into the transcript from there, so the gap
+   * in which the question has no answer is the few seconds the model is thinking
+   * — which is exactly what the reader asked to see.
+   *
+   * @param chatId - the conversation the reader is looking at.
+   * @param messageId - the assistant message to replace.
+   */
+  async regenerate(chatId: string, messageId: string): Promise<SendResult> {
+    const chat = this.store.getChat(chatId)
+    const target = chat?.messages.find(message => message.id === messageId)
+    if (chat === undefined || target === undefined) {
+      // No code: `SendResult`'s codes are the five the ENGINE can produce
+      // (NEED_LOGIN / PAGE_CHANGED / TIMEOUT / NETWORK / BUSY), and "this answer
+      // is gone" is none of them — it is a request about a transcript the engine
+      // no longer holds. The sentence is the whole answer.
+      return { ok: false, error: '找不到这条回复，可能已经被删除了。' }
+    }
+    if (target.role !== 'assistant') {
+      return { ok: false, error: '只有回复可以重新生成。' }
+    }
+    /*
+     * The question to re-ask: the newest user message ABOVE this answer. Walking
+     * back from the target rather than taking the chat's last user row is what
+     * makes regenerating a MIDDLE answer possible later without changing this
+     * method — and it is also the safe read today, because the target is the row
+     * the reader pressed the button on, not whatever the page happens to be on.
+     */
+    const index = chat.messages.indexOf(target)
+    let question: string | undefined
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const candidate = chat.messages[cursor]
+      if (candidate?.role === 'user') { question = candidate.content; break }
+    }
+    if (question === undefined || question.trim() === '') {
+      return { ok: false, error: '这条回复上面没有找到对应的问题，无法重新生成。' }
+    }
+    /*
+     * The old answer goes only once the page has TAKEN the turn. A submit that
+     * never reached the page answers `ok: false`, and deleting the reader's
+     * answer then would turn a failed click into data loss — the one outcome
+     * worse than keeping an answer they wanted replaced.
+     */
+    const result = await this.queue.run(async () => {
+      this.sendInFlight = true
+      try {
+        return await this.sendImpl(question, false, undefined, { reuseLastUser: true })
+      } finally {
+        this.sendInFlight = false
+      }
+    })
+    /*
+     * `ok` alone is the test, because the reused question is ALREADY in the
+     * transcript — `stored` stays false on this path (see `sendImpl`). `ok` means
+     * the page accepted the turn, so a replacement answer is on its way.
+     */
+    if (result.ok === true) {
+      this.store.deleteMessage(chatId, messageId)
+      this.store.flush()
+    }
+    return result
+  }
+
+  /**
+   * 分享 one answer: create a PUBLIC link for it on the reader's account.
+   *
+   * Kept as the single-answer entry point the tests and the tools use; it is
+   * exactly {@link shareMessages} with one id.
+   *
+   * @param chatId - the local conversation the answer belongs to.
+   * @param messageId - the local message id of the answer to share.
+   */
+  async shareMessage(chatId: string, messageId: string): Promise<{ ok: boolean; url?: string; error?: string; created?: boolean }> {
+    return await this.shareMessages(chatId, [messageId])
+  }
+
+  /**
+   * 分享 a SET of answers: one PUBLIC link covering every chosen turn.
+   *
+   * The page's 分享 is not "copy the answer somewhere" — it is
+   * `POST /api/v0/share/create` behind a two-step UI, and what it produces is a
+   * URL anyone can open, logged in or not (`shareCreateLink: "Create public
+   * link"` in the page's own dictionary, and the route table marks `/share/:id`
+   * `public: true`). The plugin therefore treats it as PUBLISHING, not as a
+   * clipboard action:
+   *
+   *   - the reader confirms the exact LIST in the panel first, against the page's
+   *     own warning sentence (see the share picker in DSchatPanel);
+   *   - the conversation on screen must be THIS chat's own web conversation,
+   *     verified before anything is clicked — a share created from the wrong
+   *     conversation would publish the wrong text under the reader's name, which
+   *     is the one mistake here that cannot be undone by a second click;
+   *   - every answer is located by CONTENT, exactly as a rating is (see
+   *     `reactInner`): position is not trustworthy across the two copies.
+   *
+   * MULTI-TURN is the page's own model, not an invention: its 分享 puts the page
+   * into a selection mode (`enterSelection(sessionId, [messageId])`) whose bar
+   * counts 「已选择 N 组对话」, and the create request takes the whole
+   * `message_ids` list at once (see docs/probe-2026-10-14-share-flow.md). This
+   * driver enters the mode through the FIRST answer's 分享 control — the same
+   * click the single-answer version used — and then presses the injected
+   * checkbox of every other chosen answer, exactly as a reader would.
+   *
+   * NOTHING IS PUBLISHED UNLESS THE PAGE AGREES WITH THE LIST. After selecting,
+   * the bar's own count is compared with the number of chosen turns; a mismatch
+   * (a checkbox that did not take, an answer that is no longer on the page)
+   * leaves the mode through 取消 and reports, rather than creating a link whose
+   * contents the reader did not choose.
+   *
+   * @param chatId - the local conversation the answers belong to.
+   * @param messageIds - the local ids of the answers to share, in panel order.
+   */
+  async shareMessages(chatId: string, messageIds: readonly string[]): Promise<{ ok: boolean; url?: string; error?: string; created?: boolean }> {
+    const chat = this.store.getChat(chatId)
+    if (chat === undefined) return { ok: false, error: '找不到这段对话，可能已经被删除了。' }
+    const wanted = Array.from(new Set(messageIds))
+    if (wanted.length === 0) return { ok: false, error: '没有选择要分享的问答。' }
+    const targets: DSchatMessage[] = []
+    for (const id of wanted) {
+      const message = chat.messages.find(candidate => candidate.id === id)
+      if (message === undefined) return { ok: false, error: '找不到要分享的回复，可能已经被删除了。' }
+      if (message.role !== 'assistant') return { ok: false, error: '只能分享回复。' }
+      targets.push(message)
+    }
+    /*
+     * A share is created FOR a web session, and the page creates it for whatever
+     * conversation it is showing. Without an id there is nothing to line the two
+     * up, so this refuses rather than sharing whatever happens to be on screen.
+     */
+    const sessionId = chat.webSessionId ?? ''
+    if (sessionId === '') {
+      return {
+        ok: false,
+        error: '这段对话还没有对应的网页端会话（先在面板里发一条消息，或用「从网页同步」对齐一次），无法创建分享链接。',
+      }
+    }
+    const expectations = targets.map(target => answerMatchExpectation(target.content))
+    const unlocatable = expectations.filter(expectation => expectation.sample === '').length
+    if (unlocatable > 0) {
+      return {
+        ok: false,
+        error: unlocatable === 1
+          ? '这条回复没有可以用于比对的正文，无法在网页端定位。'
+          : `所选回复里有 ${unlocatable} 条没有可以用于比对的正文，无法在网页端定位。`,
+      }
+    }
+    if (!this.isPageAlive()) {
+      const woken = await this.wake().catch(() => undefined)
+      if (woken === undefined || woken.ok !== true) return { ok: false, error: '网页端没有启动，无法创建分享链接。' }
+      if (woken.loggedIn !== true) return { ok: false, error: '网页端未登录，无法创建分享链接。' }
+    }
+    return await this.queue.run(async () => {
+      try {
+        const page = this.page
+        if (page === undefined) return { ok: false, error: '浏览器未启动' }
+        /*
+         * THE CONVERSATION CHECK. The share endpoint takes the session id from the
+         * page's own state, so the page has to BE this conversation before a click
+         * is worth anything.
+         */
+        if (webSessionIdFromUrl(page.url()) !== sessionId) {
+          const opened = await this.openWebConversation(sessionId, chat.title)
+          if (opened.ok !== true) {
+            return { ok: false, error: `没有打开这段对话的网页端页面（${opened.error ?? '未知原因'}），分享已取消。` }
+          }
+        }
+        /** The `share_id` the create request answered with, once it has. */
+        let shareId: string | undefined
+        /** Detach the response listener; set below, before anything can throw. */
+        let stopWatching: () => void = () => undefined
+        /*
+         * THE AUTHORITATIVE SOURCE for the link.
+         *
+         * The page builds the URL from the `share_id` this request answers with
+         * (see `shareUrlFrom`), and the dialog's own link field is only a
+         * rendering of it. Watching the response also means the value is in hand
+         * even if the dialog is closed or re-rendered before it can be read.
+         */
+        const captured = new Promise<void>(resolve => {
+          const onResponse = (response: { url(): string; json(): Promise<unknown> }): void => {
+            if (!response.url().includes('/api/v0/share/create')) return
+            void response.json().then(body => {
+              const id = (body as { data?: { biz_data?: { share_id?: unknown } } })?.data?.biz_data?.share_id
+              if (typeof id === 'string' && id !== '') shareId = id
+            }).catch(() => undefined).finally(() => { resolve() })
+          }
+          page.on('response', onResponse)
+          stopWatching = () => { page.off('response', onResponse) }
+        })
+        let outcome: Awaited<ReturnType<DeepSeekWebEngine['reactInner']>>
+        try {
+          outcome = await this.reactInner(expectations[0]!, null, undefined, undefined, undefined, 'share', expectations)
+          // The request may still be in flight when the dialog paints the link;
+          // give the capture a moment, then stop caring — the DOM field is the
+          // fallback.
+          await Promise.race([captured, new Promise<void>(resolve => setTimeout(resolve, 1_500))])
+        } finally {
+          // A listener left on the page would read every later response.
+          stopWatching()
+        }
+        if (outcome.ok !== true) {
+          const detail = outcome.reason
+          /*
+           * `pressed-no-link` is the one failure that may have PUBLISHED: the page
+           * disables cancelling while the create request is in flight, so a
+           * confirmed click is a commit. Saying so is the whole point — a silent
+           * "failed" would leave a public link the reader does not know about.
+           */
+          if (outcome.created === true || detail === 'pressed-no-link') {
+            return {
+              ok: false,
+              created: true,
+              error: '链接可能已经创建，但没有读到它的地址。请在网页端「设置 → 数据管理」里查看并删除多余的链接。',
+            }
+          }
+          return { ok: false, error: shareFailureSentence(detail) }
+        }
+        const fromDom = typeof outcome.url === 'string' && outcome.url !== '' ? outcome.url : undefined
+        const url = shareId === undefined ? fromDom : shareUrlFrom(shareId, page.url())
+        if (url === undefined) {
+          return {
+            ok: false,
+            created: true,
+            error: '链接可能已经创建，但没有读到它的地址。请在网页端「设置 → 数据管理」里查看并删除多余的链接。',
+          }
+        }
+        return { ok: true, url, created: true }
+      } catch (error) {
+        return { ok: false, error: String(error) }
+      }
+    })
+  }
+
+  /**
+   * 点赞 / 点踩 one answer on the WEB page.
+   *
+   * The feedback belongs to the reader's DeepSeek account, so it has to be given
+   * where the account is: the page's own action-row control. What that costs is
+   * measured on the live page (see FINDINGS.md in the probe transcript this was
+   * written from):
+   *
+   *   1. the six controls have NO stable identifier. They are
+   *      `div[role=button]` with no `aria-label` (only 朗读 has one) and no
+   *      `data-*`; the name lives in a tooltip that appears on hover. Their ORDER
+   *      is the identity: 复制 · 重新生成 · 喜欢 · 不喜欢 · 朗读 · 分享.
+   *   2. the list is VIRTUALIZED, so an old answer's row exists only while it is
+   *      scrolled into range.
+   *   3. 喜欢 is a request and a toggle; 点踩 opens a 反馈 dialog (four required
+   *      reasons + an optional note + 取消/提交) and NOTHING is submitted until
+   *      提交 is pressed. A dislike therefore carries a reason and a note.
+   *
+   * @param chatId - the local conversation the answer belongs to.
+   * @param messageId - the local message id of the answer.
+   * @param rating - 'like', 'dislike', or null to clear an existing rating.
+   * @param options.reason - the 反馈 reason for a dislike (ignored otherwise).
+   * @param options.note - optional sentence for the 反馈 dialog's textarea.
+   */
+  async reactToMessage(
+    chatId: string,
+    messageId: string,
+    rating: 'like' | 'dislike' | null,
+    options?: {
+      reason?: 'harmful' | 'false' | 'unhelpful' | 'other'
+      note?: string
+      /**
+       * Which rating the answer currently shows, when `rating` is null.
+       *
+       * The page's toggle lives on the button that was pressed, so clearing has
+       * to press THAT one. The panel knows (it mirrors what it sent, see
+       * `reactions`); a caller that does not can omit it and the like button is
+       * the default.
+       */
+      clearing?: 'like' | 'dislike'
+    },
+  ): Promise<{ ok: boolean; error?: string; state?: 'like' | 'dislike' | 'none' }> {
+    const chat = this.store.getChat(chatId)
+    const target = chat?.messages.find(message => message.id === messageId)
+    if (chat === undefined || target === undefined) {
+      return { ok: false, error: '找不到这条回复，可能已经被删除了。' }
+    }
+    if (target.role !== 'assistant') return { ok: false, error: '只有回复可以评价。' }
+    /*
+     * WHAT identifies the row: the answer's own opening words. See `reactInner`
+     * for why position is not good enough — the short version is that a local and
+     * a web copy of a conversation can legitimately differ, and rating the wrong
+     * answer on the reader's account is a failure they can neither see nor undo
+     * from here.
+     */
+    const expectation = answerMatchExpectation(target.content)
+    if (expectation.sample === '') {
+      return { ok: false, error: '这条回复没有可以用于比对的正文，无法在网页端定位。' }
+    }
+    if (!this.isPageAlive()) {
+      const woken = await this.wake().catch(() => undefined)
+      if (woken === undefined || woken.ok !== true) {
+        return { ok: false, error: '网页端没有启动，无法同步评价到网页端。' }
+      }
+      if (woken.loggedIn !== true) return { ok: false, error: '网页端未登录，无法同步评价到网页端。' }
+    }
+    // Two clicks must not race each other through the same scroll walk.
+    return await this.queue.run(async () => {
+      try {
+        const outcome = await this.reactInner(expectation, rating, options?.reason, options?.note, options?.clearing)
+        if (outcome.ok !== true) return { ok: false, error: ratingFailureSentence(outcome.reason) }
+        return { ok: true, state: outcome.state ?? (rating === null ? 'none' : rating) }
+      } catch (error) {
+        return { ok: false, error: String(error) }
+      }
+    })
+  }
+
+  /**
+   * The scroll-and-click half of {@link reactToMessage}.
+   *
+   * WHAT IDENTIFIES THE ROW: the answer's own TEXT, not its position.
+   *
+   * Position was the first design and it is the wrong one here. The page's rows
+   * are virtualized, only a window of them is ever in the DOM, and the local
+   * transcript and the web conversation can legitimately differ — a turn deleted
+   * in the browser, a conversation recovered from an old scrape, a reply this
+   * panel never saw. Rating "the 3rd answer" when one of those is true rates
+   * somebody else's answer on the reader's account, silently. The text is what
+   * the reader pressed the button ON, so the text is what is matched; when it
+   * cannot be found, nothing is clicked and the reason goes back to the panel.
+   *
+   * The comparison is a normalized PREFIX (`matchKey`): the stored message is
+   * markdown, the DOM is re-serialized HTML, and the two differ in whitespace,
+   * emphasis markers and code fences within the first few dozen characters. A
+   * canonical prefix of letters and digits survives all of that and is far too
+   * specific to collide between two answers (the same reasoning as
+   * `repeatsPreviousReply`, one level down).
+   */
+  private async reactInner(
+    expectation: { sample: string; prefixed: boolean },
+    rating: 'like' | 'dislike' | null,
+    reason?: 'harmful' | 'false' | 'unhelpful' | 'other',
+    note?: string,
+    clearing?: 'like' | 'dislike',
+    mode: 'rate' | 'share' = 'rate',
+    /**
+     * 分享 only: every answer the reader chose, in panel order.
+     *
+     * The first entry is the one whose 分享 control opens the page's selection
+     * mode; the rest are pressed as checkboxes inside that mode (see
+     * `addToSelection`). A single-answer share passes one entry — the behaviour
+     * this method had before the picker existed.
+     */
+    targets?: readonly { sample: string; prefixed: boolean }[],
+  ): Promise<
+    | { ok: true; state?: 'like' | 'dislike' | 'none'; url?: string }
+    | { ok: false; reason: string; created?: boolean }
+  > {
+    const page = this.page
+    if (page === undefined) return { ok: false, reason: 'browser-not-started' }
+    /** What to walk for; the first entry is the row the walk must find. */
+    const wanted: readonly { sample: string; prefixed: boolean }[] =
+      mode === 'share' && targets !== undefined && targets.length > 0 ? targets : [expectation]
+    /*
+     * One long walk inside the page, for the same reason the harvest is one: a
+     * round trip to Node in the middle of a scroll loop costs more than the
+     * scroll it precedes. The budget is a hard stop, so a page that never mounts
+     * the row reports instead of hanging.
+     */
+    const outcome = await page.evaluate(async (args: {
+      itemSelector: string
+      sample: string
+      prefixed: boolean
+      /*
+       * What to do with the row once it is found. ONE walk serves both: locating
+       * the answer is the expensive, fragile half (a content-matched scroll
+       * sweep), and 分享 needs exactly the same answer located as 点赞 does.
+       */
+      mode: 'rate' | 'share'
+      /** 分享 only: every chosen answer, first one first (see `reactInner`). */
+      extraTargets: Array<{ sample: string; prefixed: boolean }>
+      /** 分享 only: how many turns the page's own bar must end up counting. */
+      expectedGroups: number
+      rating?: 'like' | 'dislike' | null
+      /** Which rating the answer currently shows — only read when clearing. */
+      clearing?: 'like' | 'dislike' | null
+      reason?: 'harmful' | 'false' | 'unhelpful' | 'other'
+      note?: string
+      budgetMs: number
+    }): Promise<{ ok: boolean; reason?: string; clicked?: number; scanned?: number; url?: string; created?: boolean }> => {
+      const sleep = (ms: number): Promise<void> => new Promise(resolve => window.setTimeout(resolve, ms))
+      /** Wait for the virtualizer's commit to paint after a scroll. */
+      const settle = async (): Promise<void> => {
+        await Promise.race([
+          new Promise<void>(resolve => {
+            let frames = 0
+            const tick = (): void => {
+              frames += 1
+              if (frames >= 2) resolve()
+              else window.requestAnimationFrame(tick)
+            }
+            window.requestAnimationFrame(tick)
+          }),
+          sleep(60),
+        ])
+        await sleep(6)
+      }
+      const keyOf = (item: Element): string => item.getAttribute('data-virtual-list-item-key') ?? ''
+      /** True when a row holds an assistant answer, as opposed to a question. */
+      const isAnswer = (item: Element): boolean =>
+        item.querySelector('.ds-assistant-message-main-content') !== null
+        || item.querySelector('.ds-think-content') !== null
+      /*
+       * The row's clickable controls.
+       *
+       * Structure, measured on the live page: the answer item's children are
+       * `[div.ds-message._63c77b1, div.ds-flex._0a3d93b]`, and the second one
+       * holds `div.ds-flex._965abe9` — the row. Taking the LAST element child is
+       * what the page does in both variants the probe recorded (the newest answer
+       * adds a modifier class, not a child).
+       */
+      const rowOf = (item: Element): Element | null => {
+        const children = item.children
+        return children.length < 2 ? null : children[children.length - 1]!.firstElementChild
+      }
+      /**
+       * The controls of one row.
+       *
+       * `[role=button]` alone is NOT the row: a code block inside the answer is
+       * rendered by the same component, and its 复制 button is a
+       * `div[role=button]` too — a two-code-block answer showed TEN buttons, with
+       * the code-block ones first, which would shift every index. Descending only
+       * the row's own subtree keeps them out; the extra guard is for the case
+       * where the page ever moves a control under `.ds-markdown`.
+       */
+      const controlsOf = (row: Element): Element[] =>
+        Array.from(row.querySelectorAll('[role="button"]'))
+          .filter(button => button.closest('.ds-markdown') === null)
+
+      /*
+       * The list's scroll container. `.ds-virtual-list` is the page's own class
+       * for it (the probe read clientHeight 453 on a 190-message conversation);
+       * the common-ancestor walk below is the fallback, because a row can contain
+       * its own scrollable box (a code block, a collapsible reasoning area) and
+       * scrolling THAT instead of the transcript is a silent no-op.
+       */
+      let box: HTMLElement | null = document.querySelector<HTMLElement>('.ds-virtual-list')
+      if (box === null) {
+        const mounted = Array.from(document.querySelectorAll(args.itemSelector))
+        if (mounted.length > 0) {
+          let common: Element | null = mounted[0]!
+          for (const row of mounted.slice(1)) {
+            while (common !== null && !common.contains(row)) common = common.parentElement
+          }
+          let element: Element | null = common
+          while (element !== null && element !== document.body) {
+            const style = getComputedStyle(element)
+            if (/(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 4) {
+              box = element as HTMLElement
+              break
+            }
+            element = element.parentElement
+          }
+        }
+      }
+      if (box === null) return { ok: false, reason: 'no-scroller' }
+      const scroller = box
+      const viewport = Math.max(160, scroller.clientHeight)
+
+      const itemOf = (key: string): HTMLElement | null => {
+        for (const item of Array.from(document.querySelectorAll(args.itemSelector))) {
+          if (keyOf(item) === key) return item as HTMLElement
+        }
+        return null
+      }
+      let mounted: Array<{ key: string; item: HTMLElement; top: number; height: number }> = []
+      const sample = (): void => {
+        mounted = []
+        for (const element of Array.from(document.querySelectorAll(args.itemSelector))) {
+          const key = keyOf(element)
+          if (key === '') continue
+          const item = element as HTMLElement
+          mounted.push({ key, item, top: item.offsetTop, height: item.offsetHeight })
+        }
+      }
+      const scrollTo = async (top: number): Promise<void> => {
+        const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        scroller.scrollTop = Math.max(0, Math.min(top, max))
+        await settle()
+        sample()
+      }
+      /**
+       * The answer row's normalized opening, as the page renders it.
+       *
+       * `cloneNode` rather than `textContent`: the answer is split across block
+       * elements, and `textContent` would run the last word of one paragraph into
+       * the first word of the next — which is exactly where a prefix comparison
+       * would then disagree with the stored markdown.
+       *
+       * The FULL letter string comes back, not a prefix cut to one sample's
+       * length: a multi-turn share compares the same row against several samples
+       * of different lengths, and cutting here would decide that comparison for
+       * every caller (see `matchesTarget`).
+       */
+      const openingOf = (item: Element): string => {
+        const body = item.querySelector('.ds-assistant-message-main-content')
+          ?? item.querySelector('.ds-think-content')
+          ?? item.querySelector('.ds-markdown')
+        if (body === null) return ''
+        const clone = body.cloneNode(true) as HTMLElement
+        // The code-block banners ride along inside `.ds-markdown`.
+        for (const junk of clone.querySelectorAll('.dsh-dschat-none, [class*="code-copy"], [class*="codeCopy"], button, svg')) junk.remove()
+        const text = (clone.innerText ?? clone.textContent ?? '').replace(/\s+/g, ' ')
+        return matchKey(text)
+      }
+      /** Same normalization as the host's `answerMatchKey`, in the page. */
+      const matchKey = (text: string): string => text.replace(/[^\p{L}\p{N}]/gu, '')
+      /**
+       * Whether one row's rendered opening is the answer a sample was taken from.
+       *
+       * `prefixed` means the sample is a TRUNCATION of the stored answer, so the
+       * page compares that many characters — which is what stops a stored copy
+       * that is only a few characters long from matching every answer on screen.
+       */
+      const matchesTarget = (letters: string, target: { sample: string; prefixed: boolean }): boolean =>
+        target.prefixed ? letters.slice(0, target.sample.length) === target.sample : letters === target.sample
+      /**
+       * The 反馈 dialog's reason labels, in the page.
+       *
+       * Matched by TEXT rather than by index: the order the page renders them in
+       * is a presentation detail (the probe read 有害/不安全 · 虚假信息 · 没有帮助
+       * · 其他) and an English interface would show four different strings in a
+       * possibly different order. Each entry carries every spelling it may appear
+       * as.
+       */
+      const REASON_LABELS: Record<string, string[]> = {
+        harmful: ['有害', '不安全', 'harmful', 'unsafe'],
+        false: ['虚假', 'false', 'misinformation', 'inaccurate'],
+        unhelpful: ['没有帮助', '无帮助', 'unhelpful', 'nothelpful'],
+        other: ['其他', 'other'],
+      }
+
+      /*
+       * WALK, from the newest row backwards.
+       *
+       * Backwards because the answer the reader just read is near the bottom, and
+       * a hit there ends the walk immediately — the common case costs one grid
+       * step rather than a sweep of the whole conversation. The grid step is half
+       * a viewport so the mounted window of one position (which is larger than a
+       * viewport) overlaps the next one: no row between two samples can be
+       * skipped.
+       */
+      let hits = 0
+      sample()
+      const initialTop = scroller.scrollTop
+      const started = performance.now()
+      const expired = (): boolean => performance.now() - started > args.budgetMs
+      const check = (): HTMLElement | null => {
+        for (const entry of mounted) {
+          if (!isAnswer(entry.item)) continue
+          if (args.sample === '' || matchesTarget(openingOf(entry.item), { sample: args.sample, prefixed: args.prefixed })) return entry.item
+        }
+        return null
+      }
+      let found = check()
+      hits += 1
+      const step = Math.max(120, Math.round(viewport / 2))
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+      for (let top = initialTop; !expired() && found === null && top >= 0; top -= step) {
+        await scrollTo(top)
+        hits += 1
+        found = check()
+      }
+      /*
+       * Nothing below, so the answer is ABOVE where the reader was: sweep down in
+       * the other direction. This is the path an old answer takes when the panel
+       * is scrolled to the newest turn.
+       */
+      for (let top = initialTop; !expired() && found === null && top <= max; top += step) {
+        await scrollTo(top)
+        hits += 1
+        found = check()
+      }
+      const item = found
+      if (item === null) return { ok: false, reason: 'not-found', scanned: hits }
+
+      const row = rowOf(item)
+      if (row === null) return { ok: false, reason: 'no-action-row' }
+      const controls = controlsOf(row)
+      /*
+       * The ORDER is the identity — the page's controls carry no label to match on
+       * (only 朗读 has an `aria-label`) — so a row that does not hold the six the
+       * page ships is REPORTED rather than pressed: clicking index 3 of a
+       * four-control row would rate the wrong thing on the reader's account.
+       */
+      if (controls.length < 4) return { ok: false, reason: `controls:${controls.length}` }
+      if (args.mode === 'share') return await shareFromRow(item, controls, hits)
+      /*
+       * 2 = 喜欢, 3 = 不喜欢 — and clearing presses the SAME button that was pressed
+       * to set the rating, because that is the page's own toggle (verified: a
+       * second 喜欢 click posts again and returns the icon to its outline). So the
+       * index has to follow what the answer currently shows, not what the reader
+       * asked for: clicking 喜欢 to clear an existing 点踩 would POST a like onto
+       * an answer they just rejected.
+       */
+      const current = args.clearing === 'dislike' ? 3 : 2
+      const index = args.rating === null ? current : (args.rating === 'dislike' ? 3 : 2)
+      const button = controls[index]
+      if (button === undefined) return { ok: false, reason: `controls:${controls.length}` }
+      button.scrollIntoView({ block: 'center' })
+      await sleep(40)
+      ;(button as HTMLElement).click()
+      await sleep(240)
+
+      /*
+       * 点踩 is NOT a request: it opens the 反馈 dialog, which is a reason form
+       * (four required radios + an optional note) with 取消 / 提交. The reason the
+       * reader chose in the panel is applied here, so the rating that reaches
+       * their DeepSeek account says what they actually meant.
+       */
+      if (args.rating === 'dislike') {
+        const dialog = await waitForDialog()
+        if (dialog === null) return { ok: false, reason: 'no-dialog' }
+        const radios = Array.from(dialog.querySelectorAll<HTMLElement>('label.ds-radio-button'))
+        if (radios.length === 0) return { ok: false, reason: 'no-reasons' }
+        const wanted = REASON_LABELS[args.reason ?? 'unhelpful'] ?? REASON_LABELS.unhelpful
+        const chosen = radios.find(radio => {
+          const text = (radio.textContent ?? '').replace(/\s+/g, '')
+          return wanted.some(label => text.includes(label))
+        }) ?? radios[Math.min(radios.length - 1, 2)]!
+        chosen.click()
+        await sleep(80)
+        if (typeof args.note === 'string' && args.note.trim() !== '') {
+          const area = dialog.querySelector<HTMLTextAreaElement>('textarea')
+          if (area !== null) {
+            // A real input event: the dialog's own state is what 提交 sends.
+            area.focus()
+            area.value = args.note
+            area.dispatchEvent(new Event('input', { bubbles: true }))
+            await sleep(60)
+          }
+        }
+        const submit = Array.from(dialog.querySelectorAll<HTMLElement>('[role="button"]'))
+          .find(control => /提交|submit|send/i.test(control.textContent ?? ''))
+        if (submit === undefined) {
+          // Nothing is left half-done: the dialog is dismissed rather than
+          // abandoned on screen, where the reader would have to find it.
+          const cancel = Array.from(dialog.querySelectorAll<HTMLElement>('[role="button"]'))
+            .find(control => /取消|cancel/i.test(control.textContent ?? ''))
+          cancel?.click()
+          return { ok: false, reason: 'no-submit' }
+        }
+        submit.click()
+        await sleep(320)
+        return { ok: true, clicked: 3, scanned: hits }
+      }
+
+      return { ok: true, clicked: index, scanned: hits }
+
+      /** The 反馈 dialog, once the page has painted it. */
+      async function waitForDialog(): Promise<HTMLElement | null> {
+        return await waitFor(() => dialogElement())
+      }
+
+      /** The page's modal element, whatever it is showing. */
+      function dialogElement(): HTMLElement | null {
+        return document.querySelector<HTMLElement>('[role="dialog"].ds-modal-content')
+          ?? document.querySelector<HTMLElement>('.ds-modal-content[role="dialog"]')
+      }
+
+      /**
+       * Poll `read` until it returns something, or give up.
+       *
+       * The page paints its bars, dialogs and toasts on its own schedule (and a
+       * create request can take a second), so every step of the share flow waits
+       * for a THING rather than for a fixed delay.
+       */
+      async function waitFor<T>(read: () => T | null, attempts = 40): Promise<T | null> {
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          const value = read()
+          if (value !== null) return value
+          await sleep(60)
+        }
+        return null
+      }
+
+      /** A control inside `scope` whose text matches, by role. */
+      function controlByText(scope: ParentNode, pattern: RegExp): HTMLElement | null {
+        const candidates = Array.from(scope.querySelectorAll<HTMLElement>('[role="button"], button'))
+        // The modal's footer holds the action; without this the search can reach
+        // a same-named control on the page behind it.
+        return candidates.reverse().find(control => pattern.test((control.textContent ?? '').trim())) ?? null
+      }
+
+      /** The message-selection bar 分享 opens. */
+      function selectionBar(): HTMLElement | null {
+        const cancel = Array.from(document.querySelectorAll<HTMLElement>('[role="button"], button'))
+          .find(control => /^\s*(取消|cancel)\s*$/i.test(control.textContent ?? ''))
+        if (cancel === undefined) return null
+        // The bar is the nearest common ancestor of 取消 and the create control.
+        const create = controlByText(document, /创建分享链接|create public link/i)
+        if (create === null) return null
+        let node: Element | null = cancel
+        while (node !== null && !node.contains(create)) node = node.parentElement
+        return node as HTMLElement | null
+      }
+
+      /** Leave the selection mode. Idempotent: a second call finds no bar. */
+      async function exitSelection(): Promise<void> {
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          const bar = selectionBar()
+          if (bar === null) return
+          const cancel = Array.from(bar.querySelectorAll<HTMLElement>('[role="button"], button'))
+            .find(control => /^\s*(取消|cancel)\s*$/i.test(control.textContent ?? ''))
+          if (cancel === undefined) return
+          cancel.click()
+          await sleep(120)
+        }
+      }
+
+      /**
+       * How many 组对话 the page's own bar says are selected.
+       *
+       * This is the ONE number that can be trusted about a share selection: the
+       * per-item checkboxes carry no readable state (the probe found the same
+       * modifier class on a selected and an unselected item), while the bar's
+       * 「已选择 N 组对话」 is the count the page itself renders from its store.
+       * Read leniently — the English build words it differently — and reported as
+       * null when no number is there at all, because a wrong selection must never
+       * look like a right one.
+       */
+      function selectionCount(bar: HTMLElement): number | null {
+        const text = bar.textContent ?? ''
+        const nearby = /(\d+)\s*(?:组|conversations?|messages?)/i.exec(text)
+        const loose = nearby ?? /(\d+)/.exec(text)
+        if (loose === null) return null
+        const value = Number(loose[1])
+        return Number.isFinite(value) ? value : null
+      }
+
+      /** The checkbox the page injects into a row while the selection mode is up. */
+      function checkboxOf(item: Element): HTMLElement | null {
+        const wrapper = item.querySelector('.ds-checkbox-align-wrapper') ?? item
+        return wrapper.querySelector<HTMLElement>('.ds-checkbox')
+          ?? wrapper.querySelector<HTMLElement>('input[type="checkbox"]')
+      }
+
+      /**
+       * Press a checkbox the way a reader does.
+       *
+       * A bare `click()` fires one click event, which is enough for a React
+       * `onClick` — but the page's checkbox is a `div`, and a control that
+       * listened on `pointerdown`/`mousedown` would ignore it. The full gesture
+       * below ends in exactly ONE click, so both kinds of handler see a press and
+       * neither sees two.
+       */
+      function pressCheckbox(box: HTMLElement): void {
+        const options = { bubbles: true, cancelable: true, view: window, button: 0 }
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+          const event = type.startsWith('pointer') ? new PointerEvent(type, options) : new MouseEvent(type, options)
+          box.dispatchEvent(event)
+        }
+        box.click()
+      }
+
+      /**
+       * Add every remaining chosen turn to the open selection.
+       *
+       * The entry turn is already selected — the page's 分享 control selects its
+       * question+answer pair — so this presses the injected checkbox of one row
+       * per remaining turn, sweeping the whole list from the TOP. Top-down, not
+       * from wherever the entry row happened to be: a checkbox exists for every
+       * mounted row, and a sweep from the top visits each row once no matter how
+       * the list is virtualized.
+       *
+       * Every press is CONFIRMED against the bar's count before the next one, and
+       * a press that does not move it stops the whole thing: a share whose
+       * selection silently lost a turn would publish the wrong set under the
+       * reader's name.
+       *
+       * @returns null on success, or the reason code to abort with.
+       */
+      async function addToSelection(bar: HTMLElement, pending: Array<{ sample: string; prefixed: boolean }>, entryKey: string): Promise<string | null> {
+        const left = pending.slice()
+        const used = new Set<string>()
+        let top = 0
+        for (let guard = 0; left.length > 0 && guard < 400; guard += 1) {
+          if (expired()) break
+          await scrollTo(top)
+          for (const entry of mounted) {
+            if (left.length === 0) break
+            if (!isAnswer(entry.item)) continue
+            if (entry.key === entryKey || used.has(entry.key)) continue
+            const letters = openingOf(entry.item)
+            const index = left.findIndex(target => matchesTarget(letters, target))
+            if (index < 0) continue
+            const box = checkboxOf(entry.item)
+            if (box === null) continue
+            const before = selectionCount(bar)
+            used.add(entry.key)
+            pressCheckbox(box)
+            const raised = await waitFor(() => {
+              const now = selectionCount(bar)
+              return now !== null && (before === null || now > before) ? now : null
+            }, 30)
+            if (raised === null) return `checkbox:${entry.key}`
+            left.splice(index, 1)
+          }
+          const limit = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+          if (top >= limit) break
+          top = Math.min(top + step, limit)
+        }
+        return left.length === 0 ? null : `not-found:${left.length}`
+      }
+
+      /**
+       * 分享 the chosen answers: create ONE PUBLIC link covering all of them.
+       *
+       * The flow is the page's own, in the page's own order: 分享 on the first
+       * row → the selection bar (which arrives with that answer's question+answer
+       * pair already selected) → the other chosen turns' checkboxes → 创建分享链接
+       * (which only OPENS the confirm dialog) → 创建并复制 (which creates the link,
+       * copies it, and leaves it in the dialog).
+       *
+       * The middle step exists because the page uses it as the warning. The panel
+       * shows the same warning before it ever gets here (see the share picker in
+       * DSchatPanel) — this click is not where the reader consents.
+       *
+       * THE LIST IS VERIFIED BEFORE ANYTHING IS CREATED. `expectedGroups` is how
+       * many turns the reader chose; the bar's count has to equal it, or the mode
+       * is left through 取消 with nothing published. Everything after 创建并复制 is
+       * CLEANUP, and it runs on every path out: the selection bar disables every
+       * per-message control while it is up, so leaving it behind would break the
+       * transcript until the reader found the 取消 themselves.
+       */
+      async function shareFromRow(target: Element, rowControls: Element[], scanned: number): Promise<{ ok: boolean; reason?: string; clicked?: number; scanned?: number; url?: string; created?: boolean }> {
+        // 5 = 分享 (see the order note in answer-actions.tsx).
+        const shareButton = rowControls[5]
+        if (shareButton === undefined) return { ok: false, reason: `controls:${rowControls.length}` }
+        const entryKey = keyOf(target)
+        shareButton.scrollIntoView({ block: 'center' })
+        await sleep(40)
+        ;(shareButton as HTMLElement).click()
+        const bar = await waitFor(() => selectionBar())
+        if (bar === null) {
+          await exitSelection()
+          return { ok: false, reason: 'no-bar', scanned }
+        }
+        if (args.extraTargets.length > 1) {
+          const failed = await addToSelection(bar, args.extraTargets.slice(1), entryKey)
+          if (failed !== null) {
+            await exitSelection()
+            return { ok: false, reason: failed, scanned }
+          }
+        }
+        /*
+         * THE GUARD. The page's own count is the only authority on what is about
+         * to be published; a disagreement means the reader's list is not the one
+         * the page holds, and the answer to that is to publish NOTHING.
+         */
+        const groups = selectionCount(bar)
+        if (groups !== args.expectedGroups) {
+          await exitSelection()
+          return { ok: false, reason: `selection:${groups === null ? '?' : groups}/${args.expectedGroups}`, scanned }
+        }
+        const create = controlByText(bar, /创建分享链接|create public link/i)
+        if (create === null) {
+          await exitSelection()
+          return { ok: false, reason: 'no-create-control', scanned }
+        }
+        create.click()
+        const dialog = await waitFor(() => dialogElement())
+        if (dialog === null) {
+          await exitSelection()
+          return { ok: false, reason: 'no-dialog', scanned }
+        }
+        const confirm = controlByText(dialog, /创建并复制|create and copy/i)
+        if (confirm === null) {
+          // Dismiss the dialog the way it offers, then leave the mode.
+          controlByText(dialog, /取消|cancel/i)?.click()
+          await sleep(120)
+          await exitSelection()
+          return { ok: false, reason: 'no-confirm-control', scanned }
+        }
+        /*
+         * PAST THIS LINE THE LINK MAY EXIST. The page's own dialog disables
+         * cancel-on-escape and cancel-on-mask while the request is in flight, so
+         * the click commits: the caller must treat "pressed but nothing read" as
+         * "possibly published", never as "nothing happened".
+         */
+        confirm.click()
+        const field = await waitFor(() => {
+          const node = dialogElement()
+          if (node === null) return null
+          const text = node.querySelector<HTMLElement>('.ds-copyable-text-line__text')?.textContent?.trim() ?? ''
+          return text === '' ? null : text
+        }, 100)
+        // Clean up: the dialog first (its own 完成/关闭/取消), then the bar.
+        const stillOpen = dialogElement()
+        if (stillOpen !== null) {
+          controlByText(stillOpen, /完成|关闭|取消|done|close|cancel/i)?.click()
+          await sleep(140)
+        }
+        await exitSelection()
+        if (field === null) return { ok: false, reason: 'pressed-no-link', created: true, scanned }
+        return { ok: true, url: field, created: true, scanned }
+      }
+    }, {
+      itemSelector: WEB_MESSAGE_ITEM_SELECTOR,
+      sample: expectation.sample,
+      prefixed: expectation.prefixed,
+      mode,
+      extraTargets: wanted.map(target => ({ sample: target.sample, prefixed: target.prefixed })),
+      expectedGroups: wanted.length,
+      rating,
+      clearing: clearing ?? null,
+      ...(reason === undefined ? {} : { reason }),
+      ...(note === undefined ? {} : { note }),
+      budgetMs: 45_000,
+    }).catch((error: unknown) => ({
+      ok: false as const,
+      reason: `evaluate:${String(error)}`,
+      clicked: undefined,
+      scanned: undefined,
+      url: undefined,
+      created: undefined,
+    }))
+
+    if (outcome.ok !== true) {
+      /*
+       * The raw reason goes back, not a sentence: it crosses the page boundary
+       * inside a JSON value, and the two callers say it differently (a failed
+       * rating and a failed share are not the same sentence). See
+       * `ratingFailureSentence` and `shareFailureSentence`.
+       */
+      return {
+        ok: false,
+        reason: outcome.reason ?? 'unknown',
+        ...(outcome.created === true ? { created: true } : {}),
+      }
+    }
+    return {
+      ok: true,
+      state: mode === 'share' ? undefined : (rating === null ? 'none' : rating),
+      ...(outcome.url === undefined ? {} : { url: outcome.url }),
+    }
+  }
+
+  private async sendImpl(
+    text: string,
+    wait: boolean,
+    images?: string[],
+    options?: { reuseLastUser?: boolean },
+  ): Promise<SendResult> {
     this.setLastError(undefined)
     /**
      * Whether the user message reached the transcript. Set once it is appended;
@@ -2997,14 +4079,23 @@ export class DeepSeekWebEngine {
     }
     try {
       const chat = this.store.ensureActiveChat(this.deepThink ? 'deepseek-reasoner' : 'deepseek-chat')
-      const userMessage: DSchatMessage = {
-        id: randomUUID(), role: 'user', content: text, ts: Date.now(),
-        ...(images !== undefined && images.length > 0 ? { attachments: images } : {}),
-      }
-      this.store.appendMessage(chat.id, userMessage)
-      stored = true
-      if (chat.title === '新的对话') {
-        this.store.renameChat(chat.id, text.replace(/\s+/g, ' ').slice(0, 40))
+      /*
+       * 重新生成 re-asks a question the transcript already holds, so it must not
+       * append a second copy of it — see `regenerate`. Everything else about the
+       * turn (typing, submitting, streaming, storing the answer) is identical,
+       * which is why this is a flag on the one send path rather than a second
+       * implementation of it.
+       */
+      if (options?.reuseLastUser !== true) {
+        const userMessage: DSchatMessage = {
+          id: randomUUID(), role: 'user', content: text, ts: Date.now(),
+          ...(images !== undefined && images.length > 0 ? { attachments: images } : {}),
+        }
+        this.store.appendMessage(chat.id, userMessage)
+        stored = true
+        if (chat.title === '新的对话') {
+          this.store.renameChat(chat.id, text.replace(/\s+/g, ' ').slice(0, 40))
+        }
       }
 
       // Type into the real composer and submit with Enter.

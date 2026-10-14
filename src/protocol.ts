@@ -779,6 +779,33 @@ export const DSCHAT_API = {
    */
   attachment: '/api/dsh-dschat/attachment',
   send: '/api/dsh-dschat/send',
+  /**
+   * 重新生成 one answer: re-ask its question and REPLACE the reply.
+   *
+   * A separate route from `send` because the transcript operation is different,
+   * not the browser work: `send` appends a new turn, this one reuses a question
+   * already stored and removes the answer it replaces (see
+   * `DeepSeekWebEngine.regenerate`). Going through `send` would have shown the
+   * question twice.
+   */
+  regenerate: '/api/dsh-dschat/regenerate',
+  /**
+   * 分享 one answer: create a PUBLIC link for it on the reader's web account.
+   *
+   * NOT a clipboard action: the page's own 分享 is `POST /api/v0/share/create`
+   * behind a confirm dialog whose body is the warning 「任何获得链接的人都可以查看
+   * 你分享的对话」. The panel asks for that confirmation before it calls this.
+   */
+  share: '/api/dsh-dschat/share',
+  /**
+   * 点赞 / 点踩 one answer ON THE WEB PAGE.
+   *
+   * The feedback lives on the reader's DeepSeek account, not in this store, so
+   * the engine finds the answer's own row in the page and presses the page's own
+   * control. `chatId` + `messageId` are the local identity of the answer; the
+   * host resolves them to the page's row.
+   */
+  feedback: '/api/dsh-dschat/feedback',
   stop: '/api/dsh-dschat/stop',
   deepThink: '/api/dsh-dschat/deep-think',
   /** The WEB-SEARCH toggle (a POST with `{ enabled }`) — not conversation search. */
@@ -790,6 +817,14 @@ export const DSCHAT_API = {
    */
   transferPreview: '/api/dsh-dschat/transfer-preview',
   exportFile: '/api/dsh-dschat/export',
+  /**
+   * Remember the folder 「导出 markdown」 should write into.
+   *
+   * Set from the export dialog (the native picker, or a path typed by hand) and
+   * persisted on the host, so every later export — and the settings card — uses
+   * the reader's last choice without asking again.
+   */
+  exportDir: '/api/dsh-dschat/export-dir',
   renameChat: '/api/dsh-dschat/rename',
   deleteChat: '/api/dsh-dschat/delete',
   /**

@@ -4,8 +4,8 @@
  * Three behaviours, none of which a static render can see:
  *
  *   1. 新提问置顶  — after a send, the question just asked sits at the TOP of the
- *      visible transcript (12px down), so the answer is readable from its first
- *      line as it streams in.
+ *      visible transcript (flush with the top edge), so the answer is readable
+ *      from its first line as it streams in.
  *   2. 提问导航    — the right-edge rail appears once a conversation has more
  *      than one question AND actually overflows, one tick per question, and a
  *      click moves the viewport to that question.
@@ -168,7 +168,7 @@ test('a send anchors its question to the top, and the navigator jumps between qu
     await view.locator('.dsh-dschat-send').click()
     await view.waitForTimeout(900)
     const offset = await anchorOffset()
-    assert.ok(offset >= 0 && offset <= 24, `the sent question sits at the top of the viewport (measured ${offset}px)`)
+    assert.ok(offset >= -2 && offset <= 4, `the sent question sits at the very top of the viewport (measured ${offset}px)`)
     assert.ok(
       (await view.locator('[data-role="user"]').last().innerText()).includes('第 5 个问题：这条会被锚定在顶部。'),
       'the row that was anchored is the one just sent',

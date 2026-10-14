@@ -34,6 +34,7 @@ import type { DSchatApiCode, DSchatChatSummary, DSchatMessage, DSchatSource, DSc
 import { exportTranscriptFile, previewHarnessTransfer, transferToHarnessSession } from './transfer.ts'
 import type { DistillConfig } from './transfer.ts'
 import { ATTACHMENT_DIR, SAFE_EXTENSION, attachmentDir, isInsideDirectory, isSameOrInsideDirectory } from './attachments.ts'
+import { ensureExportDir } from './export-dir.ts'
 
 /** Cap on JSON request bodies (chat ops are small). */
 const MAX_JSON_BODY_BYTES = 64 * 1024
@@ -584,6 +585,22 @@ function stringField(body: Record<string, unknown> | undefined, name: string): s
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+/**
+ * A list of message ids from a request body.
+ *
+ * The panel sends the picker's selection as `messageIds`; anything that is not a
+ * non-empty string is dropped rather than rejected, because a stale client that
+ * still sends `messageId` alone must keep working (the two are read together,
+ * see the share route). Returns undefined when the field is absent — which is
+ * what "the whole conversation" means to the export route.
+ */
+function messageIdsField(body: Record<string, unknown> | undefined): string[] | undefined {
+  const value = body?.['messageIds']
+  if (!Array.isArray(value)) return undefined
+  const ids = value.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+  return ids.length === 0 ? undefined : ids
+}
+
 /** Resolved runtime settings surfaced to the panel's settings page (read-only). */
 export interface HostSettingsView {
   browserChannel: string
@@ -892,7 +909,21 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
       path: '/api/dsh-dschat/context',
       handler: (req, res) => {
         if (!guard(req, res)) return
-        const view = hostContext?.()
+        /*
+         * A settings read must never fail the whole route.
+         *
+         * The resolved settings include the export directory, which is a REAL
+         * path on disk and is created while it is resolved — and the reader's
+         * remembered folder can point at something that is not there right now
+         * (an unmounted volume, a revoked permission). The panel needs the
+         * workspace list and the cwd in every case, so that resolution is
+         * allowed to fail into "no settings" (the export dialog then shows an
+         * empty field) instead of a 500 that takes the whole context read down.
+         * The export itself stays strict: it resolves the same path and reports
+         * the real reason when the folder cannot be used.
+         */
+        let view: HostContextView | undefined
+        try { view = hostContext?.() } catch { view = undefined }
         writeJson(res, 200, { ok: true, workspaces: view?.workspaces ?? [], cwd: view?.cwd, settings: view?.settings })
       },
     },
@@ -1141,6 +1172,105 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
     },
     {
       kind: 'exact',
+      path: '/api/dsh-dschat/regenerate',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const chatId = stringField(body, 'chatId')
+        const messageId = stringField(body, 'messageId')
+        if (chatId === undefined || messageId === undefined) {
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 或 messageId 字段')
+          return
+        }
+        const result = await engine.regenerate(chatId, messageId)
+        writeJson(res, result.ok ? 200 : 500, result)
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-dschat/feedback',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const chatId = stringField(body, 'chatId')
+        const messageId = stringField(body, 'messageId')
+        if (chatId === undefined || messageId === undefined) {
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 或 messageId 字段')
+          return
+        }
+        /*
+         * `rating` is three-valued and `null` is a REAL value: it means "clear
+         * the rating", which is the page's own toggle behaviour. An absent field
+         * would be indistinguishable from a typo, so it is refused rather than
+         * defaulted — clearing a rating the reader meant to set is the one
+         * mistake this contract can make silently.
+         */
+        const raw = body?.['rating']
+        const rating = raw === null ? null : (raw === 'like' || raw === 'dislike' ? raw : undefined)
+        if (rating === undefined) {
+          failure(res, 400, 'BAD_REQUEST', 'rating 必须是 like、dislike 或 null')
+          return
+        }
+        /*
+         * The 反馈 reason is only meaningful for a dislike, and it is optional:
+         * the page's dialog has a sensible default (「没有帮助」), and a caller
+         * that does not care — or an older panel — must not be refused for
+         * omitting it. An unknown VALUE is refused rather than passed on, because
+         * the engine matches it against the dialog's own labels.
+         */
+        const rawReason = stringField(body, 'reason')
+        const reason = rawReason === 'harmful' || rawReason === 'false' || rawReason === 'unhelpful' || rawReason === 'other'
+          ? rawReason
+          : undefined
+        if (rawReason !== undefined && reason === undefined) {
+          failure(res, 400, 'BAD_REQUEST', 'reason 必须是 harmful、false、unhelpful 或 other')
+          return
+        }
+        // A cap rather than a schema: the dialog's textarea has no length
+        // requirement, and a megabyte of prose in a feedback form is a client
+        // bug, not a message.
+        const rawNote = stringField(body, 'note')
+        const note = rawNote === undefined ? undefined : rawNote.slice(0, 500)
+        /*
+         * Which button a CLEARING click has to press. The page's toggle lives on
+         * the button that was pressed, so clearing a 点踩 by pressing 喜欢 would
+         * post a like onto an answer the reader just rejected.
+         */
+        const rawClearing = stringField(body, 'clearing')
+        const clearing = rawClearing === 'like' || rawClearing === 'dislike' ? rawClearing : undefined
+        const result = await engine.reactToMessage(chatId, messageId, rating, {
+          ...(reason === undefined ? {} : { reason }),
+          ...(note === undefined ? {} : { note }),
+          ...(clearing === undefined ? {} : { clearing }),
+        })
+        writeJson(res, result.ok ? 200 : 500, result)
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-dschat/share',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const chatId = stringField(body, 'chatId')
+        /*
+         * TWO SPELLINGS, one meaning: the picker sends the whole chosen list as
+         * `messageIds`, while the single-answer form (`messageId`) still works so
+         * a panel that predates the picker — and any script — keeps sharing
+         * exactly what it asked for.
+         */
+        const single = stringField(body, 'messageId')
+        const messageIds = messageIdsField(body) ?? (single === undefined ? [] : [single])
+        if (chatId === undefined || messageIds.length === 0) {
+          failure(res, 400, 'BAD_REQUEST', '缺少 chatId 或 messageIds 字段')
+          return
+        }
+        const result = await engine.shareMessages(chatId, messageIds)
+        writeJson(res, result.ok ? 200 : 500, result)
+      },
+    },
+    {
+      kind: 'exact',
       path: '/api/dsh-dschat/stop',
       handler: async (req, res) => {
         if (!guard(req, res, 'write')) return
@@ -1296,10 +1426,53 @@ export function makeRoutes(deps: DSchatRoutesDeps): WebRoute[] {
           return
         }
         try {
-          const { filePath } = exportTranscriptFile({ transcript, cwd })
+          /*
+           * `messageIds` = the picker's selection. Absent means the whole
+           * conversation, which is what every caller before the picker asked for.
+           */
+          const selected = messageIdsField(body)
+          const { filePath } = exportTranscriptFile({
+            transcript,
+            cwd,
+            ...(selected === undefined ? {} : { messageIds: selected }),
+          })
           writeJson(res, 200, { ok: true, filePath, dir: cwd })
         } catch (error) {
           failure(res, 500, 'INTERNAL', String(error))
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-dschat/export-dir',
+      handler: async (req, res) => {
+        if (!guard(req, res, 'write')) return
+        const body = await readJsonBody(req)
+        const requested = stringField(body, 'dir')
+        if (requested === undefined) {
+          failure(res, 400, 'BAD_REQUEST', '缺少 dir：导出目录不能为空')
+          return
+        }
+        try {
+          /*
+           * Remember, then answer with the RESOLVED path.
+           *
+           * The reader picks a folder in the export dialog; this is the one place
+           * that choice is recorded, and it is recorded on the HOST rather than
+           * in the page, because "the folder I used last time" has to survive a
+           * restart and be visible to `resolveExportDir` — which is what the
+           * export route's own fence and the settings card both read. The reply
+           * carries the absolute path so the panel shows exactly what the host
+           * will write into, not what was typed.
+           *
+           * A bad path fails HERE, at the moment it is named, with the real
+           * `mkdir` error — rather than silently on every later export.
+           */
+          const dir = ensureExportDir(requested)
+          store.setExportDirPref(dir)
+          writeJson(res, 200, { ok: true, dir })
+        } catch (error) {
+          failure(res, 400, 'PATH', `导出目录不可用：${String(error)}`)
         }
       },
     },

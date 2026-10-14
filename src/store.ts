@@ -113,6 +113,45 @@ interface StoreFile {
   version: number
   activeChatId?: string
   chats: DSchatTranscript[]
+  /**
+   * Reader preferences that have to survive a restart.
+   *
+   * Optional, and stays absent until something is actually chosen: this file is
+   * machine-written and rewritten on every streamed token, and an empty object
+   * on every install would be one more field to keep honest for nothing. A file
+   * written before this existed loads with `undefined` (see `read`), which is
+   * exactly "nothing chosen yet".
+   */
+  prefs?: StoredPrefs
+}
+
+/** The persisted preference bag. */
+interface StoredPrefs {
+  /**
+   * The folder 「导出 markdown」 last wrote to, when the reader chose one.
+   *
+   * A preference rather than plugin config on purpose: config is YAML the
+   * reader edits on the Plugins page and the loader applies as a reload, while
+   * this is a choice made in a dialog and expected to still be there the next
+   * time that dialog opens — the request was 「用户初次选择后，后面的导出默认写
+   * 用户上次选择的路径」.
+   */
+  exportDir?: string
+}
+
+/**
+ * Read a preference bag off disk, keeping only the fields this build knows.
+ *
+ * Deliberately not a cast. The file is hand-editable and may have been written
+ * by a newer plugin, so a field is only carried over when it has the type its
+ * use site assumes: `exportDir` reaches `mkdirSync` through `resolveExportDir`,
+ * where a number or an object would throw inside a request handler rather than
+ * being ignored.
+ */
+function normalizePrefs(value: unknown): StoredPrefs {
+  if (value === null || typeof value !== 'object') return {}
+  const raw = (value as { exportDir?: unknown }).exportDir
+  return typeof raw === 'string' && raw.trim() !== '' ? { exportDir: raw } : {}
 }
 
 /**
@@ -608,6 +647,9 @@ export class TranscriptStore {
   /** The lock file this instance created, when it holds one. */
   private lockFile: string | undefined
 
+  /** Reader preferences, mirrored on disk with the transcripts (see `StoredPrefs`). */
+  private prefs: StoredPrefs = {}
+
   constructor(options: TranscriptStoreOptions = {}) {
     this.dataDir = options.dataDir ?? defaultDataDir()
     this.file = join(this.dataDir, 'transcripts.json')
@@ -620,6 +662,7 @@ export class TranscriptStore {
     const loaded = this.read()
     this.chats = loaded.chats
     this.activeChatId = loaded.activeChatId
+    this.prefs = loaded.prefs ?? {}
     this.acquireLock()
     if (this.activeChatId !== undefined && !this.chats.some(chat => chat.id === this.activeChatId)) {
       // The first row of the LIST, which is what the reader sees at the top:
@@ -794,6 +837,10 @@ export class TranscriptStore {
         version,
         activeChatId: typeof parsed.activeChatId === 'string' ? parsed.activeChatId : undefined,
         chats: chats.filter(chat => typeof chat?.id === 'string' && Array.isArray(chat.messages)),
+        // A preference is validated field by field rather than trusted: this is a
+        // path that reaches `mkdirSync`, and a non-string would have been handed
+        // to a resolver that assumes one.
+        prefs: normalizePrefs(parsed.prefs),
       }
     } catch (error) {
       // Unparseable JSON: quarantine before the first write can land, or the
@@ -853,7 +900,14 @@ export class TranscriptStore {
     const tmp = `${this.file}.${String(process.pid)}-${randomUUID().slice(0, 8)}.tmp`
     try {
       mkdirSync(this.dataDir, { recursive: true, mode: 0o700 })
-      const payload: StoreFile = { version: STORE_VERSION, activeChatId: this.activeChatId, chats: this.chats }
+      const payload: StoreFile = {
+        version: STORE_VERSION,
+        activeChatId: this.activeChatId,
+        chats: this.chats,
+        // Omitted while nothing has been chosen, so an untouched file keeps its
+        // old shape (see `StoreFile.prefs`).
+        ...(Object.keys(this.prefs).length === 0 ? {} : { prefs: this.prefs }),
+      }
       // Compact, not `null, 2`: this file is machine-written and can reach
       // megabytes, and the streaming path rewrites it. Indenting it doubled both
       // the serialize cost and the bytes for no reader's benefit.
@@ -1368,6 +1422,39 @@ export class TranscriptStore {
     })
   }
 
+  /**
+   * Drop one message.
+   *
+   * The only caller is 重新生成: the web page is asked for a NEW answer to a
+   * question that is already in the transcript, so the old answer has to go —
+   * otherwise the panel would show two replies to one question and the sync
+   * would meet a local turn the web does not have.
+   *
+   * It is deliberately NOT a general-purpose editor: nothing else in the plugin
+   * removes a single message, and a transcript the reader can silently lose a
+   * turn from is worse than a wrong answer they can see.
+   *
+   * @returns true when a message with that id was there.
+   */
+  deleteMessage(id: string, messageId: string): boolean {
+    let removed = false
+    this.update(id, chat => {
+      const index = chat.messages.findIndex(candidate => candidate.id === messageId)
+      if (index < 0) return
+      chat.messages.splice(index, 1)
+      removed = true
+      /*
+       * Deleting the streaming row cannot leave the chat flagged as streaming:
+       * the flag drives the panel's caret and the tail feed, and a chat with no
+       * assistant row left would spin forever.
+       */
+      if (chat.messages.every(message => message.role !== 'assistant' || message.streaming !== true)) {
+        chat.streaming = false
+      }
+    })
+    return removed
+  }
+
   /** Mark the chat's streaming flag (assistant reply started/stopped). */
   setStreaming(id: string, streaming: boolean, model?: string): DSchatTranscript | undefined {
     return this.update(id, chat => {
@@ -1449,5 +1536,34 @@ export class TranscriptStore {
     this.activeChatId = undefined
     this.persist()
     return count
+  }
+
+  /**
+   * The folder the reader last chose for 「导出 markdown」, if any.
+   *
+   * Read by the host's export-directory resolver, which is the ONE place that
+   * decides where a file lands — so the settings card, the export route and the
+   * panel's own dialog cannot disagree about it.
+   */
+  exportDirPref(): string | undefined {
+    return this.prefs.exportDir
+  }
+
+  /**
+   * Remember the reader's choice of export folder.
+   *
+   * A no-op for an empty value or for the value already stored, so re-opening
+   * the dialog and pressing the same folder does not re-arm the write debounce
+   * (or mark a healthy store dirty) for nothing.
+   *
+   * @param dir - an absolute path; relative values are the caller's to resolve.
+   * @returns true when the stored preference changed.
+   */
+  setExportDirPref(dir: string): boolean {
+    const wanted = dir.trim()
+    if (wanted === '' || wanted === this.prefs.exportDir) return false
+    this.prefs.exportDir = wanted
+    this.persist()
+    return true
   }
 }

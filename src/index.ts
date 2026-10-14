@@ -343,9 +343,10 @@ export function apply(ctx: Context, config?: Config): void {
        * The export target as a RESOLVED path, not the raw setting: the settings
        * page has to show where a file actually went, and the panel's toast says
        * the same thing. An empty setting resolves to ~/Downloads here rather
-       * than in two places.
+       * than in two places. The store's remembered pick is consulted here too,
+       * so the card, the route and the dialog all answer with one path.
        */
-      exportDir: resolveExportDir(value.exportDir),
+      exportDir: resolveExportDir(value.exportDir, store.exportDirPref()),
       transferDistill: value.transferDistill === true,
       transferProvider: (value.transferProvider ?? '').trim(),
       transferModel: (value.transferModel ?? '').trim(),
@@ -366,7 +367,7 @@ export function apply(ctx: Context, config?: Config): void {
     store,
     build: BUILD,
     distill: distillConfigOf(resolve()),
-    exportDir: () => resolveExportDir(resolve().exportDir),
+    exportDir: () => resolveExportDir(resolve().exportDir, store.exportDirPref()),
     hostContext,
   })
 

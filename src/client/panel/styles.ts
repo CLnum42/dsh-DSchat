@@ -434,20 +434,16 @@ body[data-ds-dark-theme] .dsh-dschat {
   color: var(--dschat-on-accent-tint);
 }
 /*
- * This button's own two marks: a glyph, and (on 迁移) the disclosure caret.
+ * This button's own mark: the glyph, as a span rather than a bare SVG so the
+ * flex gap above can space it — a bare text node beside an icon has no box to be
+ * spaced by.
  *
- * Both are spans rather than bare SVGs so the flex gap above can space them:
- * a bare text node beside an icon has no box to be spaced by. The caret box
- * exists to be ROTATED — it is a plain span wrapping the 11px glyph, and turning
- * it around while the panel is open is the standard "this opened upward" cue. A
- * CSS transform on an inline box does nothing, hence the display:grid.
+ * There is no disclosure caret here any more. It belonged to 迁移 and rotated
+ * while that menu was open, which is the right cue for an inline fold and the
+ * wrong one for a button that opens a popover: it promised a state the control
+ * does not have. The menu, its heading and aria-expanded carry that.
  */
 .dsh-dschat-tbtn-glyph { display: grid; place-items: center; flex: none; }
-.dsh-dschat-tbtn-caret { display: grid; place-items: center; flex: none; color: var(--dschat-tx-3); }
-.dsh-dschat-tbtn[aria-expanded='true'] .dsh-dschat-tbtn-caret { transform: rotate(180deg); }
-@media (prefers-reduced-motion: no-preference) {
-  .dsh-dschat-tbtn-caret { transition: transform .16s ease; }
-}
 /* A disabled toolbar button keeps its glyph and loses its colour. */
 .dsh-dschat-tbtn:disabled { opacity: .5; cursor: not-allowed; background: transparent; border-color: transparent; }
 /* ---------- buttons ---------- */
@@ -781,6 +777,19 @@ body[data-ds-dark-theme] .dsh-dschat {
 }
 .dsh-dschat-day { text-align: center; font-size: 11px; color: var(--dschat-tx-3); }
 
+/*
+ * The block that lets an anchored question reach the top — see the panel's
+ * spacerRef. Its height is written imperatively, one screenful at most, and it
+ * is a plain block at the end of the scroller: an empty div here has nothing to
+ * paint, and it must not participate in the reading column's flex gap (which is
+ * why it is the column's sibling rather than its child).
+ *
+ * No transition, deliberately. The height changes on every streamed token — it
+ * shrinks exactly as much as the answer grows — and animating it would turn a
+ * transcript that must not move into one that drifts.
+ */
+.dsh-dschat-thread-spacer { height: 0; flex: none; }
+
 .dsh-dschat-msg { display: flex; flex-direction: column; gap: 6px; position: relative; }
 /*
  * The search-landing mark.
@@ -807,9 +816,13 @@ body[data-ds-dark-theme] .dsh-dschat {
 .dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-head { flex-direction: row-reverse; }
 .dsh-dschat-msg-who { font-weight: 600; color: var(--dschat-tx-2); }
 .dsh-dschat-msg-body { font-size: 14px; line-height: 1.72; min-width: 0; color: var(--dschat-tx); }
-/* The bubble's width cap lives on the wrapper, so it is a share of the MESSAGE
-   width rather than of a shrink-to-fit parent (which would be circular). */
-.dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-line { max-width: 78%; }
+/*
+ * The bubble's width cap lives on the bubble itself — it used to sit on the
+ * .dsh-dschat-msg-line wrapper, which only existed to give the hover row a
+ * containing block. Measured against the MESSAGE, which is what a share of 78%
+ * means here, so the cap does not change with the move.
+ */
+.dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-body { max-width: 78%; }
 /*
  * The reader's own turn, painted the way the web app paints it: the palest step
  * of the accent (deepseek-50 in light, bluish-850 in dark) with NO border, and
@@ -865,20 +878,65 @@ body[data-ds-dark-theme] .dsh-dschat {
  * 'label-deep-diving', the harness's own token for "a model is reasoning right
  * now" — the same colour the shell paints its own thinking indicator with.
  */
+/*
+ * The reasoning disclosure: a summary line that unfolds into the thought.
+ *
+ * THE FOLD IS A GRID, not a max-height keyframe. grid-template-rows animates
+ * between 0fr and 1fr, so the block grows to exactly the content's own height —
+ * a max-height transition has to guess that height, and a guess that is too
+ * small clips the last paragraph while one that is too large makes every fold
+ * feel like it hangs. The two faces are the grid's two rows (the summary line
+ * first, the body second), and the component swaps which one is 1fr; both carry
+ * "min-height: 0; overflow: hidden" so a zero row really is zero — without
+ * that, a grid item's automatic minimum height keeps it at the content size and
+ * the row never collapses.
+ *
+ * A live row (data-live) breathes: the accent border drifts between two tints on
+ * the same 2.4s beat the 「思考中：」 shimmer uses, so the whole block reads as one
+ * running thing rather than a header with a light behind it.
+ */
 .dsh-dschat-think {
+  display: grid; grid-template-rows: 1fr 0fr;
+  transition: grid-template-rows .2s cubic-bezier(.22, .61, .36, 1);
   margin: 0 0 10px; border-radius: var(--dschat-radius-md); overflow: hidden;
   background: var(--dschat-filled); border: 1px solid var(--dschat-line);
 }
+.dsh-dschat-think[data-open="true"] { grid-template-rows: 0fr 1fr; }
+/*
+ * WHICH ROW EACH FACE IS IN, stated rather than implied by document order.
+ *
+ * When the fold has landed open the summary line is not rendered at all, so the
+ * body becomes the grid's FIRST child — and an auto-placed first child lands in
+ * the 0fr row, which is how a fold that looked right while animating settled at
+ * zero height and left the reasoning invisible. Explicit rows make the layout
+ * independent of which faces happen to be mounted.
+ */
+.dsh-dschat-think-head { grid-row: 1; }
+.dsh-dschat-think-fold { grid-row: 2; }
 .dsh-dschat-think[data-live="true"] {
-  border-color: color-mix(in srgb, var(--dschat-accent) 32%, transparent);
   background: color-mix(in srgb, var(--dschat-accent) 7%, var(--dschat-filled));
+  animation: dsh-dschat-think-breathe 2.4s ease-in-out infinite;
 }
+@keyframes dsh-dschat-think-breathe {
+  0%, 100% { border-color: color-mix(in srgb, var(--dschat-accent) 26%, transparent); }
+  50% { border-color: color-mix(in srgb, var(--dschat-accent) 52%, transparent); }
+}
+/*
+ * The summary line: 13px of quiet text with the reasoning glyph, at the row
+ * height the answer's own action row uses (28px), so a collapsed thought is one
+ * line of the transcript and not a panel of its own. It is a grid ITEM, which is
+ * what lets it shrink away as the body arrives.
+ */
 .dsh-dschat-think-head {
-  display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px;
-  border: none; background: transparent; cursor: pointer; text-align: left; font-size: 12.5px;
-  color: var(--dschat-tx-2);
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 0; overflow: hidden;
+  padding: 7px 11px; border: none; background: transparent; cursor: pointer;
+  text-align: left; font-size: 12.5px; color: var(--dschat-tx-2);
+  transition: background .12s ease, color .12s ease;
 }
+.dsh-dschat-think-head > svg:first-child { flex: none; color: var(--dschat-tx-3); transition: color .12s ease; }
 .dsh-dschat-think-head:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-think-head:hover > svg:first-child { color: var(--dschat-accent); }
+.dsh-dschat-think[data-live="true"] .dsh-dschat-think-head > svg:first-child { color: var(--dschat-accent); }
 .dsh-dschat-think-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /*
  * The live line: 「思考中：」 + the newest characters of the reasoning, on ONE line.
@@ -922,13 +980,28 @@ body[data-ds-dark-theme] .dsh-dschat {
  */
 .dsh-dschat-think[data-live="true"] .dsh-dschat-think-head:hover { color: inherit; }
 /*
+ * The fold's animated track: the grid row that goes 0fr -> 1fr.
+ *
+ * It is a wrapper rather than a class on the body because the body is a SCROLL
+ * box: overflow auto on the grid item would let the row's own clipping fight
+ * the scrollbar. The wrapper clips; the body scrolls inside it.
+ */
+.dsh-dschat-think-fold { min-height: 0; overflow: hidden; }
+/*
  * The expanded face: the reasoning, and nothing else.
  *
- * The summary line is NOT rendered above this (see Thinking): the reader who
- * clicked asked for the thought, and a header row saying 「思考中…」 over a page
- * of reasoning was the reported bug. So this element is the whole block, and it
- * has to be the collapse control itself — hence a pointer on its content, which
- * is the only thing that says "click me to put that line back".
+ * The summary line is NOT rendered above this once the fold has landed (see
+ * Thinking): the reader who clicked asked for the thought, and a header row
+ * saying 「思考中…」 over a page of reasoning was the reported bug. So this element
+ * is the whole block, and it has to be the collapse control itself — hence a
+ * pointer on its content, which is the only thing that says "click me to put
+ * that line back".
+ *
+ * The 340px cap is the fold's own ceiling: a long reasoning opens into a
+ * scroll box rather than pushing the answer off screen, which is what makes
+ * expanding a thought safe in the first place. The padding is asymmetric
+ * (10 top, 12 bottom) because the last paragraph's own leading would otherwise
+ * make the bottom edge look open.
  *
  * Where the pointer goes, and where it does not. This is a scroll box: a
  * pointer over a scrollbar is a lie, and a pointer over a paragraph a reader is
@@ -940,8 +1013,8 @@ body[data-ds-dark-theme] .dsh-dschat {
  * not about what the click does.
  */
 .dsh-dschat-think-body {
-  max-height: 360px; overflow: auto; padding: 8px 12px 10px;
-  font-size: 13px; line-height: 1.68; color: var(--dschat-tx-2);
+  max-height: 340px; overflow: auto; padding: 9px 13px 12px;
+  font-size: 13px; line-height: 1.72; color: var(--dschat-tx-2);
 }
 .dsh-dschat-think-body > div { cursor: pointer; }
 .dsh-dschat-think-body > div > *:first-child { margin-top: 0; }
@@ -952,14 +1025,28 @@ body[data-ds-dark-theme] .dsh-dschat {
  * straight down while open. :last-child addresses the chevron without a
  * second class, and it is the LAST child in both headers by construction.
  *
- * Only the sources rule can still fire: the reasoning row renders its header in
- * the COLLAPSED face alone, so there is never an expanded state left to point
- * the caret down in. The '[data-open]' branch above the sources rule used to
- * carry that case and is gone with it.
+ * The reasoning row keeps its header mounted through BOTH animations (see
+ * Thinking), so its caret can turn while the body folds — the one thing that
+ * tells the reader the press was received. The sources rule has no such state:
+ * its header is always there, so it only has the two resting faces.
  */
 .dsh-dschat-think-head > svg:last-child,
-.dsh-dschat-sources-head > svg:last-child { transform: rotate(-90deg); transition: transform .12s ease; }
+.dsh-dschat-sources-head > svg:last-child { transform: rotate(-90deg); transition: transform .18s cubic-bezier(.22, .61, .36, 1); }
+.dsh-dschat-think[data-open="true"] > .dsh-dschat-think-head > svg:last-child,
 .dsh-dschat-sources[data-open] > .dsh-dschat-sources-head > svg:last-child { transform: none; }
+/*
+ * Motion is decoration here. The three animations above (the fold, the live
+ * border, the shimmer, the caret) all have a resting state that says the same
+ * thing, so a reader who has asked the system for less motion keeps the states
+ * and loses only the movement.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .dsh-dschat-think { transition: none; }
+  .dsh-dschat-think[data-live="true"] { animation: none; border-color: color-mix(in srgb, var(--dschat-accent) 32%, transparent); }
+  .dsh-dschat-think-live-prefix { animation: none; }
+  .dsh-dschat-think-head > svg:last-child,
+  .dsh-dschat-sources-head > svg:last-child { transition: none; }
+}
 /*
  * Citation chips. The wrapper is the sup element (so the chips ride the text
  * baseline as one unit whether a marker holds one number or several), and each
@@ -1063,35 +1150,316 @@ body[data-ds-dark-theme] .dsh-dschat {
   border: 1px solid color-mix(in srgb, var(--dschat-danger) 25%, transparent);
 }
 
-/* message hover actions */
+/* message actions */
 /*
- * Hover actions hug the content they act on.
+ * The controls under a message, in two placements — chosen by the row's own
+ * data-mod attribute, which the panel sets from the message's ROLE rather than
+ * from a style class:
  *
- * An assistant message spans the full column and its head (name · time) sits at
- * the LEFT, so the row rides the head line at the right edge. A user message is
- * a right-aligned bubble: anchoring its row to the message box parked it at the
- * far left, hundreds of pixels from the bubble. The bubble is therefore wrapped
- * in the .dsh-dschat-msg-line wrapper, which shrink-wraps it, and becomes the row's
- * containing block — so right:100% sits just outside the bubble at any width,
- * vertically centred, the classic chat placement.
+ *   answer  the reply's own row: IN FLOW under the answer, always visible, laid
+ *           out the way chat.deepseek.com lays out its own. 复制 · 重新生成 · 喜欢
+ *           · 不喜欢 · 分享 are in the page's own order and places, which is what
+ *           "参考官方网页" means for this row.
+ *   user    the reader's bubble keeps the hover row it has always had: anchored
+ *           just outside the bubble on the left, appearing on hover. The bubble
+ *           is narrow and right-aligned with nothing under it, so an in-flow row
+ *           there would hang off the end of the message instead of under it.
+ *
+ * The answer row is deliberately NOT hover-revealed. The page keeps its own row
+ * visible on the answer it is hovering and hidden on the others; a plugin cannot
+ * hover the DOM from React, and a row that fades in on hover in a panel that is
+ * read much more than it is clicked only hides the controls. It is quiet at rest
+ * (the secondary label colour, a transparent background) so that six controls
+ * under every answer do not turn the transcript into a toolbar.
  */
 .dsh-dschat-msg-acts {
-  display: flex; gap: 2px; opacity: 0; transition: opacity .12s ease;
-  position: absolute; top: -8px; right: 0; padding: 2px;
-  border-radius: var(--dschat-radius-sm); background: var(--dschat-surface);
-  border: 1px solid var(--dschat-surface-border); box-shadow: 0 4px 16px #00000014;
+  display: flex; align-items: center; gap: 2px; padding: 2px;
+  border-radius: var(--dschat-radius-sm);
+  transition: opacity .12s ease;
 }
-.dsh-dschat-msg-line { position: relative; display: flex; justify-content: flex-end; max-width: 100%; min-width: 0; }
-.dsh-dschat-msg[data-role="user"] .dsh-dschat-msg-acts {
-  top: 50%; right: 100%; transform: translateY(-50%); margin-right: 6px;
+/*
+ * The answer's row IS a positioning context, and that is load-bearing: the 反馈
+ * form is a child of this row and opens upward from it (bottom: 100% + 8px).
+ * Left static, the form resolved its offsets against the nearest positioned
+ * ancestor — the MESSAGE, whose own rule is position:relative — and so anchored
+ * itself to the bottom of a 304px-tall message, which put it 340px above the row
+ * it belongs to (measured: the form's rect.top at -421 against a row at 144, i.e.
+ * off the top of the panel entirely).
+ */
+.dsh-dschat-msg-acts[data-mod="answer"] { margin-top: -4px; position: relative; }
+/*
+ * The reader's own row: the same in-flow placement as an answer's, mirrored to the
+ * bubble's right edge by the message's own align-items: flex-end (see the
+ * [data-role="user"] rule above). It used to float to the LEFT of the bubble on
+ * hover, which put the two rows of the same conversation in two different places.
+ */
+.dsh-dschat-msg-acts[data-mod="user"] { margin-top: -4px; position: relative; }
+/*
+ * The row's own controls — and the child combinator is LOAD-BEARING, not style.
+ *
+ * The 反馈 form renders inside this row (it is positioned against it), and its
+ * buttons are ordinary labelled buttons. With a plain descendant selector, this
+ * 28x28 glyph rule reached INTO that nested panel and shrank 取消 / 提交评价 to
+ * 28px squares: measured in the rendered check, both buttons were 28px wide with
+ * their labels clipped, which is what the reader saw as "提交 is cut off at the
+ * panel edge". A panel nested in a row must not inherit the row's control
+ * geometry, and the child combinator is how the cascade says so.
+ */
+.dsh-dschat-msg-acts > button {
+  width: 28px; height: 28px; display: grid; place-items: center; border: none; border-radius: 7px;
+  background: transparent; cursor: pointer; color: var(--dschat-tx-3);
+  transition: background .12s ease, color .12s ease;
 }
-.dsh-dschat-msg:hover .dsh-dschat-msg-acts,
-.dsh-dschat-msg-acts:focus-within { opacity: 1; }
-.dsh-dschat-msg-acts button {
-  width: 26px; height: 26px; display: grid; place-items: center; border: none; border-radius: 6px;
-  background: transparent; cursor: pointer; color: var(--dschat-tx-2);
+.dsh-dschat-msg-acts > button:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+/*
+ * A chosen rating is a STATE, not a hover: the thumb is filled (see the icon)
+ * and takes the accent, so which way the reader rated an answer is readable from
+ * the row itself rather than from a toast they have to remember.
+ */
+.dsh-dschat-msg-acts > button[data-on] { color: var(--dschat-accent); }
+.dsh-dschat-msg-acts > button[data-on]:hover {
+  background: color-mix(in srgb, var(--dschat-accent) 12%, transparent);
+  color: var(--dschat-accent);
 }
-.dsh-dschat-msg-acts button:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+/*
+ * A control that cannot be pressed: no hover reaction, and the muted colour the
+ * reader already reads as "not now". cursor:default rather than not-allowed,
+ * because the reason is in the tooltip and an unavailable control is not an
+ * error.
+ */
+.dsh-dschat-msg-acts > button:disabled { cursor: default; color: var(--dschat-tx-3); opacity: .45; }
+.dsh-dschat-msg-acts > button:disabled:hover { background: transparent; color: var(--dschat-tx-3); }
+/*
+ * The hairline between the page's five controls and this panel's two.
+ *
+ * It is the whole of the "tidy up": the row's seven controls each act on
+ * something different, so nothing was genuinely duplicated — what the row could
+ * not say was which of them the PAGE has and which are this plugin's. One 1px
+ * rule, aligned to the glyphs' optical centre, says it without a word.
+ */
+.dsh-dschat-msg-acts-sep {
+  width: 1px; height: 14px; flex: none; margin: 0 4px;
+  background: var(--dschat-line-3);
+}
+/* The working state: the same glyph, turning, so the press is visibly taken. */
+.dsh-dschat-msg-acts > button[data-busy] svg { animation: dsh-dschat-spin 1.1s linear infinite; }
+@keyframes dsh-dschat-spin { to { transform: rotate(360deg); } }
+/*
+ * The 反馈 form (点踩).
+ *
+ * It rides the shared .dsh-dschat-pop material — surface, backdrop, border,
+ * elevation — and only overrides what the row's placement needs. That shared rule
+ * defaults to right:0 / 348px, which is right for a trigger at the composer's
+ * right end; here the trigger is a row that starts at the answer's left edge, so
+ * the form is anchored to the LEFT and narrowed to the width the row can carry.
+ * Still no top offset: with both bottom and a height set, an absolutely
+ * positioned box stretches between them (the shared rule says so).
+ *
+ * z-index is above the neighbour panels (40) because the transcript's floating
+ * pieces — the question navigator, the ↓ 最新 pill — sit at 30 and must not cut
+ * through an open form.
+ */
+.dsh-dschat-msg-acts[data-mod="answer"] > .dsh-dschat-pop {
+  right: auto; left: 0; width: 316px; z-index: 45;
+  display: flex; flex-direction: column; gap: 8px;
+}
+/* The title of whichever form is open (反馈 and 分享 share it). */
+.dsh-dschat-pop-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dschat-tx); }
+/* The reasons: the page's own four, as one row of pills. */
+.dsh-dschat-feedback-reasons { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsh-dschat-feedback-reason {
+  /*
+   * flex:none and white-space:nowrap are both load-bearing inside this
+   * column-flex panel: without them a pill is a shrinkable flex item, and four of
+   * them want more width than the 316px form has — so they compressed and wrapped
+   * their labels one character per line (有害/不安全 came out as a four-line
+   * vertical smear in the rendered check).
+   */
+  flex: none; white-space: nowrap;
+  height: 28px; width: auto; padding: 0 10px; border-radius: 999px; cursor: pointer;
+  font-size: 12.5px; color: var(--dschat-tx-2);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
+}
+.dsh-dschat-feedback-reason:hover { color: var(--dschat-tx); border-color: var(--dschat-line-3); }
+/*
+ * The chosen reason is a state, in the same accent the panel's other toggles use
+ * (深度思考 / 智能搜索), so "which one did I pick" is answerable at a glance.
+ */
+.dsh-dschat-feedback-reason[data-on] {
+  color: var(--dschat-accent); border-color: var(--dschat-accent);
+  background: color-mix(in srgb, var(--dschat-accent) 10%, transparent);
+}
+.dsh-dschat-feedback-note {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px;
+  padding: 8px 10px; border-radius: var(--dschat-radius-sm); font: inherit; font-size: 12.5px;
+  color: var(--dschat-tx); background: var(--dschat-raised);
+  border: 1px solid var(--dschat-line-2);
+}
+.dsh-dschat-feedback-note::placeholder { color: var(--dschat-tx-3); }
+/*
+ * The footer row: 取消 / 提交, right-aligned inside the panel's own 12px padding,
+ * with the primary action last — the order and the corner the page's own 反馈
+ * dialog uses.
+ */
+/* The footer of whichever form is open: 取消 then the action, right-aligned. */
+.dsh-dschat-pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.dsh-dschat-pop-actions .dsh-dschat-btn { height: 30px; padding: 0 14px; }
+/*
+ * The 分享 WARNING, and the picker's own note.
+ *
+ * Sharing's body is a WARNING, not a question: 分享 publishes a link anyone can
+ * open, so the sentence that says so is the first thing in the card (see the
+ * share.warning string, which is the web app's own wording). It is set apart
+ * from ordinary panel copy by a tinted well, so the one paragraph a reader must
+ * read before pressing the primary button does not look like the same grey as
+ * everything else. 导出's note is the same slot with nothing to warn about, so
+ * it stays plain.
+ */
+.dsh-dschat-share-warning {
+  margin: 0; padding: 9px 11px; border-radius: var(--dschat-radius-sm);
+  font-size: 12.5px; line-height: 1.6; color: var(--dschat-tx-2);
+  background: var(--dschat-filled); border: 1px solid var(--dschat-line);
+}
+.dsh-dschat-qa-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dschat-tx-3); }
+
+/*
+ * 导出到: the destination row, between the note and the list.
+ *
+ * A field rather than a chip with the folder on it, because a path is long and
+ * often needs EDITING (a subfolder, a name the reader pastes from Finder) — an
+ * ellipsised label with a tooltip makes the common case a copy-and-retype. The
+ * input is monospace-free on purpose: it holds a filesystem path, but the panel
+ * has no second text face, and a path at 12.5px in the body font is what every
+ * file dialog on this machine looks like.
+ *
+ * The row wraps rather than clipping. A 480px card minus its padding is ~440px,
+ * and a button plus a usable field is close to that: at a narrow width the
+ * button drops to the next line instead of squeezing the field to nothing.
+ */
+.dsh-dschat-export-dir {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 12px;
+}
+.dsh-dschat-export-dir-label { font-size: 12px; font-weight: 500; color: var(--dschat-tx-2); }
+.dsh-dschat-export-dir-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsh-dschat-export-dir-input {
+  flex: 1 1 180px; min-width: 0; height: 28px; padding: 0 9px;
+  border-radius: var(--dschat-radius-sm); border: 1px solid transparent;
+  background: var(--dschat-filled); color: var(--dschat-tx);
+  font: inherit; font-size: 12.5px;
+  /* The direction is forced: a path is laid out left-to-right even when the
+     surrounding copy is not, and an RTL page would otherwise reorder the
+     segments of a string that is read as one. */
+  direction: ltr; text-align: left;
+}
+.dsh-dschat-export-dir-input::placeholder { color: var(--dschat-tx-3); }
+.dsh-dschat-export-dir-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dschat-accent) 46%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dschat-accent) 12%, transparent);
+}
+.dsh-dschat-export-dir-choose { flex: none; border-color: var(--dschat-line-2); }
+
+/* ---------- the Q&A picker (分享 / 导出 markdown) ---------- */
+/*
+ * The card: the same material as 运行状态, sized for a LIST rather than a form.
+ *
+ * 480px rather than the status card's 640: every row here is one line of
+ * preview text, and a wider card would only stretch the ellipsis. overflow:
+ * hidden on the card is what keeps the inner list's scroll from escaping the
+ * rounded corner, and the list itself carries the max-height — the title, the
+ * warning and the footer must stay put while the rows scroll between them.
+ */
+/*
+ * Both classes are on the element: modal-card brings the material, this brings
+ * the list layout. It is written as the PAIR because the shared rule lives
+ * further down the sheet, and at equal specificity the later rule would win —
+ * the card would silently take 运行状态's 640px and its own scrolling.
+ */
+.dsh-dschat-modal-card.dsh-dschat-qa-card { width: min(480px, 100%); display: flex; flex-direction: column; overflow: hidden; }
+.dsh-dschat-qa-title { margin: 0 0 8px; padding-right: 28px; font-size: 14px; font-weight: 600; color: var(--dschat-tx); }
+.dsh-dschat-qa { display: flex; flex-direction: column; gap: 8px; min-height: 0; margin-top: 12px; }
+/*
+ * The 全选 row: the control a reader reaches for first, above the list it acts on
+ * (a "select all" below the thing it selects is a control found after the work).
+ */
+.dsh-dschat-qa-head {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--dschat-line);
+}
+.dsh-dschat-qa-all {
+  display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 6px 0 2px;
+  border: none; border-radius: 6px; background: transparent; cursor: pointer;
+  font-size: 12.5px; color: var(--dschat-tx-2);
+}
+.dsh-dschat-qa-all:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-qa-all:disabled { opacity: .5; cursor: default; background: transparent; }
+.dsh-dschat-qa-count { margin-left: auto; font-size: 12px; color: var(--dschat-tx-3); }
+/*
+ * The checkbox, drawn rather than borrowed.
+ *
+ * It is a 14px box that fills with the accent when its turn is chosen, which is
+ * the panel's own "on" language (see the 深度思考 pill) rather than a native
+ * control the sheet would then have to fight. The tick inside is the shared
+ * CheckIcon at 9px.
+ */
+.dsh-dschat-qa-box {
+  flex: none; display: grid; place-items: center; width: 14px; height: 14px;
+  border-radius: 4px; border: 1.5px solid var(--dschat-line-3); color: var(--dschat-on-accent);
+  background: var(--dschat-raised); transition: background .12s ease, border-color .12s ease;
+}
+[data-on] > .dsh-dschat-qa-box,
+.dsh-dschat-qa-all[data-on] > .dsh-dschat-qa-box {
+  background: var(--dschat-accent); border-color: var(--dschat-accent);
+}
+/*
+ * The list. One block per turn, and the block is what the accent paints when it
+ * is chosen: a 3px rail plus a faint wash, so "which turns am I about to publish
+ * or write" is answerable without reading fourteen checkboxes.
+ */
+.dsh-dschat-qa-list {
+  max-height: min(46vh, 320px); overflow: auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 2px; margin: 0 -6px; padding: 0 6px;
+}
+.dsh-dschat-qa-turn {
+  display: flex; align-items: stretch; gap: 8px; padding: 6px 8px 6px 4px;
+  border-radius: var(--dschat-radius-sm); border-left: 3px solid transparent;
+}
+.dsh-dschat-qa-turn:hover { background: var(--dschat-hover); }
+.dsh-dschat-qa-turn[data-on] {
+  border-left-color: var(--dschat-accent);
+  background: color-mix(in srgb, var(--dschat-accent) 5%, transparent);
+}
+.dsh-dschat-qa-index {
+  flex: none; min-width: 16px; padding-top: 3px; text-align: right;
+  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dschat-tx-3);
+}
+.dsh-dschat-qa-rows { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/*
+ * One row = one half of a turn. The rows are BUTTONS with role=checkbox (see
+ * QaPicker), and both halves of a turn carry the same state — pressing either
+ * flips the turn. min-width: 0 is what lets the preview ellipsize inside the
+ * flex row instead of stretching the card.
+ */
+.dsh-dschat-qa-row {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0;
+  padding: 3px 6px; border: none; border-radius: 6px; background: transparent;
+  cursor: pointer; text-align: left; font-size: 12.5px; color: var(--dschat-tx-2);
+}
+.dsh-dschat-qa-row:hover { background: var(--dschat-hover); color: var(--dschat-tx); }
+.dsh-dschat-qa-row-answer { color: var(--dschat-tx-3); }
+.dsh-dschat-qa-row[data-on] { color: var(--dschat-tx); }
+.dsh-dschat-qa-who {
+  flex: none; max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500; color: var(--dschat-tx-3);
+}
+.dsh-dschat-qa-row[data-on] .dsh-dschat-qa-who { color: var(--dschat-accent); }
+.dsh-dschat-qa-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dschat-qa-empty { margin: 0; padding: 18px 4px; font-size: 12.5px; color: var(--dschat-tx-3); text-align: center; }
+/*
+ * The footer sits at the card's own padding, not inside the scrolling list: the
+ * primary button must be reachable without scrolling a long conversation.
+ */
+.dsh-dschat-qa-card > .dsh-dschat-pop-actions { margin-top: 14px; }
 
 /* empty state */
 .dsh-dschat-empty {
@@ -1684,7 +2052,7 @@ button.dsh-dschat-send:disabled {
  * (see --dschat-surface in the token block).
  */
 body[data-ds-dark-theme] .dsh-dschat-pop,
-body[data-ds-dark-theme] .dsh-dschat-msg-acts { border-color: var(--dschat-line-3); }
+body[data-ds-dark-theme] .dsh-dschat-msg-acts[data-mod="user"] { border-color: var(--dschat-line-3); }
 }
 .dsh-dschat-pop .dsh-dschat-sub { margin: 0 0 10px; font-size: 11.5px; color: var(--dschat-tx-3); }
 .dsh-dschat-field { margin-bottom: 10px; }

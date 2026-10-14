@@ -22,16 +22,34 @@
 ### 能做什么
 
 - **网页聊天**：真实浏览器驱动 chat.deepseek.com，流式回复，可切「深度思考」与「智能搜索」。
+  **打开侧栏的「聊天」就会自动启动网页端**，不需要先在输入框或面板上点一次「重试启动」；启动失败时原因与
+  重试按钮就在对话里，成功前的长时间启动窗口由状态灯与「正在启动网页端…」说明。
 - **提问导航**：消息区右缘一列刻度，一条提问一道；悬停展开成提问清单，点一下跳到那一条。
 - **新提问置顶**：发出去的问题被顶到消息区顶端，回答在下面长出来，不用滚就能从第一行读起。答案还短于视口时
   浏览器顶不到顶，面板就让它停在能停的位置，不去和滚动较劲；手动滚动、切换会话或从导航跳走都会解除锚点。
   不在底部时右下浮出「↓ 最新」。
+- **回答下的操作栏**：每条回答正下方一排按钮，与 chat.deepseek.com 一致 —— **复制 · 重新生成 · 喜欢 ·
+  不喜欢 · 分享**，然后用一条竖线隔开本插件自己的「复制思考过程」与「引用到输入框」（不做「朗读」：面板
+  没有音频出口）。**回答还在生成的时候，这一排不存在**：流式没有停止之前整排不渲染（半句话上的「复制」、
+  网页端还没有这一轮的「分享」，都是不该点得到的），回答一停就出现 —— 正常结束、手动「停止」、失败留下的
+  部分回答都算停。**用户自己的消息也一样**：复制 / 重新编辑就在气泡下面，不再悬停在气泡左侧。
+  - **重新生成**：把这条回答对应的问题重新发给网页端并**替换**旧回答（旧回答在网页端接下这一轮之后才删）。
+  - **喜欢 / 不喜欢**：评价落到**网页端账号**上，界面上的按钮同步显示本次会话的选择。网页端的「不喜欢」是
+    一个必填原因的反馈弹窗，所以本插件先问一次原因（有害不安全 / 虚假信息 / 没有帮助 / 其他 + 可选说明）再提交。
+  - **分享**：在网页端**创建一条公开链接**（与官方一致：任何拿到链接的人都能查看，无需登录）。点「分享」会先
+    打开一个**问答选择器**：默认勾中你点的那一组（和网页端点一次分享一样），可以继续勾别的组、也可以全选；
+    正文就是官方那句公开警告，确认后插件驱动网页端完成「进选择模式 → 勾选其余问答 → 创建并复制」，把链接给你；
+    链接可以在网页端「设置 → 数据管理」里删除。创建前会核对网页端自己数出来的「已选择 N 组对话」，对不上就
+    什么都不发；链接没读回来时会明说「可能已创建」并指路去删。
+  - 评价要在网页端定位到那条回答，靠的是**内容比对**，对不上就不点并说明原因 —— 网页端是虚拟列表，按序号
+    点有评错别人回答的风险。
 - **附件**：📎 走 macOS 原生文件对话框，也支持拖拽与粘贴；图片显示缩略图（单文件 ≤ 24 MB，单条 ≤ 10 个）。
 - **排队而不是被拒**：回复还在生成时输入的消息会排队，上一轮结束自动发出。
-- **迁移到 harness**：「DSH 迁移」把这段网页对话**蒸馏成任务简报**（或按原文迁移），新建 harness 会话或追加
-  到已有会话，可指定工作区。迁移过去的上下文只有用户⇄模型的对话：R1 思考块被丢掉，`[citation:N]` /
-  `[reference:N]` 标记被清掉，「参考来源」列表不跟着走。**「导出 markdown」同样如此** —— 导出文件是这场
-  问答本身的记录：用户问了什么、DeepSeek 答了什么，不再带上搜索来源与思考过程。
+- **接力**：输入框上方那排按钮里的「⇄ 接力」把这段网页对话**蒸馏成任务简报**（或按原文迁移），新建
+  harness 会话或追加到已有会话，可指定工作区。接力过去的上下文只有用户⇄模型的对话：R1 思考块被丢掉，
+  `[citation:N]` / `[reference:N]` 标记被清掉，「参考来源」列表不跟着走。**「导出 markdown」同样如此**
+  —— 导出文件是这场问答本身的记录：用户问了什么、DeepSeek 答了什么，不再带上搜索来源与思考过程。
+  （按钮 0.12 之前叫「DSH 迁移」，右边那个展开箭头也去掉了：它开的是一个弹出菜单，不是折叠区。）
 - **置顶会话**：会话列表里每条右侧有一个图钉，钉住的会话排到列表最上面、单独一组「置顶」，跟网页端侧栏
   一样。钉住只是排列，不动会话的更新时间，也不影响下面的按时间排序。**点「从网页同步」会按网页端账号的
   置顶状态对齐**（网页上钉了的会钉上，网页上没有的会取消）——置顶状态本身在网页账号上，这里只是镜像。
@@ -41,7 +59,13 @@
   **重复记录合并成一条**（这一步只读一次会话列表，不读任何会话内容，也不改写你原有记录的文字），再补没收过
   的会话内容。列表按「最近使用」从新到旧排列，置顶的一律在上。
   在面板里聊过的会话会记住自己的网页 session id，**同步时按 id 合并回同一条记录**，不会再多出一条同名的。
-- **导出 markdown**：整段对话导出到 `~/Downloads`（可配置），只有用户的问题与 DeepSeek 的回答。
+- **导出 markdown**：对话下面那排按钮的最后一个（箭头落入托盘那个图标，标签「导出」），选好要导出的问答
+  后写到对话框里那个文件夹（默认 `~/Downloads`，可配置）。对话框里可以直接**选文件夹**（系统选择窗口），
+  也可以手动改路径；**改过一次之后默认就是它**，直到你下次再改 —— 这个选择记在 host 侧，重启也还在。
+  选择器**默认全选**，取消某一组时问题和回答一起取消；只导一部分时文件名带 `-选中N条`，不会覆盖整篇导出
+  的那份。文件里只有用户的问题与 DeepSeek 的回答。
+- **思考过程**：回答上方的「已思考（用时 …）」一行，点开是完整推理（最高 340px，超出可滚），再点正文收起；
+  展开与收起是 200ms 的折叠动画，不是瞬间切换，并且跟随系统的「减少动态效果」设置。
 - **运行状态**：`···` 菜单里的诊断卡，看引擎、登录、浏览器与错误原因。
 
 ### 安装
@@ -97,7 +121,7 @@ curl -s http://127.0.0.1:57531/api/dsh-dschat/state | head -c 120
 
 1. 侧边栏点「聊天」打开面板；第一次发消息时会在弹出的浏览器窗口里完成一次 DeepSeek 网页登录。
 2. 直接输入即可（Enter 发送，Shift+Enter 换行）；输入框在引擎没起来时也能打字，点它就会在后台把网页端拉起来。
-3. 聊完点输入框上方的「DSH 迁移」→ 选方式与目标 → **先看预览再写入**：预览框里是即将成为新会话首条消息的
+3. 聊完点输入框上方的「接力」→ 选方式与目标 → **先看预览再写入**：预览框里是即将成为新会话首条消息的
    完整文本，可以直接改；确认后才创建会话，并自动打开它。如果蒸馏不可用（没有可用的模型），预览会明确写出
    「本次为原文完整迁移」，不会再和成功蒸馏弹出同一句提示。
 4. 左侧「会话列表」是本机记录；左下「从网页同步」把网页端还没同步的会话收进来，某一条想单独补全就点它右侧的
@@ -128,7 +152,7 @@ profile 的 `cordis.patch.yml` —— 在 `dschat` 那一行（`name: 'dsh-dscha
 | `replyTimeoutMs` | `180000` | 单次回复超时（毫秒） |
 | `dataDir` | 空 | 数据目录（对话记录），空则 `~/.dsh/dsh-dschat` |
 | `profileDir` | 空 | 浏览器 profile（登录态），空则复用 dsh-webchat 的目录 |
-| `exportDir` | 空 | 导出目录，空则 `~/Downloads`；相对路径按家目录解析 |
+| `exportDir` | 空 | 导出目录的**默认值**，空则 `~/Downloads`；相对路径按家目录解析。读者在导出对话框里选过的目录优先于它（记在 host 侧，重启还在） |
 | `transferDistill` | `true` | 迁移默认蒸馏成简报，`false` 为按原文迁移 |
 | `transferProvider` / `transferModel` | 空 | 蒸馏用的模型，空则自动挑（优先名带 deepseek 的 provider 与带 chat 的模型） |
 | `transferMaxTokens` / `transferChunkTokens` | `4096` / `1024` | 蒸馏的输出与分块上限 |
@@ -199,6 +223,8 @@ Thinking time, the `[citation:N]` chips in the body, and the source list (collap
 
 - **Web chat**: a real browser drives chat.deepseek.com with streaming replies, plus the **Deep think** and
   **Smart search** toggles.
+  **Opening the sidebar's Chat row starts the web page by itself** — no need to click into the composer or press
+  「Retry start」 first. A failed start puts its reason and a retry button in the conversation.
 - **Question navigator**: a tick rail down the right edge of the message area, one tick per question; hover to
   expand the list of questions, click to jump to one.
 - **New questions anchor to the top**: after a send, the question you just asked is placed at the top of the
@@ -206,12 +232,27 @@ Thinking time, the `[citation:N]` chips in the body, and the source list (collap
   below is still shorter than the viewport the browser cannot lift the question all the way up, and the panel
   deliberately does not fight that. Scrolling by hand, switching conversations, or jumping away releases the
   anchor. A **Latest** pill floats up whenever you are not at the bottom.
-- **Attachments**: 📎 opens the native macOS file dialog; drag-and-drop and paste work too, and images render as
-  thumbnails (≤ 24 MB per file, ≤ 10 per message).
+- **Actions under every answer**: a row directly beneath each reply, matching chat.deepseek.com — **copy ·
+  regenerate · like · dislike · share**, plus this plugin's own 复制思考过程 / 引用到输入框 (朗读 is deliberately
+  not carried: the panel has no audio surface).
+  - **Regenerate** re-asks the question on the web page and replaces the stored answer.
+  - **Like / dislike** lands on your DeepSeek **web account**, and the buttons show what this session sent. The page's
+    dislike is a reason dialog, so the panel asks for the reason first (harmful / false / not helpful / other, plus an
+    optional note) and submits both.
+  - **Share** creates a **public link** on the web app (as the official control does: anyone with the link can view it,
+    no sign-in). Clicking it opens a **Q&A picker** with the exchange you clicked already ticked — the web app's own
+    behaviour — where you can add more exchanges or select everything; the card carries the web app's public-link
+    warning, and confirming drives the page through selection mode → create-and-copy and hands you the URL. Before
+    anything is created the page's own "N conversations selected" count is checked against your list: a mismatch
+    publishes nothing. Links can be deleted in the web app under Settings → Data; if the URL cannot be read back, the
+    panel says the link MAY exist and where to remove it.
+  - Ratings are located in the page by **content comparison**, never by position: the page is virtualized, and rating
+    the wrong answer would be invisible and unrecoverable. If the answer cannot be found, nothing is clicked.
 - **Queue instead of refusal**: messages typed while a reply is still generating wait in a queue and go out when
   the previous turn ends.
-- **Migrate to DSH**: the **Migrate to DSH** menu distills the web conversation into a **task brief** (or replays
-  it verbatim) and either starts a new harness session or appends to an existing one, optionally inside a
+- **Hand off**: the **Hand off** menu (「接力」 in Chinese; it was called "Migrate to DSH" before 0.12, and the
+  disclosure arrow is gone — it opens a popup, not a fold) distills the web conversation into a **task brief** (or
+  replays it verbatim) and either starts a new harness session or appends to an existing one, optionally inside a
   workspace you pick. What crosses over is only the user⇄model conversation: the R1 reasoning block is dropped,
   `[citation:N]` / `[reference:N]` markers are removed, and the search-source list is not transferred.
   **Export markdown** works the same way — the exported file is a record of the exchange itself: what you asked
@@ -230,8 +271,15 @@ Thinking time, the `[citation:N]` chips in the body, and the source list (collap
   messages you already had), then it imports the ones never seen here. The list itself is ordered
   most-recently-used first, with the pinned rows above everything. A conversation you chatted in from the panel
   remembers its web session id, so **syncing merges into that same row** instead of adding a second copy of it.
-- **Export markdown**: writes the whole conversation to `~/Downloads` (configurable) — user questions and
-  DeepSeek answers only.
+- **Export markdown**: the last button on the row under the conversation (the arrow-into-tray glyph, labelled
+  Export). It opens the same Q&A picker, **everything ticked by default**; clearing one exchange clears its question
+  and answer together, and a partial export is named `…-选中N条.md` so it cannot overwrite the whole-conversation
+  file. The dialog carries an **Export to** row: choose a folder with the system picker or edit the path by hand, and
+  that folder becomes the default from then on — the choice is stored on the host side, so it survives a restart.
+  User questions and DeepSeek answers only.
+- **Reasoning**: the "Thought for …" line above an answer unfolds into the full reasoning (capped at 340px, then it
+  scrolls) and folds back when you press the text. Both directions are a 200ms fold rather than an instant swap, and
+  they honour the system's reduce-motion setting.
 - **Runtime status**: a diagnostic card in the `···` menu covering the engine, the sign-in, the browser, and the
   last error.
 
@@ -292,8 +340,9 @@ Loading is declarative: a plugin that throws inside `apply()` can take the whole
    DeepSeek web once.
 2. Just type (Enter sends, Shift+Enter inserts a newline). The composer accepts text even while the engine is
    down — clicking it brings the web app up in the background.
-3. When you are done, click **Migrate to DSH** above the composer, pick a mode and a target, then **read the
-   preview before writing**: it shows the exact first message the new session will get, and you can edit it.
+3. When you are done, click **Hand off** (「接力」 in Chinese) above the composer, pick a mode and a target, then
+   **read the preview before writing**: it shows the exact first message the new session will get, and you can edit
+   it.
    The session is created only when you confirm, and it opens by itself afterwards. If distillation was
    unavailable, the preview says so plainly ("the raw conversation") instead of arriving as the same success
    message a real brief produces.
@@ -328,7 +377,7 @@ renders no form for it. Configuration lives in the profile's `cordis.patch.yml` 
 | `replyTimeoutMs` | `180000` | Timeout for a single reply (ms) |
 | `dataDir` | empty | Transcript directory; defaults to `~/.dsh/dsh-dschat` |
 | `profileDir` | empty | Browser profile (sign-in); defaults to the dsh-webchat one |
-| `exportDir` | empty | Export folder; `~/Downloads` when empty, relative paths resolve against home |
+| `exportDir` | empty | The export folder's **default**; `~/Downloads` when empty, relative paths resolve against home. A folder chosen in the export dialog outranks it (stored host-side, kept across restarts) |
 | `transferDistill` | `true` | Hand-offs distill by default; `false` replays the transcript |
 | `transferProvider` / `transferModel` | empty | Distillation model; empty auto-picks (a deepseek provider, a chat model) |
 | `transferMaxTokens` / `transferChunkTokens` | `4096` / `1024` | Output and per-chunk token caps |

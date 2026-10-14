@@ -1120,6 +1120,16 @@ export async function transferToHarnessSession(ctx: Context, input: TransferToSe
 export interface ExportTranscriptInput {
   transcript: DSchatTranscript
   cwd?: string
+  /**
+   * When present, only these messages are written — the picker's selection.
+   *
+   * The question and its answer travel together (the picker binds them), and the
+   * order is the transcript's own, not the request's: a file whose turns were
+   * reordered by the shape of a JSON array would read as a different
+   * conversation. Absent means the whole conversation, which is what every
+   * caller before the picker asked for.
+   */
+  messageIds?: readonly string[]
 }
 
 /**
@@ -1136,10 +1146,23 @@ export interface ExportTranscriptInput {
  */
 export function exportTranscriptFile(input: ExportTranscriptInput): { filePath: string } {
   const cwd = normalizeCwd(input.cwd)
+  const selected = input.messageIds === undefined
+    ? undefined
+    : input.transcript.messages.filter(message => input.messageIds!.includes(message.id))
+  const transcript: DSchatTranscript = selected === undefined
+    ? input.transcript
+    : { ...input.transcript, messages: selected }
+  /*
+   * A PARTIAL export gets a marked file name. The default name is the
+   * conversation's, and two exports of the same chat — one whole, one with three
+   * chosen turns — would otherwise be the same file, so the second would
+   * silently replace the first.
+   */
+  const partial = selected !== undefined && selected.length !== input.transcript.messages.length
   const slug = input.transcript.title.replace(/[^\w\u4e00-\u9fa5-]+/g, '-').replace(/-+/g, '-').slice(0, 60) || 'dschat'
-  const fileName = `dschat-${slug}-${input.transcript.id.slice(-6)}.md`
+  const fileName = `dschat-${slug}-${input.transcript.id.slice(-6)}${partial ? `-选中${selected!.length}条` : ''}.md`
   const filePath = join(cwd, fileName)
   mkdirSync(cwd, { recursive: true })
-  writeFileSync(filePath, renderTranscriptMarkdown(input.transcript, { excludeThinking: true, sources: false }), 'utf8')
+  writeFileSync(filePath, renderTranscriptMarkdown(transcript, { excludeThinking: true, sources: false }), 'utf8')
   return { filePath: basename(filePath) }
 }

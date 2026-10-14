@@ -70,3 +70,40 @@ test('an unterminated opener with no summary is never quoted as text', () => {
   assert.equal(replyBody('<details>'), '')
   assert.equal(thinkingBody('<details>'), '')
 })
+
+/**
+ * 分享 is a clipboard action, so its whole observable result is the TEXT.
+ *
+ * The shape is asserted rather than left to the panel, because two of the three
+ * decisions here are the ones that made 复制 correct in the first place and would
+ * be silently undone by a rewrite: the reasoning is NOT in it (it is the model's
+ * working, not the exchange), and the question IS (an answer handed to someone
+ * else without its question is usually meaningless).
+ */
+test('分享 builds a titled markdown excerpt of the question and the answer', async () => {
+  const { shareText } = await import('../src/client/panel/reply.ts')
+
+  const text = shareText('开封自驾', '开封有什么适合自驾游的景点？', '清明上河园、龙亭公园和开封府都在二十分钟车程内。')
+  assert.equal(
+    text,
+    [
+      '# 开封自驾',
+      '',
+      '> 开封有什么适合自驾游的景点？',
+      '',
+      '清明上河园、龙亭公园和开封府都在二十分钟车程内。',
+      '',
+      '— DeepSeek',
+    ].join('\n'),
+  )
+
+  // A conversation with no question (a recovered reply whose user turn is gone)
+  // still produces a valid excerpt rather than a bare quote marker.
+  assert.equal(
+    shareText('标题', '', '只有回答。'),
+    ['# 标题', '', '只有回答。', '', '— DeepSeek'].join('\n'),
+  )
+  // Trailing whitespace from the stored markdown must not become a blank line in
+  // the middle of the excerpt.
+  assert.match(shareText('t', 'q', 'answer.\n\n\n'), /answer\.\n\n— DeepSeek$/)
+})

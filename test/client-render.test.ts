@@ -39,6 +39,8 @@ async function loadComponents() {
     export { DSchatPanel, thoughtLabel, openExternalLink } from ${JSON.stringify(join(root, 'src/client/panel/DSchatPanel.tsx'))}
     export { DSchatStatus } from ${JSON.stringify(join(root, 'src/client/panel/DSchatStatus.tsx'))}
     export { Markdown, Thinking, SourceList, sourceRows } from ${JSON.stringify(join(root, 'src/client/panel/Markdown.tsx'))}
+    export { MessageActions, messageActions } from ${JSON.stringify(join(root, 'src/client/panel/answer-actions.tsx'))}
+    export { QaPicker, qaTurns, selectableTurns, selectedMessageIds } from ${JSON.stringify(join(root, 'src/client/panel/qa-picker.tsx'))}
   `, 'utf8')
   await build({
     entryPoints: [entry],
@@ -297,10 +299,16 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
     assert.match(header, /data-phase="stopped"/, 'with no snapshot yet it claims nothing')
 
     /*
-     * The conversation's three verbs are the ACTION ROW's: 会话列表 / 新对话 on
-     * the left, 迁移 at the right end. All are labelled (dsh-dschat-tbtn) — the
+     * The conversation's verbs are the ACTION ROW's: 会话列表 / 新对话 on the
+     * left, then the two that take something OUT of the panel — 迁移, and
+     * 导出 markdown at the very end. All are labelled (dsh-dschat-tbtn) — the
      * row is where a reader looks for "a new chat", so a glyph-only square there
      * was a control they had to already know.
+     *
+     * 导出 used to be an entry in the title bar's ··· menu. It is asserted HERE,
+     * as the row's last button, because that move is the requirement: it is a
+     * verb about the conversation, and the reader who wants the conversation in a
+     * file should not have to look in a menu — nor find it twice.
      *
      * 会话列表's label is the VISIBLE noun (action.sessions) while its tooltip
      * and accessible name are the sentence, which is why the assertion looks for
@@ -313,13 +321,19 @@ test('the header carries the whale mark and the lamp, and the controls moved to 
      * assertion below makes sure ⌘K still does it.
      */
     assert.equal(
-      (actions.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 3,
-      'three labelled buttons on the action row',
+      (actions.match(/dsh-dschat-tbtn[" ]/g) ?? []).length, 4,
+      'four labelled buttons on the action row',
     )
     const sessions = actions.indexOf('rail.hide')
     const fresh = actions.indexOf('action.newChat.hint')
+    const transfer = actions.indexOf('dsh-dschat-tbtn-transfer')
+    const exportAt = actions.indexOf('dsh-dschat-tbtn-export')
     assert.ok(sessions > -1 && fresh > -1, 'each button carries its own label')
     assert.ok(sessions < fresh, 'in the order 会话列表, 新对话')
+    assert.ok(
+      fresh < transfer && transfer < exportAt,
+      'the two outbound verbs close the row: 迁移, then 导出 markdown last',
+    )
     /*
      * The row has no SEARCH button, and the ⌘K hint is not a button's tooltip
      * either: it sits on the popover's own input, below the trigger, which is
@@ -909,13 +923,30 @@ test('floating surfaces use the menu material, not the overlay token', async () 
     'no surface may paint --dsw-alias-bg-overlay: it is opaque panel grey in dark mode, not a floating material',
   )
   // The token NAME may still be mentioned in prose; only usage is banned.
-  for (const surface of ['.dsh-dschat-pop', '.dsh-dschat-msg-acts']) {
-    const start = css.indexOf(`${surface} {`)
-    assert.ok(start > -1, `${surface} is styled`)
+  // Line-anchored: the row's own override rule ends with the same selector text.
+  const popMatch = /^\.dsh-dschat-pop \{/m.exec(css)
+  assert.ok(popMatch !== null, '.dsh-dschat-pop is styled')
+  assert.ok(
+    /var\(--dschat-surface\)/.test(css.slice(popMatch.index, css.indexOf('}', popMatch.index))),
+    '.dsh-dschat-pop must paint var(--dschat-surface)',
+  )
+  /*
+   * NEITHER message row is a floating surface any more.
+   *
+   * Both sit in the message's own flow — the answer's under the answer, the
+   * reader's under the bubble — which is what "look like the official page" means
+   * for these rows. A raised card behind 28px glyphs would read as a widget
+   * dropped into the transcript, so this asserts the two placement rules stay
+   * free of surface/background/shadow declarations.
+   */
+  for (const selector of ['.dsh-dschat-msg-acts[data-mod="answer"] {', '.dsh-dschat-msg-acts[data-mod="user"] {']) {
+    const start = css.indexOf(selector)
+    assert.ok(start > -1, `${selector} is styled`)
     const rule = css.slice(start, css.indexOf('}', start))
-    assert.ok(
-      rule.includes('var(--dschat-surface)'),
-      `${surface} must paint var(--dschat-surface)`,
+    assert.match(rule, /position:\s*relative/, `${selector} is an in-flow row`)
+    assert.equal(
+      /background\s*:|box-shadow\s*:|border\s*:/.test(rule), false,
+      `${selector} must not paint a floating surface`,
     )
   }
 })
@@ -944,9 +975,16 @@ test('floating surfaces use the menu material, not the overlay token', async () 
 test('the composer\'s menus open upward, and the title bar\'s open downward', async () => {
   const { readFileSync } = await import('node:fs')
   const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+  /*
+   * Matched at the START OF A LINE, not by substring: `.dsh-dschat-pop {` occurs
+   * inside `.dsh-dschat-msg-acts[data-mod="answer"] > .dsh-dschat-pop {` too, and
+   * a plain indexOf finds whichever comes first in the file — which is how this
+   * test started asserting the row's override instead of the shared rule.
+   */
   const ruleOf = (selector) => {
-    const start = css.indexOf(`${selector} {`)
-    assert.ok(start > -1, `${selector} is styled`)
+    const match = new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{`, 'm').exec(css)
+    assert.ok(match !== null, `${selector} is styled`)
+    const start = match.index
     return css.slice(start, css.indexOf('}', start))
   }
 
@@ -1328,6 +1366,14 @@ test('the streaming feed is the tail poll, not a fast /state poll', async () => 
 test('quoting and copying a reply go through the reply splitter', async () => {
   const { readFileSync } = await import('node:fs')
   const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+  /*
+   * The ACTION ROW lives in its own module now (answer-actions.tsx) so its order
+   * can be asserted without a rendered transcript; the splitter is still what
+   * feeds it, from the panel. Both halves are read here, because the bug this
+   * guards was a property of the PAIR: the panel decides what "the reply" is, and
+   * the row is where 复制 / 引用 / 复制思考过程 are wired to it.
+   */
+  const actions = readFileSync(join(root, 'src/client/panel/answer-actions.tsx'), 'utf8')
 
   assert.ok(/from '\.\/reply\.ts'/.test(panel), 'the panel imports the splitter')
   assert.ok(/replyBody\(message\.content\)/.test(panel), 'copy takes the answer, not the reasoning')
@@ -1339,7 +1385,7 @@ test('quoting and copying a reply go through the reply splitter', async () => {
   // The reasoning is still reachable — as its own action, never folded back
   // into the copy button (which is what the bug report was really about).
   assert.ok(/thinkingBody\(message\.content\)/.test(panel), 'the reasoning is offered separately')
-  assert.ok(/msg\.copyThinking/.test(panel), 'and its action is labelled')
+  assert.ok(/msg\.copyThinking/.test(actions), 'and its action is labelled')
 })
 
 /**
@@ -1893,4 +1939,396 @@ test('the English dictionary carries no CJK', async () => {
     if (cjk.test(value ?? '')) offenders.push(`${key}: ${value}`)
   }
   assert.deepEqual(offenders, [], 'English copy must not contain Chinese characters or CJK punctuation')
+})
+
+/**
+ * The answer's action row: WHICH controls, in WHICH order, under the answer.
+ *
+ * Two contracts live in this one row, and both are asserted here rather than
+ * through a rendered transcript (which would need a `/state` response, and the
+ * static renderer has no effects at all):
+ *
+ *   1. the reader's contract — the row the reader asked for, mirroring
+ *      chat.deepseek.com's own: 复制 · 重新生成 · 喜欢 · 不喜欢 · 分享, with 朗读
+ *      deliberately absent, and this panel's 复制思考过程 / 引用到输入框 after
+ *      them. Position is what makes it "参考官方网页"; a reorder is a regression
+ *      even if every button still exists.
+ *   2. the WIRE contract — `DeepSeekWebEngine.reactInner` presses the page's
+ *      buttons by INDEX (2 = 喜欢, 3 = 不喜欢), because the page's controls carry
+ *      no label to match on. That index is only right while this row's first five
+ *      controls are the page's first five in the page's order.
+ */
+test('the reply action row mirrors the web page: 复制 · 重新生成 · 喜欢 · 不喜欢 · 分享', async () => {
+  const { MessageActions, messageActions, renderToStaticMarkup, createElement, dir } = await loadComponents()
+  try {
+    const calls: string[] = []
+    const row = messageActions({
+      isUser: false,
+      reply: '答案正文',
+      thinking: '思考过程',
+      quoted: '第一行',
+      share: '# t',
+      tr: (key: string) => key,
+      busy: false,
+      regeneratingId: undefined,
+      messageId: 'a1',
+      reaction: undefined,
+      feedbackId: undefined,
+      onCopyReply: () => { calls.push('copy') },
+      onCopyThinking: () => { calls.push('copy-thinking') },
+      onQuote: () => { calls.push('quote') },
+      onEdit: () => { calls.push('edit') },
+      onShare: () => { calls.push('share') },
+      onRegenerate: () => { calls.push('regenerate') },
+      onLike: () => { calls.push('like') },
+      onDislike: () => { calls.push('dislike') },
+    } as never)
+
+    assert.deepEqual(
+      row.map(action => action.key),
+      ['copy', 'regenerate', 'like', 'dislike', 'share', 'sep', 'copy-thinking', 'quote'],
+      'the page\'s five controls lead, in the page\'s order, a hairline, then this panel\'s two',
+    )
+    // The seven controls and the hairline: the separator is NOT a control, so it
+    // carries neither a label nor an accessible name.
+    assert.deepEqual(
+      row.filter(action => action.key !== 'sep').map(action => action.title),
+      ['msg.copy', 'msg.regenerate', 'msg.like', 'msg.dislike', 'msg.share', 'msg.copyThinking', 'msg.quote'],
+    )
+    assert.equal(row.some(action => action.key === 'speak'), false, '朗读 is deliberately not carried')
+
+    // Every control names itself: the page hides its names in a hover tooltip,
+    // which is exactly what an assistive-technology user cannot reach.
+    const html = renderToStaticMarkup(createElement(MessageActions, {
+      isUser: false,
+      reply: '答案正文',
+      thinking: '思考过程',
+      quoted: '第一行',
+      share: '# t',
+      tr: (key: string) => key,
+      busy: false,
+      regeneratingId: undefined,
+      messageId: 'a1',
+      reaction: undefined,
+      feedbackId: undefined,
+      onCopyReply: () => undefined,
+      onCopyThinking: () => undefined,
+      onQuote: () => undefined,
+      onEdit: () => undefined,
+      onShare: () => undefined,
+      onRegenerate: () => undefined,
+      onLike: () => undefined,
+      onDislike: () => undefined,
+    } as never))
+    assert.match(html, /data-mod="answer"/, 'the answer row is the in-flow placement')
+    assert.equal(
+      (html.match(/aria-label=/g) ?? []).length,
+      7,
+      'each of the seven controls carries its accessible name',
+    )
+    // The chosen rating is a state the reader can see again, not a toast.
+    const liked = messageActions({
+      isUser: false, reply: 'a', thinking: '', quoted: '', share: '', tr: (key: string) => key,
+      busy: false, regeneratingId: undefined, messageId: 'a1', reaction: 'like', feedbackId: undefined,
+      onCopyReply: () => undefined, onCopyThinking: () => undefined, onQuote: () => undefined,
+      onEdit: () => undefined, onShare: () => undefined, onRegenerate: () => undefined,
+      onLike: () => undefined, onDislike: () => undefined,
+    } as never)
+    assert.equal(liked.find(action => action.key === 'like')?.on, true, 'a liked answer shows it as chosen')
+    assert.equal(liked.find(action => action.key === 'like')?.title, 'msg.like.on', 'and its tooltip clears it')
+
+    /*
+     * The page answers one question at a time, so 重新生成 is unavailable while a
+     * turn runs — and the tooltip is where the REASON is, because a disabled
+     * control with no explanation is the version of this a reader reports as
+     * broken.
+     */
+    const whileBusy = messageActions({
+      isUser: false, reply: 'a', thinking: '', quoted: '', share: '', tr: (key: string) => key,
+      busy: true, regeneratingId: undefined, messageId: 'a1', reaction: undefined, feedbackId: undefined,
+      onCopyReply: () => undefined, onCopyThinking: () => undefined, onQuote: () => undefined,
+      onEdit: () => undefined, onShare: () => undefined, onRegenerate: () => undefined,
+      onLike: () => undefined, onDislike: () => undefined,
+    } as never)
+    assert.equal(whileBusy.find(action => action.key === 'regenerate')?.disabled, true)
+    assert.equal(whileBusy.find(action => action.key === 'regenerate')?.title, 'msg.regenerate.busy')
+
+    const working = messageActions({
+      isUser: false, reply: 'a', thinking: '', quoted: '', share: '', tr: (key: string) => key,
+      busy: false, regeneratingId: 'a1', messageId: 'a1', reaction: undefined, feedbackId: undefined,
+      onCopyReply: () => undefined, onCopyThinking: () => undefined, onQuote: () => undefined,
+      onEdit: () => undefined, onShare: () => undefined, onRegenerate: () => undefined,
+      onLike: () => undefined, onDislike: () => undefined,
+    } as never)
+    assert.equal(working.find(action => action.key === 'regenerate')?.busy, true, 'the pressed button spins')
+
+    // The reader's own turn keeps its two controls, and its own placement.
+    const user = messageActions({
+      isUser: true, reply: '问题', thinking: '', quoted: '问题', share: '', tr: (key: string) => key,
+      busy: false, regeneratingId: undefined, messageId: 'u1', reaction: undefined, feedbackId: undefined,
+      onCopyReply: () => undefined, onCopyThinking: () => undefined, onQuote: () => undefined,
+      onEdit: () => undefined, onShare: () => undefined, onRegenerate: () => undefined,
+      onLike: () => undefined, onDislike: () => undefined,
+    } as never)
+    assert.deepEqual(user.map(action => action.key), ['copy', 'edit'], 'a question is copied or edited, not rated')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * The answer's controls appear only once the answer has stopped arriving.
+ *
+ * The row used to be one of the first things the reader met under a LIVE reply:
+ * 复制 sat under a half-written sentence, 分享 offered to publish a turn the page
+ * did not have yet, and 重新生成 explained itself as 「正在生成，稍后再试」 for a
+ * control whose only honest state was "not yet". A control that cannot do its job
+ * is worse than no control — which is already this plugin's reason for leaving
+ * 朗读 out entirely.
+ *
+ * Rendered rather than read as source, because the requirement is that no button
+ * REACHES THE DOM: a row hidden by CSS would still be tab-focusable and would
+ * still be announced by a screen reader.
+ */
+test('a reply that is still streaming has no action row yet', async () => {
+  const { MessageActions, renderToStaticMarkup, createElement, dir } = await loadComponents()
+  try {
+    const answer = {
+      isUser: false, reply: '半句话', thinking: '思考过程', quoted: '半句话', share: '# t',
+      tr: (key: string) => key, busy: true, arriving: true, regeneratingId: undefined,
+      messageId: 'a1', reaction: undefined, feedbackId: undefined,
+      onCopyReply: () => undefined, onCopyThinking: () => undefined, onQuote: () => undefined,
+      onEdit: () => undefined, onShare: () => undefined, onRegenerate: () => undefined,
+      onLike: () => undefined, onDislike: () => undefined,
+    }
+    assert.equal(
+      renderToStaticMarkup(createElement(MessageActions, answer as never)),
+      '',
+      'a reply that is still arriving renders no controls at all — not even the row',
+    )
+    // The SAME message gets its full row the moment the stream stops: the gate is
+    // the arrival, not the identity of the message or the panel's turn flag.
+    const settled = renderToStaticMarkup(createElement(MessageActions, { ...answer, busy: false, arriving: false } as never))
+    assert.match(settled, /dsh-dschat-msg-acts/)
+    assert.equal((settled.match(/aria-label=/g) ?? []).length, 7, 'and it is the complete row')
+    /*
+     * The reader's own turn is not an answer and never streams: its 复制 / 修改
+     * have to be there the moment the question is on screen, or the panel would
+     * have taken away a control nobody asked about.
+     */
+    const question = renderToStaticMarkup(createElement(MessageActions, { ...answer, isUser: true, arriving: false } as never))
+    assert.match(question, /data-mod="user"/)
+    assert.deepEqual(
+      [...question.matchAll(/aria-label="([^"]+)"/g)].map(match => match[1]),
+      ['msg.copy', 'msg.edit'],
+      'the question keeps its two controls',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * Which flag the panel hands the row.
+ *
+ * The module gate above is only half the requirement: the panel is what decides
+ * that a message is still arriving, and it has to use the MESSAGE's own flag. The
+ * panel-wide `busy`/`streaming` is true for the whole transcript while any turn
+ * runs, so gating on it would strip the controls off every FINISHED answer too —
+ * the reader would lose 复制 on an old reply for as long as a new one generates.
+ */
+test('the panel gates the action row on the message\'s own streaming flag', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+
+  assert.match(
+    panel,
+    /arriving:\s*message\.streaming === true/,
+    'the row follows the message it belongs to',
+  )
+  assert.equal(
+    /arriving:\s*busy/.test(panel),
+    false,
+    'the turn-wide flag would take the row off finished answers as well',
+  )
+})
+
+/**
+ * The answer's action row is the 反馈 form's containing block.
+ *
+ * The 点踩 form is a CHILD of that row and opens upward from it, so the row has to
+ * be positioned. It was static, and because the whole message is
+ * `position: relative`, the form silently resolved its offsets against the MESSAGE
+ * instead: measured in the rendered check, the form's `rect.top` was -421 while
+ * the row it belongs to sat at 144 — i.e. the form opened entirely off the top of
+ * the panel, with nothing on screen to explain why. Nothing in a markup-only test
+ * catches that, which is why this asserts the CSS rule by name.
+ */
+test('the answer action row anchors its own popovers', async () => {
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+  // Comments are not CSS, and this file documents the bug on purpose.
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const start = rules.indexOf('.dsh-dschat-msg-acts[data-mod="answer"] {')
+  assert.ok(start > -1, 'the answer row has its own placement rule')
+  const rule = rules.slice(start, rules.indexOf('}', start))
+  assert.match(rule, /position:\s*relative/, 'the row must be the form\'s containing block')
+  assert.match(rule, /margin-top:/, 'and keep the tightening against the answer above it')
+
+  /*
+   * The form itself must also stay OUT of the message's flow: absolute, so it
+   * cannot push the transcript around when it opens.
+   */
+  const formStart = rules.indexOf('.dsh-dschat-msg-acts[data-mod="answer"] > .dsh-dschat-pop {')
+  assert.ok(formStart > -1, 'the answer row anchors whichever panel is open')
+  const formRule = rules.slice(formStart, rules.indexOf('}', formStart))
+  assert.match(formRule, /left:\s*0/, 'anchored to the row\'s leading edge, not the message\'s')
+  assert.match(formRule, /right:\s*auto/, 'and not the shared rule\'s trailing edge')
+})
+
+/**
+ * The Q&A picker, RENDERED — the part of the selection rule a data test cannot
+ * see: that both halves of a turn carry the same checked state, and that pressing
+ * either one reports the turn (not the message).
+ *
+ * The binding is the requirement: clearing the question must clear the answer,
+ * and clearing the answer must clear the question. There is one flag per turn
+ * and both rows read it, so the two rows of a chosen turn are `aria-checked=true`
+ * together and `false` together — which is also what a screen reader announces.
+ */
+test('the Q&A picker binds a question and its answer to one checkbox state', async () => {
+  const { QaPicker, qaTurns, renderToStaticMarkup, createElement } = await loadComponents()
+  const messages = [
+    { id: 'q1', role: 'user', content: '第一问？', ts: 1 },
+    { id: 'a1', role: 'assistant', content: '第一答。', ts: 2 },
+    { id: 'q2', role: 'user', content: '第二问？', ts: 3 },
+    { id: 'a2', role: 'assistant', content: '第二答。', ts: 4 },
+  ]
+  const turns = qaTurns(messages)
+  const pressed: string[] = []
+  const html = renderToStaticMarkup(createElement(QaPicker, {
+    turns,
+    selected: new Set(['q1']),
+    onToggle: (id: string) => { pressed.push(id) },
+    onAll: () => { pressed.push('all') },
+    onNone: () => { pressed.push('none') },
+    mode: 'export',
+    answerLabel: 'DeepSeek',
+    tr: (key: string, values?: Record<string, string>) => `${key}${values === undefined ? '' : JSON.stringify(values)}`,
+  } as never))
+
+  // One block per turn, and each block holds BOTH halves — question and answer.
+  assert.equal((html.match(/dsh-dschat-qa-turn/g) ?? []).length, 2, 'one block per turn')
+  assert.equal((html.match(/role="checkbox"/g) ?? []).length, 5, 'the 全选 control plus two rows per turn')
+  assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 2, 'the chosen turn: BOTH of its halves, and nothing else')
+  // 全选 is unchecked while only one of the two turns is chosen.
+  assert.match(html, /class="dsh-dschat-qa-all"[^>]*aria-checked="false"/, '全选 is not checked for a partial selection')
+  // The chosen turn's two rows are checked TOGETHER, and the other turn's are
+  // unchecked together: that is the binding, visible in the markup.
+  assert.match(html, /aria-checked="true"[^>]*>[^<]*<span class="dsh-dschat-qa-box"[^>]*>[\s\S]*?msg\.you[\s\S]*?第一问？/)
+  assert.match(html, /aria-checked="false"/, 'the unchosen turn is not checked')
+  assert.match(html, /qa\.count\{&quot;count&quot;:&quot;1&quot;\}/, 'the count is the number of CHOSEN TURNS, not messages')
+
+  // A streaming answer is visible but cannot be shared: the share-mode picker
+  // does not offer it at all.
+  const streaming = qaTurns([...messages, { id: 'q3', role: 'user', content: '第三问？', ts: 5 }, { id: 'a3', role: 'assistant', content: '', ts: 6, streaming: true }])
+  const shareHtml = renderToStaticMarkup(createElement(QaPicker, {
+    turns: streaming,
+    selected: new Set(['q1', 'q3']),
+    onToggle: () => undefined,
+    onAll: () => undefined,
+    onNone: () => undefined,
+    mode: 'share',
+    answerLabel: 'DeepSeek',
+    tr: (key: string, values?: Record<string, string>) => `${key}${values === undefined ? '' : JSON.stringify(values)}`,
+  } as never))
+  assert.equal(/第三问？/.test(shareHtml), false, 'a turn the page cannot share is not offered in 分享 mode')
+  assert.match(shareHtml, /qa\.count\{&quot;count&quot;:&quot;1&quot;\}/, 'and does not count toward the selection')
+})
+
+/**
+ * 导出 markdown's new home, and the removal of its old one.
+ *
+ * The request was explicit about both halves: the button belongs at the END of
+ * the row under the conversation, and the 「···」 menu must stop offering a second
+ * copy of it. A source-level assertion is the right level for the second half —
+ * the menu is closed in a static render, so nothing on screen shows what it holds.
+ */
+test('导出 markdown lives on the action row, not in the ··· menu', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+  const code = panel.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  const menu = code.slice(code.indexOf('function moreMenu()'), code.indexOf('function lampMenu()'))
+  assert.equal(/action\.exportFile/.test(menu), false, 'the ··· menu no longer offers 导出 markdown')
+  assert.equal(/action\.exportFile/.test(code), false, 'and nothing else uses the old menu label')
+
+  // The button is the row's LAST control, after the migration popover.
+  const actions = code.slice(code.indexOf('function actions()'), code.indexOf(' * The engine menu'))
+  assert.match(actions, /dsh-dschat-tbtn-export/, 'the action row carries the export button')
+  assert.ok(
+    actions.indexOf('transferPopover()') < actions.indexOf('dsh-dschat-tbtn-export'),
+    'after 迁移, i.e. at the end of the row',
+  )
+  assert.match(actions, /tr\('action\.export'\)/, 'with its own short label')
+  assert.match(actions, /tr\('action\.export\.hint'\)/, 'and the full name in its tooltip')
+
+  /*
+   * ONE picker, opened by both verbs. The old in-row 分享 confirmation is gone:
+   * a selection over the whole conversation does not fit under one answer, and
+   * two surfaces for one question would drift apart.
+   */
+  assert.match(code, /createElement\(QaPicker/, 'the picker is the panel\'s own component')
+  assert.equal(/shareForm\(/.test(code), false, 'the old in-row 分享 form is gone')
+  assert.match(code, /openSharePicker\(message\)/, '分享 opens the picker on the pressed turn')
+  assert.match(code, /onClick: openExportPicker/, '导出 opens the same picker with everything ticked')
+  assert.ok(
+    code.indexOf("setQaSelection(new Set(turn === undefined ? [] : [turn.id]))") > -1,
+    '分享 preselects exactly the pressed turn — the page\'s own enterSelection behaviour',
+  )
+  assert.ok(
+    code.indexOf("setQaSelection(new Set(selectableTurns(turns, 'export').map(turn => turn.id)))") > -1,
+    '导出 preselects everything',
+  )
+})
+
+/**
+ * 接力, and the mark it does NOT wear.
+ *
+ * Two changes to the same button, and both are about what the control promises:
+ *
+ *   1. the label. 迁移 named the MECHANISM (a plugin moving a conversation into
+ *      a harness session) where the row needs the OUTCOME — the conversation is
+ *      handed over and someone else carries it from there. It is also two words
+ *      shorter, which matters on a row that shares its width with three others;
+ *   2. no disclosure caret. It was there because this button opens a popover,
+ *      but a caret is the mark for an inline fold: it gave the button an
+ *      "expanded / collapsed" face it does not have. `aria-expanded` and the
+ *      open menu say what is actually true.
+ *
+ * Asserted against the source and the dictionary rather than a rendered row: the
+ * press opens a popover, which a static render never reaches.
+ */
+test('接力 replaces 迁移 on the hand-off button, and the disclosure caret is gone', async () => {
+  const { readFileSync } = await import('node:fs')
+  const panel = readFileSync(join(root, 'src/client/panel/DSchatPanel.tsx'), 'utf8')
+  const css = readFileSync(join(root, 'src/client/panel/styles.ts'), 'utf8')
+  const locales = readFileSync(join(root, 'src/client/locales.ts'), 'utf8')
+  const zh = locales.slice(locales.indexOf('export const zh'), locales.indexOf('export const en'))
+  const en = locales.slice(locales.indexOf('export const en'))
+  const valueOf = (block: string, key: string): string | undefined =>
+    new RegExp(`^  '${key}': '(.*)',$`, 'm').exec(block)?.[1]
+
+  assert.equal(valueOf(zh, 'transfer.short'), '接力', 'the button reads 接力')
+  assert.equal(valueOf(en, 'transfer.short'), 'Hand off', 'and Hand off in English')
+
+  const transfer = panel.slice(
+    panel.indexOf('function transferPopover'),
+    panel.indexOf('transferOpen && createElement', panel.indexOf('function transferPopover')),
+  )
+  assert.match(transfer, /tr\('transfer\.short'\)/, 'the label comes from the dictionary')
+  assert.match(transfer, /SwapIcon/, 'with the swap glyph that says "hand this over"')
+  assert.equal(/CaretIcon/.test(transfer), false, 'and no caret, which promised an inline fold')
+  assert.equal(/dsh-dschat-tbtn-caret/.test(panel), false, 'the caret markup is gone from the row')
+  assert.equal(/tbtn-caret/.test(css), false, 'and its transform rule with it')
 })

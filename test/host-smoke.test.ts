@@ -3029,7 +3029,7 @@ test('a handoff and the markdown export both carry only what was asked and answe
   const { renderMessagesMarkdown, renderTranscriptMarkdown, exportTranscriptFile } = await import(pathToFileURL(outfile).href) as {
     renderMessagesMarkdown: (messages: unknown[], options?: { excludeThinking?: boolean; sources?: boolean }) => string
     renderTranscriptMarkdown: (transcript: unknown, options?: { excludeThinking?: boolean; sources?: boolean }) => string
-    exportTranscriptFile: (input: { transcript: unknown; cwd?: string }) => { filePath: string }
+    exportTranscriptFile: (input: { transcript: unknown; cwd?: string; messageIds?: readonly string[] }) => { filePath: string }
   }
   const messages = [
     { id: 'u1', role: 'user', content: '问', ts: 1 },
@@ -3095,6 +3095,38 @@ test('a handoff and the markdown export both carry only what was asked and answe
   assert.equal(exported.includes('[citation:'), false, 'no citation markers in the export')
   assert.equal(exported.includes('思考过程'), false, 'the R1 scratchpad is not part of the record')
   assert.equal(exported.includes('搜索到 3 个网页'), false, 'nor is the search trace inside it')
+
+  /*
+   * A PARTIAL export — the picker's selection.
+   *
+   * The reader who clears an exchange still gets a file, and it holds only what
+   * they kept, in the TRANSCRIPT's order rather than the request's. The name is
+   * marked as well: the plain 导出 writes into the same folder, and two files
+   * that silently replaced each other would make the second export look like it
+   * had done nothing.
+   */
+  const wholeName = filePath
+  const partial = exportTranscriptFile({
+    cwd: exportDir,
+    transcript: {
+      id: 'chat-abcdef', title: '导出标题', createdAt: 1, updatedAt: 2, model: 'deepseek-chat',
+      messages: [
+        { id: 'u1', role: 'user', content: '第一问？', ts: 1 },
+        { id: 'a1', role: 'assistant', content: '第一答。', ts: 2 },
+        { id: 'u2', role: 'user', content: '第二问？', ts: 3 },
+        { id: 'a2', role: 'assistant', content: '第二答。', ts: 4 },
+      ],
+    },
+    // Given out of order on purpose: the file must read as the conversation did.
+    messageIds: ['a1', 'u1'],
+  })
+  const partialText = readFileSync(join(exportDir, partial.filePath), 'utf8')
+  assert.ok(partialText.includes('第一问？') && partialText.includes('第一答。'), 'the chosen exchange is in the file')
+  assert.equal(partialText.includes('第二问？'), false, 'and the cleared one is not')
+  assert.equal(partialText.includes('第二答。'), false, 'neither is its answer — the two travel together')
+  assert.ok(partialText.indexOf('第一问？') < partialText.indexOf('第一答。'), 'the question still leads its answer')
+  assert.notEqual(partial.filePath, wholeName, 'a partial export does not overwrite the whole-conversation file')
+  assert.match(partial.filePath, /-选中2条\.md$/, 'and says so in its name')
   rmSync(exportDir, { recursive: true, force: true })
 
   /*
@@ -3311,6 +3343,77 @@ test('the export route writes only inside the configured export directory', asyn
   } finally {
     rmSync(dataDir, { recursive: true, force: true })
     rmSync(allowedDir, { recursive: true, force: true })
+    dispose()
+  }
+})
+
+test('the folder chosen in the export dialog becomes the destination the host uses', async () => {
+  const { existsSync: existsSyncSync } = await import('node:fs')
+  const { mod, dispose } = await loadPlugin()
+  const dataDir = mkdtempSync(join(tmpdir(), 'dschat-exportdir-'))
+  const configured = mkdtempSync(join(tmpdir(), 'dschat-exportcfg-'))
+  const picked = mkdtempSync(join(tmpdir(), 'dschat-exportpick-'))
+  try {
+    const { ctx, routes } = fakeContext()
+    // A configured export folder, so "the pick outranks the setting" is a real
+    // change of destination rather than a coincidence (both would be the same
+    // folder if the setting were absent).
+    mod.apply(ctx, { dataDir, exportDir: configured, profileDir: join(dataDir, 'profile') })
+    await armCsrf(routes)
+    const rows = routes as Route[]
+    const setDir = rows.find(route => route.path === '/api/dsh-dschat/export-dir')!
+    const exportRoute = rows.find(route => route.path === '/api/dsh-dschat/export')!
+    const contextRoute = rows.find(route => route.path === '/api/dsh-dschat/context')!
+    const restore = rows.find(route => route.path === '/api/dsh-dschat/restore')!
+    assert.ok(setDir !== undefined, 'the export folder has its own route')
+
+    // An empty path is refused, and nothing is remembered: the field is the
+    // reader's to clear, but "no folder" is not a destination.
+    const blank = fakeResponse()
+    await setDir.handler(fakeRequest({ dir: '   ' }), blank)
+    assert.equal(blank.captured.status, 400, 'a blank folder is refused')
+    assert.notEqual(blank.captured.body.ok, true)
+
+    const chosen = fakeResponse()
+    await setDir.handler(fakeRequest({ dir: picked }), chosen)
+    assert.equal(chosen.captured.body.ok, true, `the pick is accepted: ${String(chosen.captured.body.error)}`)
+    assert.equal(chosen.captured.body.dir, picked, 'and the answer is the resolved absolute path')
+
+    /*
+     * The one path every surface reads. `/context` is what the panel seeds its
+     * dialog with and what the settings card shows, so a pick that did not reach
+     * it would leave the dialog and the file in different folders.
+     */
+    const context = fakeResponse()
+    await contextRoute.handler(fakeRequest(undefined), context)
+    assert.equal(context.captured.body.settings.exportDir, picked, 'the pick is now the resolved export directory')
+
+    const seeded = fakeResponse()
+    await restore.handler(fakeRequest({
+      title: '导出目录', model: 'deepseek-chat', messages: [{ id: 'm1', role: 'user', content: '内容', ts: 1 }],
+    }), seeded)
+    const chatId = seeded.captured.body.chatId as string
+
+    // The export itself: no `cwd` at all, which is what the panel sends.
+    const exported = fakeResponse()
+    await exportRoute.handler(fakeRequest({ chatId }), exported)
+    assert.equal(exported.captured.body.dir, picked, 'the file landed in the folder the reader picked')
+    assert.ok(
+      existsSyncSync(join(picked, String(exported.captured.body.filePath))),
+      'and it is really on disk there',
+    )
+
+    // The fence MOVED with the choice: the folder that used to be the
+    // destination is now outside it, so an old caller cannot keep writing there
+    // behind the reader's back.
+    const stale = fakeResponse()
+    await exportRoute.handler(fakeRequest({ chatId, cwd: configured }), stale)
+    assert.equal(stale.captured.status, 403, 'the previous folder is outside the fence now')
+    assert.equal(stale.captured.body.code, 'PATH')
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true })
+    rmSync(configured, { recursive: true, force: true })
+    rmSync(picked, { recursive: true, force: true })
     dispose()
   }
 })

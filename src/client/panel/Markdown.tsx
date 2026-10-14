@@ -543,6 +543,22 @@ function thinkingIsLive(thinkingMs: number | undefined, streaming: boolean | und
 }
 
 /**
+ * The reasoning disclosure's four states: two resting, two in motion.
+ *
+ * `opening` and `closing` are the fold ANIMATION, and they exist as states
+ * because the two faces are mounted differently in each one (see {@link Thinking}).
+ */
+type ThinkPhase = 'closed' | 'opening' | 'open' | 'closing'
+
+/**
+ * How long the fold takes, in milliseconds.
+ *
+ * Kept equal to the stylesheet's `grid-template-rows` transition. The component
+ * only needs it to know when to drop the face that has finished collapsing.
+ */
+const FOLD_MS = 200
+
+/**
  * Should this click on an expanded reasoning body fold it back?
  *
  * The body is the collapse control (see {@link Thinking}), so the guard has to
@@ -650,8 +666,35 @@ export function Thinking({ source, label, options = {}, copy, thinkingMs, stream
    * hidden that the reader needs; expanding is one click, and the click is the
    * only thing that opens it.
    */
-  const [open, setOpen] = useState(defaultOpen)
+  const [phase, setPhase] = useState<ThinkPhase>(defaultOpen ? 'open' : 'closed')
+  /*
+   * The two faces, as a state machine rather than a boolean.
+   *
+   * `closed` and `open` are the resting states; `opening` and `closing` are the
+   * ~200 ms in between, and they exist because the fold is ANIMATED (see the
+   * stylesheet's grid-template-rows rule). During `closing` the body is still
+   * mounted so the rows can shrink to zero, and during `opening` the summary line
+   * is still mounted so they can shrink the other way; the moment the animation
+   * lands, the hidden face is dropped from the DOM — which is what keeps this
+   * cheap. Rendering the reasoning body for every message in a long transcript,
+   * just to have it sit at zero height, would make each panel tick parse the
+   * whole reasoning of the whole conversation.
+   */
+  const open = phase === 'open' || phase === 'opening'
+  const bodyMounted = phase !== 'closed'
   const bodyRef = useRef<HTMLDivElement | null>(null)
+
+  /*
+   * Settle an animation into its resting state. The timeout is the animation's
+   * own duration (FOLD_MS), one place in the component and one in the
+   * stylesheet: a mismatch can only leave a face mounted a few milliseconds
+   * longer than needed, never a visible glitch.
+   */
+  useEffect(() => {
+    if (phase !== 'opening' && phase !== 'closing') return
+    const timer = window.setTimeout(() => setPhase(phase === 'opening' ? 'open' : 'closed'), FOLD_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [phase])
 
   /*
    * Fold away when the thought FINISHES, but only for a row the reader opened
@@ -668,7 +711,8 @@ export function Thinking({ source, label, options = {}, copy, thinkingMs, stream
     if (live) return
     if (!openedWhileLive.current) return
     openedWhileLive.current = false
-    setOpen(false)
+    // Through the same animated fold as a click, not by vanishing.
+    setPhase(current => (current === 'open' || current === 'opening' ? 'closing' : current))
   }, [live])
 
   /*
@@ -687,65 +731,99 @@ export function Thinking({ source, label, options = {}, copy, thinkingMs, stream
     if (distance < 48) element.scrollTop = element.scrollHeight
   }, [open, live, source])
 
+  /** Collapse, unless the click was on something inside the body that owns it. */
+  const collapse = (target: EventTarget | null): void => {
+    if (collapseFromBodyClick(target)) setPhase('closing')
+  }
+
   return createElement(
     'div',
-    { className: 'dsh-dschat-think', 'data-open': open ? 'true' : undefined, 'data-live': live ? 'true' : undefined },
-    open
-      ? createElement(
-          'div',
-          {
-            className: 'dsh-dschat-think-body dsh-dschat-scroll',
-            ref: bodyRef,
-            /*
-             * The expanded face is its own collapse control: the summary line is
-             * not on screen, so the body has to be clickable. Announced as a
-             * button (it IS one) with an always-true `aria-expanded`, so the
-             * state is readable without seeing the missing line.
-             */
-            role: 'button',
-            tabIndex: 0,
-            title: surface.collapseHint,
-            'aria-expanded': true,
-            onClick: (event: { target: EventTarget | null }) => {
-              if (collapseFromBodyClick(event.target)) setOpen(false)
-            },
-            // The event is declared as the minimum this handler reads: React
-            // passes a full KeyboardEvent (so `preventDefault` is present and
-            // the call is real — it stops Space from scrolling the panel), but
-            // the handler is written against these fields so it also works when
-            // the attribute is replayed over a hand-built event.
-            onKeyDown: (event: { key: string; target: EventTarget | null; preventDefault?: () => void }) => {
-              if (event.key !== 'Enter' && event.key !== ' ') return
-              // Keys pressed on a link inside the body belong to that link.
-              if (collapseFromBodyClick(event.target) === false) return
-              event.preventDefault?.()
-              setOpen(false)
-            },
+    {
+      className: 'dsh-dschat-think',
+      'data-open': open ? 'true' : undefined,
+      'data-live': live ? 'true' : undefined,
+      /*
+       * The phase as an attribute, because two of the four states differ only in
+       * how far along the fold is: the stylesheet keys the animation's DIRECTION
+       * off it, and it is what a rendered check can assert without reading a
+       * computed height mid-flight.
+       */
+      'data-phase': phase,
+    },
+    /*
+     * The summary line. NOT rendered once the fold has landed open: the reader
+     * who clicked asked for the thought, and a header row saying 「思考中…」 over a
+     * page of reasoning was the reported bug this replaces. It stays in the DOM
+     * through both animations, at zero height while the body is up, so the caret
+     * can turn and the label can fade as the body arrives.
+     */
+    phase !== 'open' && createElement(
+      'button',
+      {
+        type: 'button',
+        className: 'dsh-dschat-think-head',
+        'aria-expanded': open,
+        /*
+         * A face on its way out is not a control: the button keeps its place in
+         * the layout for the animation, but a keyboard reaching a row that is
+         * already folding open would be focusing something that is about to
+         * disappear.
+         */
+        ...(phase === 'closed' ? {} : { tabIndex: -1, 'aria-hidden': true }),
+        onClick: () => {
+          /*
+           * Remember that this row was opened DURING the thought, so the effect
+           * above can close it when the thought ends. A row opened after the
+           * fact is the reader's own doing and stays open.
+           */
+          if (live) openedWhileLive.current = true
+          setPhase('opening')
+        },
+      },
+      createElement(ThinkIcon, { size: 13 }),
+      live && liveLabel !== undefined
+        ? createElement(ThinkingLive, { text: source, prefix: liveLabel })
+        : createElement('span', { className: 'dsh-dschat-think-label' }, label),
+      createElement(CaretIcon, { size: 11 }),
+    ),
+    /*
+     * The reasoning. The wrapper is the ANIMATED track (the grid row that goes
+     * 0fr -> 1fr); the body inside it is the scroll box, and it is also the
+     * collapse control while it is up — the summary line is gone once this is
+     * fully open, so the body has to be clickable. Announced as a button (it IS
+     * one) with `aria-expanded`, so the state is readable without seeing the
+     * missing line.
+     */
+    bodyMounted && createElement(
+      'div',
+      { className: 'dsh-dschat-think-fold' },
+      createElement(
+        'div',
+        {
+          className: 'dsh-dschat-think-body dsh-dschat-scroll',
+          ref: bodyRef,
+          role: 'button',
+          tabIndex: phase === 'open' ? 0 : -1,
+          ...(phase === 'open' ? {} : { 'aria-hidden': true }),
+          title: surface.collapseHint,
+          'aria-expanded': phase === 'open',
+          onClick: (event: { target: EventTarget | null }) => collapse(event.target),
+          // The event is declared as the minimum this handler reads: React
+          // passes a full KeyboardEvent (so `preventDefault` is present and
+          // the call is real — it stops Space from scrolling the panel), but
+          // the handler is written against these fields so it also works when
+          // the attribute is replayed over a hand-built event.
+          onKeyDown: (event: { key: string; target: EventTarget | null; preventDefault?: () => void }) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            // Keys pressed on a link inside the body belong to that link.
+            if (collapseFromBodyClick(event.target) === false) return
+            event.preventDefault?.()
+            setPhase('closing')
           },
-          ...renderMarkdown(source, options, copy),
-        )
-      : createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsh-dschat-think-head',
-            'aria-expanded': false,
-            onClick: () => {
-              /*
-               * Remember that this row was opened DURING the thought, so the
-               * effect above can close it when the thought ends. A row opened
-               * after the fact is the reader's own doing and stays open.
-               */
-              if (live) openedWhileLive.current = true
-              setOpen(true)
-            },
-          },
-          createElement(ThinkIcon, { size: 13 }),
-          live && liveLabel !== undefined
-            ? createElement(ThinkingLive, { text: source, prefix: liveLabel })
-            : createElement('span', { className: 'dsh-dschat-think-label' }, label),
-          createElement(CaretIcon, { size: 11 }),
-        ),
+        },
+        ...renderMarkdown(source, options, copy),
+      ),
+    ),
   )
 }
 

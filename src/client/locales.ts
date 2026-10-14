@@ -74,6 +74,8 @@ export interface DSchatDict {
   'action.send': string
   'action.startTransfer': string
   'action.exportFile': string
+  'action.export': string
+  'action.export.hint': string
 
   'brand.title': string
   'lamp.green': string
@@ -180,6 +182,8 @@ export interface DSchatDict {
   'engine.notice.retrying': string
   'engine.notice.unreachable': string
   'engine.notice.staleHost': string
+  /** 重新生成 / 评价 on a host half that predates the route (HTTP 404). */
+  'engine.notice.staleHostAction': string
   'engine.notice.needLogin': string
   'engine.notice.queued': string
 
@@ -212,6 +216,77 @@ export interface DSchatDict {
   'msg.code.language': string
   'msg.copyThinking': string
   'msg.regenerate': string
+  /**
+   * 重新生成 in flight. The page is generating a replacement for the answer, so
+   * the button spins and says what it is waiting for — a dead 5–20 s button with
+   * no label is the "点了没反应" complaint in its most ordinary form.
+   */
+  'msg.regenerating': string
+  'msg.regenerated': string
+  'msg.regenerate.failed': string
+  /** Why 重新生成 is unavailable: the page answers one question at a time. */
+  'msg.regenerate.busy': string
+  'msg.like': string
+  'msg.like.on': string
+  'msg.dislike': string
+  'msg.dislike.on': string
+  /**
+   * The feedback controls drive the WEB page, and that is stated where it can
+   * fail: a reader who is told the rating went to their account understands why
+   * the page has to be reachable, and one whose rating only looks like it landed
+   * is looking at a lie.
+   */
+  'msg.feedback.working': string
+  /** The 反馈 form, which 点踩 on the web page requires (see the engine note). */
+  'feedback.title': string
+  'feedback.sub': string
+  'feedback.reason.harmful': string
+  'feedback.reason.false': string
+  'feedback.reason.unhelpful': string
+  'feedback.reason.other': string
+  'feedback.note': string
+  'feedback.note.placeholder': string
+  'feedback.cancel': string
+  'feedback.submit': string
+  'msg.feedback.liked': string
+  'msg.feedback.disliked': string
+  'msg.feedback.cleared': string
+  'msg.feedback.failed': string
+  'msg.share': string
+  /**
+   * The 分享 confirm form.
+   *
+   * 分享 on the web page PUBLISHES a link anyone can open, so the panel asks
+   * first and says so in the page's own words (`shareCreateLinkInform`), which
+   * also names where the link can be removed.
+   */
+  'share.title': string
+  'share.warning': string
+  'share.cancel': string
+  'share.confirm': string
+  'share.creating': string
+  'share.done': string
+  'share.manage': string
+  'share.copyText': string
+  'msg.shared': string
+  /* The Q&A picker, shared by 分享 and 导出 markdown. */
+  'qa.all': string
+  'qa.count': string
+  'qa.blank': string
+  'qa.streaming': string
+  'qa.empty.share': string
+  'qa.empty.export': string
+  'export.pick.title': string
+  'export.pick.note': string
+  'export.pick.confirm': string
+  'export.creating': string
+  /** 导出到: the label above the destination field. */
+  'export.dir': string
+  /** Shown in the destination field while the host has not answered yet. */
+  'export.dir.placeholder': string
+  /** 选择文件夹 — opens the OS folder picker. */
+  'export.dir.choose': string
+  'export.dir.choose.hint': string
   'msg.edit': string
   'msg.quote': string
   'msg.retry': string
@@ -264,6 +339,8 @@ export interface DSchatDict {
   'toast.copied': string
   'toast.thinkingCopied': string
   'toast.codeCopied': string
+  /** Every copy action's failure: the clipboard refused (permission, no document focus). */
+  'toast.copyFailed': string
   'toast.send.failed': string
   'toast.wake.failed': string
   'toast.send.needLogin': string
@@ -286,6 +363,8 @@ export interface DSchatDict {
   'toast.clear.failed': string
   'toast.export.done': string
   'toast.export.failed': string
+  /** The chosen export folder could not be used, so nothing was written. */
+  'toast.export.dirFailed': string
   'toast.transfer.done': string
   'toast.transfer.continued': string
   'toast.transfer.failed': string
@@ -424,6 +503,9 @@ export const zh: DSchatDict = {
   'action.send': '发送',
   'action.startTransfer': '开始迁移',
   'action.exportFile': '导出 markdown',
+  /* The action row's own export control: short label, the full name in the tooltip. */
+  'action.export': '导出',
+  'action.export.hint': '导出 markdown：可以选择要写进文件的问题与回答（默认全选）',
 
   /*
    * Header: the product mark, and the status lamp that replaced the three
@@ -443,16 +525,17 @@ export const zh: DSchatDict = {
   'composer.actions': '会话与迁移操作',
   /*
    * The 「···」 at the row's right end. It names WHAT the menu holds rather than
-   * saying "更多" — the four entries are exactly what a reader goes looking for
-   * by name (导出 markdown, 运行状态), so the tooltip and the accessible name
-   * carry those words instead of a shrug.
+   * saying "更多" — the entries are exactly what a reader goes looking for by
+   * name (运行状态 / 打开登录窗口), so the tooltip and the accessible name carry
+   * those words instead of a shrug. 导出 markdown is NOT in it any more: it is a
+   * verb about the conversation and lives on the action row beside 迁移.
    */
-  'more.hint': '更多：运行状态 / 导出 markdown / 登录窗口 / 关闭浏览器',
+  'more.hint': '更多：运行状态 / 登录窗口 / 关闭浏览器',
   'attach.show': '查看附件',
   'attach.remove': '移除附件',
   'attach.remove.hint': '移除附件 {name}',
-  'transfer.short': 'DSH 迁移',
-  'transfer.short.hint': '在 Harness 中继续：把这次网页对话蒸馏成简报，或按原文迁移成 harness 会话',
+  'transfer.short': '接力',
+  'transfer.short.hint': '接力：把这次网页对话交给 Harness —— 蒸馏成任务简报，或按原文带过去',
 
   'rail.search': '搜索会话…',
   'rail.search.hint': '搜索会话内容（⌘K）',
@@ -499,6 +582,7 @@ export const zh: DSchatDict = {
   'engine.notice.retrying': '正在启动…',
   'engine.notice.unreachable': '本机引擎没有响应启动请求（/wake 无应答），消息没有发出去。请检查网络后重试。',
   'engine.notice.staleHost': '宿主半区还是旧版本（/wake 返回 404），已改为打开登录窗口。重启 Harness 后自动启动即可用。',
+  'engine.notice.staleHostAction': '宿主半区还是旧版本，这个功能需要重启 Harness 之后才能用（面板会随刷新更新，宿主只在重启时换版本）。',
   'engine.notice.needLogin': '网页端需要登录：请在弹出的浏览器窗口里完成登录，登录成功后这条提示会自动消失。',
   'engine.notice.queued': '待发消息暂时发不出去（网页端没起来）。消息还在队列里，启动成功后会自动发出。',
 
@@ -540,6 +624,62 @@ export const zh: DSchatDict = {
   'msg.code.language': '文本',
   'msg.copyThinking': '复制思考过程',
   'msg.regenerate': '重新生成',
+  'msg.regenerating': '正在重新生成…',
+  'msg.regenerated': '已重新生成',
+  'msg.regenerate.failed': '重新生成失败',
+  'msg.regenerate.busy': '正在生成回复，等这一轮结束再重新生成',
+  'msg.like': '喜欢',
+  'msg.like.on': '取消喜欢',
+  'msg.dislike': '不喜欢',
+  'msg.dislike.on': '取消不喜欢',
+  'msg.feedback.working': '正在同步到网页端…',
+  'feedback.title': '这条回答哪里不好？',
+  'feedback.sub': '评价会提交到 DeepSeek 网页端账号；选一个原因即可。',
+  'feedback.reason.harmful': '有害/不安全',
+  'feedback.reason.false': '虚假信息',
+  'feedback.reason.unhelpful': '没有帮助',
+  'feedback.reason.other': '其他',
+  'feedback.note': '补充说明（可选）',
+  'feedback.note.placeholder': '你希望得到什么样的回答？',
+  'feedback.cancel': '取消',
+  'feedback.submit': '提交',
+  'msg.feedback.liked': '已点赞（网页端）',
+  'msg.feedback.disliked': '已点踩（网页端）',
+  'msg.feedback.cleared': '已取消评价（网页端）',
+  'msg.feedback.failed': '评价失败',
+  'msg.share': '分享',
+  'share.title': '创建公开链接？',
+  'share.warning': '任何拿到链接的人都能查看这段对话（无需登录），请先确认里面没有敏感或隐私内容。链接可以随时在网页端「设置 → 数据管理」里删除。',
+  'share.cancel': '取消',
+  'share.confirm': '创建链接',
+  'share.creating': '正在创建…',
+  'share.done': '已创建公开链接，链接已复制',
+  'share.manage': '管理链接',
+  'share.copyText': '改为复制文本',
+  'msg.shared': '已复制分享内容',
+
+  /*
+   * The Q&A picker, shared by 分享 and 导出 markdown (see qa-picker.tsx).
+   *
+   * 「组对话」 is the web page's own wording for the unit — its bar says
+   * 「已选择 N 组对话」 — so the count here reads the same as the page the link
+   * will be created on.
+   */
+  'qa.all': '全选',
+  'qa.count': '已选择 {count} 组对话',
+  'qa.blank': '（无内容）',
+  'qa.streaming': '正在生成…',
+  'qa.empty.share': '这段对话还没有可以分享的问答。',
+  'qa.empty.export': '这段对话还没有可以导出的内容。',
+
+  'export.pick.title': '导出 markdown',
+  'export.pick.note': '默认全部导出；取消某一组问答时，问题和回答会一起取消。文件写到下面这个文件夹，下次打开还是它。',
+  'export.pick.confirm': '导出',
+  'export.creating': '正在导出…',
+  'export.dir': '导出到',
+  'export.dir.placeholder': '下载文件夹',
+  'export.dir.choose': '选择文件夹',
+  'export.dir.choose.hint': '打开系统的文件夹选择窗口；改完就一直是它，直到你再改一次',
   'msg.edit': '编辑重发',
   'msg.quote': '引用到输入框',
   'msg.retry': '重试',
@@ -596,6 +736,7 @@ export const zh: DSchatDict = {
   'toast.send.queued': '已排队：上一条回复结束后自动发送',
   'toast.thinkingCopied': '已复制思考过程',
   'toast.codeCopied': '已复制代码块',
+  'toast.copyFailed': '复制失败：浏览器拒绝了剪贴板写入，请手动选中文本复制',
   'toast.attach.failed': '添加文件失败：{error}',
   'toast.attach.tooBig': '「{name}」超过 {limit}，没有添加',
   'toast.attach.tooMany': '一次最多添加 {limit} 个文件，多余的没有添加',
@@ -613,6 +754,7 @@ export const zh: DSchatDict = {
   'toast.clear.failed': '清空失败：{error}',
   'toast.export.done': '已导出到 {file}',
   'toast.export.failed': '导出失败：{error}',
+  'toast.export.dirFailed': '这个导出文件夹用不了，没有导出',
   'toast.transfer.done': '已创建会话并打开',
   'toast.transfer.continued': '已追加到会话',
   'toast.transfer.failed': '迁移失败：{error}',
@@ -726,6 +868,8 @@ export const en: DSchatDict = {
   'action.send': 'Send',
   'action.startTransfer': 'Start transfer',
   'action.exportFile': 'Export markdown',
+  'action.export': 'Export',
+  'action.export.hint': 'Export markdown: choose which questions and answers go into the file (all by default)',
 
   'brand.title': 'DeepSeek Chat',
   'lamp.green': 'Running normally',
@@ -734,12 +878,12 @@ export const en: DSchatDict = {
   'lamp.amber': 'Starting or signed out',
 
   'composer.actions': 'Conversation and transfer actions',
-  'more.hint': 'More: runtime status / export markdown / login window / close browser',
+  'more.hint': 'More: runtime status / login window / close browser',
   'attach.show': 'View attachment',
   'attach.remove': 'Remove attachment',
   'attach.remove.hint': 'Remove attachment {name}',
-  'transfer.short': 'Migrate to DSH',
-  'transfer.short.hint': 'Continue in Harness: distill this web conversation into a brief, or migrate it verbatim into a harness session',
+  'transfer.short': 'Hand off',
+  'transfer.short.hint': 'Hand off: give this web conversation to Harness — distilled into a task brief, or carried over verbatim',
 
   'rail.search': 'Search conversations…',
   'rail.search.hint': 'Search conversation text (⌘K)',
@@ -786,6 +930,7 @@ export const en: DSchatDict = {
   'engine.notice.retrying': 'Starting…',
   'engine.notice.unreachable': 'The local engine did not answer the start request (/wake), so the message was not sent. Check your connection and retry.',
   'engine.notice.staleHost': 'The host half is an older build (/wake answered 404); the login window was opened instead. Restart Harness and automatic start will work.',
+  'engine.notice.staleHostAction': 'The host half is an older build — this action needs a Harness restart (the panel updates on refresh, the host only on restart).',
   'engine.notice.needLogin': 'DeepSeek web needs a sign-in: finish it in the browser window that just opened — this notice disappears on its own once you are in.',
   'engine.notice.queued': 'Queued messages cannot go out while the web engine is down. They stay in the queue and leave automatically once it starts.',
 
@@ -827,6 +972,55 @@ export const en: DSchatDict = {
   'msg.code.language': 'text',
   'msg.copyThinking': 'Copy thinking process',
   'msg.regenerate': 'Regenerate',
+  'msg.regenerating': 'Regenerating…',
+  'msg.regenerated': 'Regenerated',
+  'msg.regenerate.failed': 'Regenerate failed',
+  'msg.regenerate.busy': 'A reply is still generating — regenerate after this turn ends',
+  'msg.like': 'Like',
+  'msg.like.on': 'Remove like',
+  'msg.dislike': 'Dislike',
+  'msg.dislike.on': 'Remove dislike',
+  'msg.feedback.working': 'Sending to the web page…',
+  'feedback.title': 'What was wrong with this answer?',
+  'feedback.sub': 'The rating goes to your DeepSeek web account; pick a reason.',
+  'feedback.reason.harmful': 'Harmful / unsafe',
+  'feedback.reason.false': 'False information',
+  'feedback.reason.unhelpful': 'Not helpful',
+  'feedback.reason.other': 'Other',
+  'feedback.note': 'Details (optional)',
+  'feedback.note.placeholder': 'What would a better answer look like?',
+  'feedback.cancel': 'Cancel',
+  'feedback.submit': 'Submit',
+  'msg.feedback.liked': 'Liked (on the web page)',
+  'msg.feedback.disliked': 'Disliked (on the web page)',
+  'msg.feedback.cleared': 'Rating removed (on the web page)',
+  'msg.feedback.failed': 'Rating failed',
+  'msg.share': 'Share',
+  'share.title': 'Create a public link?',
+  'share.warning': 'Anyone with the link can view this conversation — no sign-in needed. Check it for sensitive or private content first. You can delete the link anytime in the web app under Settings → Data.',
+  'share.cancel': 'Cancel',
+  'share.confirm': 'Create link',
+  'share.creating': 'Creating…',
+  'share.done': 'Public link created and copied',
+  'share.manage': 'Manage links',
+  'share.copyText': 'Copy text instead',
+  'msg.shared': 'Share text copied',
+
+  'qa.all': 'Select all',
+  'qa.count': '{count} conversation(s) selected',
+  'qa.blank': '(empty)',
+  'qa.streaming': 'Generating…',
+  'qa.empty.share': 'This conversation has no exchange that can be shared yet.',
+  'qa.empty.export': 'This conversation has nothing to export yet.',
+
+  'export.pick.title': 'Export markdown',
+  'export.pick.note': 'Everything is exported by default; clearing one exchange clears its question and answer together. The file is written to the folder below, and that folder is remembered.',
+  'export.pick.confirm': 'Export',
+  'export.creating': 'Exporting…',
+  'export.dir': 'Export to',
+  'export.dir.placeholder': 'your Downloads folder',
+  'export.dir.choose': 'Choose folder',
+  'export.dir.choose.hint': 'Open the system folder picker; the folder you pick stays the destination until you change it',
   'msg.edit': 'Edit and resend',
   'msg.quote': 'Quote into composer',
   'msg.retry': 'Retry',
@@ -883,6 +1077,7 @@ export const en: DSchatDict = {
   'toast.send.queued': 'Queued: it goes out as soon as the current reply finishes',
   'toast.thinkingCopied': 'Thinking process copied',
   'toast.codeCopied': 'Code copied',
+  'toast.copyFailed': 'Copy failed: the browser refused clipboard access — select the text and copy manually',
   'toast.attach.failed': 'Could not attach the file: {error}',
   'toast.attach.tooBig': '"{name}" is over {limit} and was not added',
   'toast.attach.tooMany': 'At most {limit} files at a time; the extras were not added',
@@ -900,6 +1095,7 @@ export const en: DSchatDict = {
   'toast.clear.failed': 'Clear failed: {error}',
   'toast.export.done': 'Exported to {file}',
   'toast.export.failed': 'Export failed: {error}',
+  'toast.export.dirFailed': 'That export folder is not usable, so nothing was written',
   'toast.transfer.done': 'Session created and opened',
   'toast.transfer.continued': 'Appended to the session',
   'toast.transfer.failed': 'Transfer failed: {error}',

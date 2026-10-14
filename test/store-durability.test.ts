@@ -148,3 +148,41 @@ test('the write flushes the data before the rename and the directory after it', 
   assert.match(body, /const tmp = `\$\{this\.file\}\.\$\{String\(process\.pid\)\}/, 'the temp name carries the pid')
   assert.match(body, /if \(!this\.writable\) return/, 'and an unwritable store writes nothing at all')
 })
+
+/**
+ * `deleteMessage` exists for one caller — 重新生成 — and the two things that make
+ * it safe for that caller are what this pins:
+ *
+ *   - it removes exactly the message named, leaving the question it answered (and
+ *     everything else) alone. A regenerate that lost its question too would ask
+ *     the page for an answer with nothing to answer;
+ *   - it clears the chat's `streaming` flag when the removed row was the last
+ *     streaming one. The flag drives the panel's caret and the tail feed, so a
+ *     chat left flagged would spin forever over a transcript with no assistant
+ *     row in it.
+ */
+test('deleteMessage removes one message, and only that one', () => {
+  const dir = sandbox()
+  try {
+    const store = new TranscriptStore({ dataDir: dir })
+    const chat = store.createChat('deepseek-chat')
+    store.appendMessage(chat.id, { id: 'u1', role: 'user', content: '问题一', ts: 1 })
+    store.appendMessage(chat.id, { id: 'a1', role: 'assistant', content: '回答一', ts: 2 })
+    store.appendMessage(chat.id, { id: 'u2', role: 'user', content: '问题二', ts: 3 })
+    store.appendMessage(chat.id, { id: 'a2', role: 'assistant', content: '回答二', ts: 4, streaming: true })
+
+    assert.equal(store.deleteMessage(chat.id, 'a2'), true, 'the answer was there to remove')
+    assert.deepEqual(
+      store.getChat(chat.id)?.messages.map(message => message.id),
+      ['u1', 'a1', 'u2'],
+      'exactly the named message is gone; the question it answered stays',
+    )
+    assert.equal(store.getChat(chat.id)?.streaming, false, 'removing the streaming row clears the flag')
+
+    assert.equal(store.deleteMessage(chat.id, 'a2'), false, 'a second delete reports that nothing was removed')
+    assert.equal(store.deleteMessage(chat.id, 'nope'), false, 'an unknown id is not an error, just a no-op')
+    assert.equal(store.deleteMessage('no-such-chat', 'u1'), false, 'and neither is an unknown conversation')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

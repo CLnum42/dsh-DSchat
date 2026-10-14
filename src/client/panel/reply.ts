@@ -45,3 +45,29 @@ export const replyBody = answerBody
 export function firstLine(content: string): string {
   return replyBody(content).split('\n')[0]?.trim() ?? ''
 }
+
+/**
+ * What 分享 puts on the clipboard.
+ *
+ * Plain markdown rather than a link: these conversations live in the reader's own
+ * DeepSeek account, and the web page's own 分享 produces a public link through a
+ * flow this plugin does not own (it opens the page's dialog, which the engine's
+ * selector surface cannot drive reliably — the same reason 朗读 is not carried).
+ * What the reader actually wants to hand to someone else is the exchange, so the
+ * clipboard gets the QUESTION and the ANSWER under the conversation's title.
+ *
+ * The reasoning is excluded, exactly as in 复制 and in the markdown export: it is
+ * the model's working, not the text being shared. It lives here rather than in
+ * the panel so the shape of a shared excerpt is a pure function that can be
+ * asserted on — see test/reply.test.ts.
+ *
+ * @param title - the conversation title (the panel resolves it, see `chatTitleOf`).
+ * @param question - the question this answer replies to ('' when there is none).
+ * @param answer - the answer body, already stripped of its reasoning wrapper.
+ */
+export function shareText(title: string, question: string, answer: string): string {
+  const lines = [`# ${title}`, '']
+  if (question !== '') lines.push(`> ${question}`, '')
+  lines.push(answer.trim(), '', '— DeepSeek')
+  return lines.join('\n')
+}
